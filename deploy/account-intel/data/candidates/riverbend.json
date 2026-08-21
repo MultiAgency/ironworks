@@ -1,0 +1,34 @@
+{
+  "_synthetic": "SYNTHETIC DEMO PROSPECTS — invented organizations, not real. Written from MultiAgency's own side (the notes speak as the vendor), which is why the external-client proof books are separate copies: see multi/verify/fixtures/README.md. Domains are .example (RFC 2606) so no fabricated detail is ever attached to a registrable name.",
+  "record_id": "RB-002",
+  "account": {
+    "name": "Riverbend Logistics",
+    "domain": "riverbend-logistics.example",
+    "industry": "Third-party logistics (3PL)",
+    "employees": 1200,
+    "headquarters": "Memphis, TN",
+    "cloud": null,
+    "stated_problem": null,
+    "current_tooling": null,
+    "budget": null,
+    "timeline": null,
+    "decision_process": null,
+    "economic_buyer": null
+  },
+  "contacts": [
+    {
+      "name": "Marcus Hale",
+      "title": "COO",
+      "engaged": false,
+      "notes": "Enthusiastic about 'using AI somewhere'; has not named a specific workflow or pain."
+    }
+  ],
+  "activities": [
+    {
+      "activity_id": "RB-INT-01",
+      "occurred_at": "2026-08-07",
+      "kind": "call",
+      "body": "Intro call via partner referral. COO Marcus Hale enthusiastic about using AI 'somewhere'; no specific workflow or pain named, no concrete process detail yet."
+    }
+  ]
+}

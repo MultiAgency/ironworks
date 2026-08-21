@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-113",
+ "account": {
+  "name": "Marlowe Staffing",
+  "domain": "marlowe-staffing.example",
+  "industry": "Staffing",
+  "employees": 110,
+  "headquarters": "Columbus, OH",
+  "cloud": null,
+  "stated_problem": "Timesheets are chased by phone each week.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-113-A1",
+   "occurred_at": "2026-07-25",
+   "kind": "call",
+   "body": "Engaged ops manager, no decision authority named."
+  }
+ ]
+}

@@ -1,0 +1,16 @@
+# Keeps the pinned externals in .github/workflows/ from aging silently.
+#
+# Three versions are pinned there on purpose — actions/*, the gitleaks image in
+# secret-scan.yml, and ruff in seam-ci.yml's python-lint job. Pinning is what makes the
+# gates reproducible; it is also what makes them go stale with nothing to say so. This
+# opens a PR when one moves, so the bump is a reviewed decision instead of a discovery.
+#
+# Not covered here, deliberately: the gitleaks rev in .pre-commit-config.yaml. That file
+# documents `pre-commit autoupdate` as its own maintenance path, and two mechanisms
+# updating one pin would race.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

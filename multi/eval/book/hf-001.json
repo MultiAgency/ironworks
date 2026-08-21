@@ -1,0 +1,40 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "HF-001",
+ "account": {
+  "name": "Halcyon Freight",
+  "domain": "halcyon-freight.example",
+  "industry": "Freight brokerage",
+  "employees": 340,
+  "headquarters": "Memphis, TN",
+  "cloud": null,
+  "stated_problem": "Dispatchers rekey load data between three systems; errors cause missed pickups.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [
+  {
+   "name": "Rosa Delgado",
+   "title": "VP Operations",
+   "engaged": true,
+   "notes": "Owns dispatch. Responsive."
+  }
+ ],
+ "activities": [
+  {
+   "activity_id": "HF-A1",
+   "occurred_at": "2026-06-11",
+   "kind": "call",
+   "body": "Rosa confirmed the rekeying problem. Said finance has approved $40k for automation this fiscal year and she can spend it."
+  },
+  {
+   "activity_id": "HF-A2",
+   "occurred_at": "2026-07-30",
+   "kind": "call",
+   "body": "Follow-up with Rosa. She now says there is no budget this fiscal year \u2014 the $40k was reallocated to a WMS upgrade. Any spend would be next FY."
+  }
+ ]
+}

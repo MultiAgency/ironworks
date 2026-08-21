@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "RE-009",
+ "account": {
+  "name": "Redwood Logistics EMEA",
+  "domain": "redwood-logistics-emea.example",
+  "industry": "Third-party logistics",
+  "employees": 400,
+  "headquarters": "Rotterdam, NL",
+  "cloud": null,
+  "stated_problem": null,
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "RE-A1",
+   "occurred_at": "2026-06-02",
+   "kind": "note",
+   "body": "Separate legal entity and separate budget from the US business. No contact established."
+  }
+ ]
+}

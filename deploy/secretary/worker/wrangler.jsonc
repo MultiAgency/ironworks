@@ -1,0 +1,29 @@
+{
+  // Aide — the MultiAgency secretary (Telegram webhook → Cloudflare Worker).
+  // Deploy: wrangler deploy   |   Secrets: wrangler secret put SECRETARY_BOT_TOKEN / IRONCLAW_TOKEN / WEBHOOK_SECRET
+  "name": "multiagency-secretary",
+  "main": "worker.js",
+  "compatibility_date": "2026-07-01",
+  // Bundle two source-of-truth files as text modules: ../PERSONA.md (the canonical persona)
+  // and the repo-root MODEL_PIN. Rules match by GLOB, not by extension, which is why the
+  // extensionless pin is addressable here at all.
+  "rules": [
+    { "type": "Text", "globs": ["**/*.md"], "fallthrough": true },
+    { "type": "Text", "globs": ["**/MODEL_PIN"], "fallthrough": true }
+  ],
+  "kv_namespaces": [
+    { "binding": "THREADS", "id": "<your-kv-namespace-id>" }
+  ],
+  "vars": {
+    "IRONCLAW_API": "https://your-secretary-backend.example.com",
+    "TEAM_CHAT_ID": "-100XXXXXXXXXXXXX"
+    // MODEL is intentionally unset. worker.js imports the repo-root MODEL_PIN as a text
+    // module (see "rules" above) and parses it at build time, so the pin really does govern
+    // — this comment used to claim a runtime fallback that could not exist, and the literal
+    // it described was the live model selection.
+    // Setting MODEL here OVERRIDES the pin — a proxied model gets no TEE privacy and no
+    // prompt caching. Set it only for a deliberate one-off.
+    // NOTE: the binding is at BUILD time, so a MODEL_PIN bump reaches the Worker only on the
+    // next `wrangler deploy`.
+  }
+}

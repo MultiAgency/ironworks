@@ -1,0 +1,26 @@
+# Local secret-scanning gate — blocks a commit that contains a secret.
+#
+# One-time setup:
+#   pipx install pre-commit     # or: brew install pre-commit
+#   pre-commit install
+#
+# After that, gitleaks runs automatically on every `git commit`.
+# Keep the pin current with:  pre-commit autoupdate
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2
+    hooks:
+      - id: gitleaks
+
+  # gitleaks above scans STAGED content, which is the right scope for a secret gate but
+  # leaves untracked-and-unignored files unscanned by anything at all. This closes that:
+  # every path must be tracked (gated) or ignored (a recorded decision). See the script's
+  # header for the incident that motivated it.
+  - repo: local
+    hooks:
+      - id: gate-coverage
+        name: every path is tracked or ignored
+        entry: deploy/gate-coverage.sh
+        language: script
+        pass_filenames: false
+        always_run: true

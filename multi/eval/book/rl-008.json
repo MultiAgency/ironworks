@@ -1,0 +1,34 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "RL-008",
+ "account": {
+  "name": "Redwood Logistics",
+  "domain": "redwood-logistics.example",
+  "industry": "Third-party logistics",
+  "employees": 900,
+  "headquarters": "Sacramento, CA",
+  "cloud": null,
+  "stated_problem": "Carrier performance reporting is assembled by hand each month.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [
+  {
+   "name": "Dominic Vetter",
+   "title": "Director of Carrier Ops",
+   "engaged": true,
+   "notes": "US network only."
+  }
+ ],
+ "activities": [
+  {
+   "activity_id": "RL-A1",
+   "occurred_at": "2026-07-15",
+   "kind": "call",
+   "body": "Scoped the monthly carrier scorecard. US network only; explicitly said EMEA is a separate P&L he does not control."
+  }
+ ]
+}

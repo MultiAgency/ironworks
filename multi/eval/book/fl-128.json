@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-128",
+ "account": {
+  "name": "Corbin Electrical Contractors",
+  "domain": "corbin-electrical-contractors.example",
+  "industry": "Electrical contracting",
+  "employees": 160,
+  "headquarters": "Albuquerque, NM",
+  "cloud": null,
+  "stated_problem": "Job costing is reconciled monthly by hand.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-128-A1",
+   "occurred_at": "2026-07-05",
+   "kind": "call",
+   "body": "Estimator engaged; owner sceptical of software."
+  }
+ ]
+}

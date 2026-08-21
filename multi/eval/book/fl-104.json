@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-104",
+ "account": {
+  "name": "Dunmore Textiles",
+  "domain": "dunmore-textiles.example",
+  "industry": "Textiles",
+  "employees": 310,
+  "headquarters": "Greenville, SC",
+  "cloud": null,
+  "stated_problem": null,
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-104-A1",
+   "occurred_at": "2026-04-05",
+   "kind": "call",
+   "body": "Cold outreach reply: 'not now, maybe next year'."
+  }
+ ]
+}

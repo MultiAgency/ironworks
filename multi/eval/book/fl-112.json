@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-112",
+ "account": {
+  "name": "Lowry Agricultural",
+  "domain": "lowry-agricultural.example",
+  "industry": "Agriculture",
+  "employees": 380,
+  "headquarters": "Wichita, KS",
+  "cloud": null,
+  "stated_problem": "Field reports are collected on paper.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-112-A1",
+   "occurred_at": "2026-05-19",
+   "kind": "call",
+   "body": "Seasonal business; asked to reconnect in Q4."
+  }
+ ]
+}

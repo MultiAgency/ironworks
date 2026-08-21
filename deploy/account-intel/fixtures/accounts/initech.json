@@ -1,0 +1,22 @@
+{
+  "source": "fixture:crm",
+  "record_id": "INITECH-003",
+  "retrieved_at": "2026-08-16T09:00:00Z",
+  "account": {
+    "name": "Initech",
+    "domain": "initech.example",
+    "industry": "SaaS — financial reporting software",
+    "employees": 2600,
+    "headquarters": "Seattle, US",
+    "cloud": { "providers": ["AWS", "GCP"], "footprint": "multi-cloud, multi-region, 30+ accounts; very large spend" },
+    "stated_problem": null,
+    "current_tooling": "unknown",
+    "budget": null,
+    "timeline": null,
+    "decision_process": null
+  },
+  "contacts": [],
+  "open_opportunities": [],
+  "recent_activities": [],
+  "missing": ["stated_problem", "budget", "timeline", "decision_process", "any_engaged_contact"]
+}

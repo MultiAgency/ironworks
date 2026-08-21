@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-118",
+ "account": {
+  "name": "Ravenswood Chemicals",
+  "domain": "ravenswood-chemicals.example",
+  "industry": "Specialty chemicals",
+  "employees": 420,
+  "headquarters": "Baton Rouge, LA",
+  "cloud": null,
+  "stated_problem": "Batch records are transcribed from the floor.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-118-A1",
+   "occurred_at": "2026-06-09",
+   "kind": "call",
+   "body": "Regulated environment; long procurement cycle expected."
+  }
+ ]
+}

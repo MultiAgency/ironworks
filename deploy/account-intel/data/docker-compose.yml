@@ -1,0 +1,99 @@
+# MultiAgency internal Account data layer — Postgres + the read-only Account Service.
+# The agent container joins the `multiagency-data` network and reaches the service by name.
+# DB credentials live only in the service env; the agent never sees them.
+name: multiagency-data
+services:
+  account-db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      # No default password: dev-up.sh and prod-up.sh both mint a strong one into
+      # ~/.agency/account-db.env. A bare `docker compose up` without it must refuse, not
+      # silently fall back to a well-known value. (Applies at first initdb only.)
+      POSTGRES_PASSWORD: ${ACCOUNT_DB_PASSWORD:?set via ~/.agency/account-db.env — run dev-up.sh or prod-up.sh}
+      POSTGRES_DB: accounts
+    volumes:
+      - account-db-data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d accounts"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    networks: [multiagency-data]
+    # Hardening — parity with the MT instance: a runaway must not starve the box, and
+    # this container (client org data) drops all caps. postgres:16-alpine boots root then drops
+    # via su-exec, so re-add only the verified-minimal startup set.
+    mem_limit: 1g
+    cpus: 0.5
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+
+  account-service:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      account-db: { condition: service_healthy }
+    environment:
+      ACCOUNT_DB_DSN: postgresql://postgres:${ACCOUNT_DB_PASSWORD:?set via ~/.agency/account-db.env — run dev-up.sh or prod-up.sh}@account-db:5432/accounts
+      # identity implies org: {token: org}. DEV/DEMO tokens only — injected by dev-up.sh via
+      # ACCOUNT_DEV_IDENTITIES; empty in production (prod-up.sh), where the ONLY identities are
+      # per-client minted tokens in the hot-reloaded file below. Never commit a live token.
+      ACCOUNT_IDENTITIES: '${ACCOUNT_DEV_IDENTITIES:-}'
+      # client-org tokens are HOT-RELOADED from this file (written by provision.sh) — no restart.
+      # The DIRECTORY is mounted (not the file): atomic tmp+rename replaces the inode, and a
+      # single-file bind would pin the old one.
+      ACCOUNT_IDENTITIES_FILE: /identities/identities.json
+      PORT: "8443"
+    volumes:
+      # SCOPED mount: only deploy/account-intel — never the whole repo. This is the
+      # container holding every client's org data; a whole-tree mount handed container-root
+      # a readable view of every gitignored live secret in the checkout (multi/instance/.env
+      # included, host chmod notwithstanding). Every in-container path stays valid:
+      # service CMD, seed.py FIXTURE_DIR, dev-up.sh REAL_DATA_DIR all live under
+      # /app/deploy/account-intel.
+      - ..:/app/deploy/account-intel:ro
+      - ~/.agency/account-identities:/identities:ro
+    # Plain HTTP on the private network — reached only by the trusted backend, not by the model.
+    # (TLS-with-internal-CA was for the DEFERRED WASM egress path; see extension/README.md.)
+    ports:
+      - "127.0.0.1:8443:8443"     # reached by the trusted backend over localhost / the private network
+    networks: [multiagency-data]
+    # Hardening: a Docker healthcheck (the host watchdog is a separate backstop), resource
+    # bounds, dropped caps, no-new-privileges, capped logs. The image ships python (no curl), so the
+    # check is a python one-liner; gunicorn binds a high port as root and needs no caps.
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8443/health', timeout=3)"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 20s
+    mem_limit: 512m
+    cpus: 0.5
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    # Container-root must READ the host-owned :ro mounts (/identities, the repo subtree). On the
+    # Linux VM, bind mounts preserve host uid, so the operator-owned 600 identities file is NOT
+    # readable by container uid 0 under a bare ALL-drop — that would 401 every client. Re-add only
+    # DAC_READ_SEARCH (bypass read + dir-traverse checks). NOT DAC_OVERRIDE: the service is
+    # read-only, so it never needs the write/exec bypass. (On Docker Desktop the mount maps to
+    # uid 0 and reads work without this; the VM is the case that needs it.)
+    cap_add: [DAC_READ_SEARCH]
+
+volumes:
+  account-db-data:
+networks:
+  multiagency-data:
+    name: multiagency-data
+    external: true          # stable shared net: the agent instance joins it too; create it once (dev-up.sh)

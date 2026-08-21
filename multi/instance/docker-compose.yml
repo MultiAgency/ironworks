@@ -1,0 +1,114 @@
+# Multi-tenant IronClaw — the production definition of the `multi` instance.
+# Postgres-backed, hosted_multi_tenant (SecureDefault). Secrets come from .env
+# (gitignored, chmod 600) — every interpolation below FAILS FAST if unset: an absent
+# .env must refuse to start, never boot postgres with an empty superuser password.
+#
+# OPERATIONAL CONSTRAINTS (load-bearing — keep true when changing this file):
+#   - SINGLE WRITER: exactly one ironclaw process per data volume / db. Never run two
+#     instances against multi_db-data, and never overlap redeploys (stop, then start).
+#   - CLEARTEXT PG IS SAFE ONLY HERE: DATABASE_SSLMODE=disable and
+#     ALLOW_REMOTE_POSTGRES_CLEAR_TEXT hold ONLY because `db` publishes no host port
+#     and is reachable solely on this compose-private network. Publishing db, or
+#     moving it off-box, revokes the assumption — turn TLS back on first.
+#   - BACKUPS: the secret master key rides in .env on the HOST disk, not in either
+#     volume — volume snapshots alone cannot decrypt the secret store, but any host
+#     backup including this directory carries key + ciphertext together. Scope
+#     host backups accordingly.
+name: multi
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${PGPW:?mint in multi/instance/.env (openssl rand -hex 24)}
+      POSTGRES_DB: ironclaw
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ironclaw"]
+      interval: 3s
+      timeout: 3s
+      retries: 25
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    # Conservative slice of the serve host (4 vCPU / 16 GB, shared with the account stack
+    # and the bridge): the db is small; a runaway must not take the box.
+    mem_limit: 2g
+    cpus: 1.0
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    security_opt:
+      - no-new-privileges:true
+    # postgres:16-alpine boots root then drops via su-exec: this is the verified
+    # minimal startup set (probe: cap_drop ALL + these five -> accepting connections).
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+
+  ironclaw:
+    # Images are built as rev-named tags (ironclaw:<9-char rev> from IRONCLAW_PIN);
+    # ironclaw:main is retagged to the current pin. See deploy/UPGRADE.md.
+    image: ${IRONCLAW_IMAGE:-ironclaw:main}
+    container_name: multiclaw     # the single multi-tenant client instance (many sealed members, one box)
+    restart: unless-stopped
+    depends_on:
+      db: { condition: service_healthy }
+    # ISOLATION RULE:
+    # this env allowlist is LOAD-BEARING. Never add an IRONCLAW_REBORN_DEV_SECRET__<handle> here.
+    # That surface is TENANT-WIDE, not per-account: IronClaw resolves a keyed tool's credential
+    # caller-first then falls back to ONE tenant-shared admin-managed scope, so a single seeded
+    # DEV_SECRET becomes usable by EVERY sealed client's turns (verified: ironclaw
+    # obligations/handler.rs secret_owner_scope). Per-client credentials ride the seam
+    # (ClientConfig, ~/.agency/clients/), never the instance env.
+    environment:
+      IRONCLAW_REBORN_PROFILE: production                      # -> hosted_multi_tenant + secure_default
+      IRONCLAW_REBORN_POSTGRES_URL: postgres://postgres:${PGPW:?mint in multi/instance/.env}@db:5432/ironclaw
+      DATABASE_SSLMODE: disable                                # safe ONLY per the cleartext-pg constraint above
+      IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT: "true"
+      IRONCLAW_REBORN_SECRET_MASTER_KEY: ${MASTER_KEY:?mint in multi/instance/.env — key custody, see header}
+      IRONCLAW_REBORN_WEBUI_TOKEN: ${WEBUI_TOKEN:?mint in multi/instance/.env}
+      IRONCLAW_REBORN_WEBUI_USER_ID: ${WEBUI_USER:?set in multi/instance/.env}
+      NEARAI_API_KEY: ${NEARAI_API_KEY:?set in multi/instance/.env}
+      NEARAI_BASE_URL: https://cloud-api.near.ai
+      IRONCLAW_REBORN_SERVE_HOST: "0.0.0.0"                    # bound to loopback by the port map below
+      IRONCLAW_REBORN_LOG: info
+      IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON: "true"   # single process owns the pg governor
+    ports:
+      - "127.0.0.1:3020:3000"
+    volumes:
+      - ic-data:/data
+    # HTTP GET via bash /dev/tcp (the image ships bash but no curl/wget). Docker's restart
+    # policy does NOT act on 'unhealthy' by itself, and the host watchdog probes
+    # /api/health directly rather than reading this status — so this only surfaces in
+    # `docker ps` and gates depends_on. Keep both targeting the same endpoint.
+    healthcheck:
+      # /api/health, NOT /health — and assert the BODY, not just a 200. `/health` returns the
+      # web-UI SPA as text/html 200, so a check on it passes whenever the front end serves even
+      # if the runtime behind it is dead. `/api/health` is the API's own probe and returns
+      # {"status":"healthy","channel":"reborn"}; grepping the body fails closed on an HTML page
+      # or an error JSON alike.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3000 && printf 'GET /api/health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '\"status\":\"healthy\"' <&3"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    # The big slice of the box, but bounded: one runaway turn must not starve the
+    # account service or the bridge sharing the serve host.
+    mem_limit: 8g
+    cpus: 3.0
+    pids_limit: 1024
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    security_opt:
+      - no-new-privileges:true
+    # The image is USER root: the entrypoint chowns /data + /workspace, then drops to uid
+    # 1000 via gosu. A bare cap_drop ALL breaks that boot (chown -> "Operation not permitted",
+    # gosu -> "failed switching to ironclaw"). These three are exactly what it needs; the
+    # served process still ends up as uid 1000 with no effective caps, and no-new-privileges
+    # blocks re-escalation. Harmless on an older image that does not need them.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID]
+
+volumes:
+  db-data:
+  ic-data:

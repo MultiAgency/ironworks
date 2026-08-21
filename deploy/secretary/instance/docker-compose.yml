@@ -1,0 +1,57 @@
+# Dedicated, durable secretary IronClaw instance — its own trust domain for the PUBLIC
+# prospect funnel (untrusted external DMs). Nothing internal lives here. The secretary
+# injects the Multi persona per turn (via `instructions`), so no baked persona is needed.
+# hosted-single-tenant-volume = deny-egress + ask-gated actions; own token + own volume.
+#
+# Deployed on the serve host as `secretary-ironclaw-1`, not on a workstation. This stack is
+# the IronClaw backend the Cloudflare Worker (../worker/) calls — the Worker is the front end,
+# not a replacement for it. Credentials live outside the repo in
+# ~/.agency/secretary-instance.env; a bring-up needs `--env-file` pointing at it, or freshly
+# minted WEBUI_TOKEN / WEBUI_USER (must stay `reborn-cli`) / NEARAI_API_KEY.
+name: secretary
+services:
+  ironclaw:
+    # Images are built as rev-named tags (ironclaw:<9-char rev> from IRONCLAW_PIN);
+    # ironclaw:main is retagged to the current pin. See deploy/UPGRADE.md.
+    image: ${IRONCLAW_IMAGE:-ironclaw:main}
+    restart: unless-stopped          # durable: survives reboot / Docker restart, like the fleet
+    environment:
+      IRONCLAW_REBORN_PROFILE: hosted-single-tenant-volume
+      IRONCLAW_REBORN_SERVE_HOST: "0.0.0.0"
+      IRONCLAW_REBORN_LOG: info
+      IRONCLAW_REBORN_WEBUI_TOKEN: ${WEBUI_TOKEN:?no default — the secretary instance refuses to start without it}
+      IRONCLAW_REBORN_WEBUI_USER_ID: ${WEBUI_USER:?no default — the secretary instance refuses to start without it}
+      NEARAI_API_KEY: ${NEARAI_API_KEY:?no default — the secretary instance refuses to start without it}
+      NEARAI_BASE_URL: https://cloud-api.near.ai
+    volumes:
+      - secretary-data:/data
+    ports:
+      - "127.0.0.1:3011:3000"        # localhost only; the bot reaches it here
+    # This instance faces UNTRUSTED public DMs and shares the serve host with the MT stack, so
+    # it is bounded and locked down at least as much as that one: health check via bash /dev/tcp
+    # (the image ships bash, no curl), capped logs, cap_drop ALL plus the three caps the
+    # entrypoint needs, no-new-privileges.
+    healthcheck:
+      # /api/health + body assertion, matching multi/instance — see the rationale there.
+      # `/health` serves the web-UI SPA (html 200), so a check on it goes green on the front
+      # end alone.
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3000 && printf 'GET /api/health HTTP/1.0\\r\\n\\r\\n' >&3 && grep -q '\"status\":\"healthy\"' <&3"]
+      interval: 15s
+      timeout: 5s
+      retries: 4
+      start_period: 30s
+    mem_limit: 4g
+    cpus: 2.0
+    pids_limit: 1024
+    logging:
+      driver: json-file
+      options: { max-size: "20m", max-file: "5" }
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    # The image is USER root and its entrypoint drops to uid 1000 via gosu, so it must chown
+    # /data and /workspace first. A BARE cap_drop:[ALL] fails boot ("chown: ... Operation not
+    # permitted", container exits 1). With these three it boots healthy. Matches multi/instance.
+    cap_add: [CHOWN, SETUID, SETGID]
+volumes:
+  secretary-data:

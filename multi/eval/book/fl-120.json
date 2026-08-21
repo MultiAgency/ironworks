@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-120",
+ "account": {
+  "name": "Thatcher Equipment Rental",
+  "domain": "thatcher-equipment-rental.example",
+  "industry": "Equipment rental",
+  "employees": 185,
+  "headquarters": "Tulsa, OK",
+  "cloud": null,
+  "stated_problem": "Rental returns are reconciled on paper.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-120-A1",
+   "occurred_at": "2026-06-25",
+   "kind": "call",
+   "body": "Branch manager keen; head office not engaged."
+  }
+ ]
+}

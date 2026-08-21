@@ -1,0 +1,27 @@
+# The seam bridge: Telegram groups -> per-client trusted context ingress -> MT IronClaw.
+# Runs as the non-root `multi` user; env (tokens, registry, state paths) comes from
+# /home/multi/.agency/bridge.env (chmod 600).
+# Install: cp to /etc/systemd/system/, systemctl daemon-reload, systemctl enable --now bridge
+[Unit]
+Description=MultiAgency seam bridge (multi/seam/telegram_bridge.py)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=multi
+WorkingDirectory=/opt/ironworks/multi/seam
+EnvironmentFile=/home/multi/.agency/bridge.env
+ExecStart=/usr/bin/python3 -u /opt/ironworks/multi/seam/telegram_bridge.py
+Restart=always
+RestartSec=5
+# stdlib-only process holding every client's tokens; keep it boxed in
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=tmpfs
+BindPaths=/home/multi/.agency
+BindReadOnlyPaths=/opt/ironworks
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

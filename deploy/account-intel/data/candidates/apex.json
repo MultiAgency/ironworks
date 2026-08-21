@@ -1,0 +1,34 @@
+{
+  "_synthetic": "SYNTHETIC DEMO PROSPECTS — invented organizations, not real. Written from MultiAgency's own side (the notes speak as the vendor), which is why the external-client proof books are separate copies: see multi/verify/fixtures/README.md. Domains are .example (RFC 2606) so no fabricated detail is ever attached to a registrable name.",
+  "record_id": "AX-003",
+  "account": {
+    "name": "Apex Financial",
+    "domain": "apex-financial.example",
+    "industry": "Retail bank",
+    "employees": 40000,
+    "headquarters": "New York, NY",
+    "cloud": null,
+    "stated_problem": null,
+    "current_tooling": null,
+    "budget": null,
+    "timeline": null,
+    "decision_process": null,
+    "economic_buyer": null
+  },
+  "contacts": [
+    {
+      "name": "Priya Nair",
+      "title": "Innovation Team Analyst",
+      "engaged": false,
+      "notes": "Exploratory inquiry; no budget authority; no named pain."
+    }
+  ],
+  "activities": [
+    {
+      "activity_id": "AX-INT-01",
+      "occurred_at": "2026-08-08",
+      "kind": "note",
+      "body": "Inbound curiosity from an analyst on the innovation team. Large in-house AI/ML group; heavy compliance and procurement. Nothing specific has surfaced that they'd hand to an outside agent."
+    }
+  ]
+}

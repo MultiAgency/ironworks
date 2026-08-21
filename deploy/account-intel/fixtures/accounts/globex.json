@@ -1,0 +1,24 @@
+{
+  "source": "fixture:crm",
+  "record_id": "GLOBEX-002",
+  "retrieved_at": "2026-08-16T09:00:00Z",
+  "account": {
+    "name": "Globex Consulting",
+    "domain": "globex-consulting.example",
+    "industry": "IT consulting & professional services",
+    "employees": 180,
+    "headquarters": "Austin, US",
+    "cloud": { "providers": [], "footprint": "minimal owned infrastructure; mostly client-hosted environments and a few SaaS tools" },
+    "stated_problem": "A partner saw our launch post and is 'curious what we do'.",
+    "current_tooling": "n/a — no significant cloud estate of their own",
+    "budget": null,
+    "timeline": null,
+    "decision_process": null
+  },
+  "contacts": [
+    { "name": "Sam Okafor", "title": "Partner", "engaged": true, "notes": "Inbound interest from a LinkedIn post; wants a demo." }
+  ],
+  "open_opportunities": [],
+  "recent_activities": [],
+  "missing": ["budget", "timeline", "decision_process", "owned_cloud_footprint"]
+}

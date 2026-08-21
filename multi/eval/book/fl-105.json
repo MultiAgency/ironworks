@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-105",
+ "account": {
+  "name": "Eastgate Property",
+  "domain": "eastgate-property.example",
+  "industry": "Commercial real estate",
+  "employees": 65,
+  "headquarters": "Raleigh, NC",
+  "cloud": null,
+  "stated_problem": "Lease abstracts are summarised manually from PDFs.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-105-A1",
+   "occurred_at": "2026-06-30",
+   "kind": "call",
+   "body": "Two calls. Ops lead engaged, procurement unclear."
+  }
+ ]
+}

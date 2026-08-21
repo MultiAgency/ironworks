@@ -1,0 +1,97 @@
+# ironworks — public repo of the platform, not our live deployment.
+# Credentials, infra addresses, private chat ids, and internal records must never be
+# committed. .gitignore only stops new commits — it can't scrub history or a secret
+# embedded in a tracked file (parameterize those).
+#
+# Comments here state the CLASS withheld, never the instance: a rule that explains
+# itself by describing what it hides hands the reader the thing it is hiding.
+# Delete a rule and its file together — an entry that outlives its reason stops gating.
+
+# Credentials & secrets
+.env
+*.env
+.env.*
+.dev.vars
+.dev.vars.*
+secrets*
+*.secret
+*.token
+*-token
+*.key
+*.pem
+id_rsa*
+id_ed25519*
+*.p12
+*.pfx
+*.gpg
+# ...but DO ship the placeholder templates (no real values)
+!.env.example
+!**/.env.example
+
+# Real Worker deploy config (the tracked wrangler.jsonc is a template)
+wrangler.local.jsonc
+
+# Internal records
+admin/
+
+# Names a live host. The units beside it ship, so they can be drift-checked.
+multi/serve/SETUP.md
+
+# Partner-specific commercial content. Tooling ships; personas written for one partner
+# do not. Provision from a local copy via PERSONA_SOURCE.
+agent/identity/IDEA_SCOUT.md
+
+# Positioning about an upstream project we depend on, not documentation. Its durable
+# technical claims are already in README.md and multi/README.md.
+docs/multi-tenant-cross-agent-collaboration.md
+
+# Retired experiments. broker/ publishes a deny-list where confine-member.sh uses an
+# allowlist; hq/ drove state that has no provisioning path here, so no reader could run it.
+deploy/broker/
+deploy/hq/
+
+# Operator-workstation tooling. Fleet operation ships (multi/serve/); tooling for one
+# machine does not. The audience decides, not the content.
+deploy/backup-laptop-agency.sh
+
+# The same rule aimed at the deployment rather than the workstation: each of these needs the
+# operator's own untracked env, their saved chat transcripts, or a live hostname before it
+# means anything, so a reader of this repo can never run one. multi/verify/README.md said it
+# of the first two already — they "prove nothing about the architecture that the suite above
+# doesn't." Monitoring and maintenance, not evidence and not product.
+multi/verify/test_instr_live.py
+multi/verify/verify_live_isolation.py
+deploy/repoint-hostname.sh
+
+# Personas of agents that no longer run. These are data, not code, and provision-agent.sh
+# revives one from a local copy via PERSONA_SOURCE — the same arrangement as IDEA_SCOUT
+# above, so nothing is lost operationally. What a published inventory should describe is the
+# fleet that IS, not the one that was. INTAKE is the clearest case: its experiment's tooling
+# already left this repo, so the persona documented something a reader cannot find.
+agent/identity/INTAKE.md
+agent/identity/MULTIPLEX.md
+agent/identity/OPS.md
+
+# Unlanded: nothing on the client path calls it. Ship it when its caller ships.
+multi/seam/handoff.py
+multi/seam/test_handoff_2b.py
+
+# Build / dependency / tool output
+**/*.wasm
+target/
+node_modules/
+.wrangler/
+**/*.rs.bk
+Cargo.lock.bak
+__pycache__/
+*.pyc
+
+# Named explicitly: pytest and ruff self-ignore via a .gitignore they write inside these,
+# which is the tool's decision rather than a recorded one.
+.pytest_cache/
+.ruff_cache/
+
+# Logs & OS
+*.log
+.DS_Store
+*.swp

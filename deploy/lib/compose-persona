@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+"""compose-persona — the fleet's single persona compose/verify implementation.
+
+Replaces the sed pipelines that used to live (duplicated, divergent) in
+provision-agent.sh and update-persona.sh. sed templating corrupted on '/'
+and '&' in slot values, one-line HTML comments deleted to EOF, and every
+mid-file '# ' line was eaten — each reproduced before this replaced it.
+
+  compose --persona F --tail F --slug SLUG [--slot NAME=VALUE]...
+      Compose the installable prompt to stdout:
+      - strip only a LEADING comment header (first non-blank line starts
+        '<!--': drop through its closing '-->'), never a mid-file range;
+      - drop only the FIRST '^# ' line, and only when it is the first
+        non-blank content;
+      - literal slot fill (str.replace, no regex/escaping); slot values must
+        be single-line; any '{{NAME}}' left unresolved is an error;
+      - append the operational tail (same leading-header strip);
+      - stamp a sentinel FIRST line binding slug + sha256 of the body;
+      - refuse output over the upstream 64 KiB prompt cap.
+      Output ends with exactly one newline, so `v="$(compose ...)"` followed
+      by `printf '%s\n' "$v"` round-trips byte-identically (the hash relies
+      on this).
+
+  verify [--slug SLUG]
+      Read an installed prompt on stdin, print one status line, and exit:
+      0 sentinel present, slug matches, body hash matches
+      3 blank / missing / stock / implausibly small / no sentinel
+      4 sentinel present but slug or hash mismatch (tampered or cross-wired)
+"""
+import hashlib
+import re
+import sys
+
+# Upstream MAX_DEFAULT_SYSTEM_PROMPT_BYTES (ironclaw default_system_prompt.rs):
+# a larger file fails the agent's BOOT, not just this compose.
+MAX_BYTES = 64 * 1024
+SENTINEL_RE = re.compile(
+    r"<!-- ironworks-persona v1 slug=([a-z0-9-]+) sha256=([0-9a-f]{64}) -->"
+)
+SLOT_RE = re.compile(r"\{\{([A-Z_]+)\}\}")
+STOCK_MARKER = b"You are IronClaw Agent"
+SLUG_RE = re.compile(r"[a-z0-9-]+\Z")
+
+
+def die(msg):
+    print(f"compose-persona: {msg}", file=sys.stderr)
+    sys.exit(1)
+
+
+def strip_leading_comment(lines):
+    """Drop a comment header only when it LEADS the file; never touch
+    mid-file comments (a one-line '<!-- x -->' elsewhere stays intact)."""
+    i = 0
+    while i < len(lines) and not lines[i].strip():
+        i += 1
+    if i == len(lines) or not lines[i].lstrip().startswith("<!--"):
+        return lines
+    j = i
+    while j < len(lines):
+        if "-->" in lines[j]:
+            return lines[:i] + lines[j + 1:]
+        j += 1
+    die(f"unclosed leading comment header (opened at line {i + 1})")
+
+
+def drop_first_h1(lines):
+    """Drop the title H1 only when it is the first non-blank content."""
+    for i, line in enumerate(lines):
+        if not line.strip():
+            continue
+        if line.startswith("# "):
+            return lines[:i] + lines[i + 1:]
+        return lines
+    return lines
+
+
+def load_body(path, drop_h1):
+    try:
+        with open(path, encoding="utf-8") as f:
+            lines = f.read().splitlines()
+    except OSError as e:
+        die(f"cannot read {path}: {e}")
+    lines = strip_leading_comment(lines)
+    if drop_h1:
+        lines = drop_first_h1(lines)
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return "\n".join(lines).rstrip()
+
+
+def cmd_compose(argv):
+    persona = tail = slug = None
+    slots = {}
+    it = iter(argv)
+    for arg in it:
+        if arg == "--persona":
+            persona = next(it, None)
+        elif arg == "--tail":
+            tail = next(it, None)
+        elif arg == "--slug":
+            slug = next(it, None)
+        elif arg == "--slot":
+            pair = next(it, None)
+            if pair is None or "=" not in pair:
+                die("--slot needs NAME=VALUE")
+            name, _, value = pair.partition("=")
+            if not re.fullmatch(r"[A-Z_]+", name):
+                die(f"slot name must be [A-Z_]+, got {name!r}")
+            if "\n" in value or "\r" in value:
+                die(f"slot {name} contains a newline — slot values must be single-line")
+            slots[name] = value
+        else:
+            die(f"unknown compose argument {arg!r}")
+    if not (persona and tail and slug):
+        die("compose requires --persona, --tail, and --slug")
+    if not SLUG_RE.fullmatch(slug):
+        die(f"slug must be [a-z0-9-]+, got {slug!r}")
+
+    body = load_body(persona, drop_h1=True) + "\n\n" + load_body(tail, drop_h1=False)
+    for name, value in slots.items():
+        body = body.replace("{{" + name + "}}", value)
+    unresolved = sorted(set(SLOT_RE.findall(body)))
+    if unresolved:
+        die(
+            "unresolved slots: "
+            + ", ".join("{{" + n + "}}" for n in unresolved)
+            + " — pass each via --slot NAME=VALUE"
+        )
+    body = body.rstrip() + "\n"
+
+    digest = hashlib.sha256(body.encode("utf-8")).hexdigest()
+    out = f"<!-- ironworks-persona v1 slug={slug} sha256={digest} -->\n" + body
+    total = len(out.encode("utf-8"))
+    if total > MAX_BYTES:
+        die(
+            f"composed prompt is {total} bytes, over the upstream 64 KiB cap "
+            f"({MAX_BYTES}) — a larger file fails the agent's boot; trim the persona"
+        )
+    sys.stdout.write(out)
+
+
+def cmd_verify(argv):
+    slug = None
+    it = iter(argv)
+    for arg in it:
+        if arg == "--slug":
+            slug = next(it, None)
+        else:
+            die(f"unknown verify argument {arg!r}")
+    data = sys.stdin.buffer.read()
+    if not data.strip():
+        print("blank or missing prompt file")
+        sys.exit(3)
+    first, _, rest = data.partition(b"\n")
+    m = SENTINEL_RE.fullmatch(first.decode("utf-8", errors="replace").strip())
+    if m:
+        got_slug, want_hash = m.group(1), m.group(2)
+        have_hash = hashlib.sha256(rest).hexdigest()
+        if slug and got_slug != slug:
+            print(f"sentinel slug is {got_slug!r}, expected {slug!r} — cross-wired persona")
+            sys.exit(4)
+        if have_hash != want_hash:
+            print(f"body hash mismatch (sentinel {want_hash[:12]}…, actual {have_hash[:12]}…) — truncated or edited out-of-band")
+            sys.exit(4)
+        print(f"v1 slug={got_slug} {len(data)} bytes, hash ok")
+        sys.exit(0)
+    if STOCK_MARKER in data[:200]:
+        print("STOCK upstream prompt — persona was never installed or silently reverted")
+        sys.exit(3)
+    if len(data) <= 200:
+        print(f"implausibly small ({len(data)} bytes)")
+        sys.exit(3)
+    # No sentinel at all. compose stamps one on every install, so an unstamped file
+    # was written by something other than this tooling — reinstall, same as stock.
+    print(f"no sentinel ({len(data)} bytes, non-stock) — not installed by compose-persona")
+    sys.exit(3)
+
+
+def main():
+    if len(sys.argv) < 2:
+        die("usage: compose-persona compose|verify ... (see file header)")
+    if sys.argv[1] == "compose":
+        cmd_compose(sys.argv[2:])
+    elif sys.argv[1] == "verify":
+        cmd_verify(sys.argv[2:])
+    else:
+        die(f"unknown mode {sys.argv[1]!r}")
+
+
+if __name__ == "__main__":
+    main()

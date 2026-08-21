@@ -1,0 +1,35 @@
+{
+  "source": "fixture:crm",
+  "record_id": "ACME-001",
+  "retrieved_at": "2026-08-16T09:00:00Z",
+  "account": {
+    "name": "Acme Corp",
+    "domain": "acme-logistics.example",
+    "industry": "SaaS — logistics & supply-chain software",
+    "employees": 4200,
+    "headquarters": "Chicago, US",
+    "cloud": {
+      "providers": ["AWS"],
+      "footprint": "multi-region (us-east-1, us-west-2, eu-central-1), 12+ linked accounts"
+    },
+    "stated_problem": "Cloud spend grew ~40% year over year; finance cannot attribute spend to teams; the quarterly cost audit takes ~3 weeks of manual spreadsheet work.",
+    "current_tooling": "AWS Cost Explorer plus spreadsheets; no dedicated cost-governance tool",
+    "budget": null,
+    "timeline": null,
+    "decision_process": null,
+    "economic_buyer": null
+  },
+  "contacts": [
+    {
+      "name": "Dana Reyes",
+      "title": "Director of Platform Engineering",
+      "engaged": true,
+      "notes": "Requested the initial call; owns cloud infrastructure."
+    }
+  ],
+  "open_opportunities": [],
+  "recent_activities": [
+    { "date": "2026-08-05", "type": "call", "ref": "fixtures/interactions/acme-note.md" }
+  ],
+  "missing": ["budget", "timeline", "decision_process", "economic_buyer"]
+}

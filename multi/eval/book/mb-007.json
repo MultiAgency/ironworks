@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "MB-007",
+ "account": {
+  "name": "Marrow Bioscience",
+  "domain": "marrow-bio.example",
+  "industry": "Contract research",
+  "employees": 260,
+  "headquarters": "New Haven, CT",
+  "cloud": null,
+  "stated_problem": "Sample intake paperwork is manual and slows lab turnaround.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": "Decision by Q1",
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "MB-A1",
+   "occurred_at": "2025-11-18",
+   "kind": "call",
+   "body": "Discussed intake automation. They intend to decide by Q1. Nothing since this call."
+  }
+ ]
+}

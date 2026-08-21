@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-101",
+ "account": {
+  "name": "Alder & Cope",
+  "domain": "alder-cope.example",
+  "industry": "Legal services",
+  "employees": 90,
+  "headquarters": "Hartford, CT",
+  "cloud": null,
+  "stated_problem": "Client intake forms are retyped into the case system.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-101-A1",
+   "occurred_at": "2026-06-12",
+   "kind": "call",
+   "body": "Intro call. Interested, no owner named, no follow-up booked."
+  }
+ ]
+}

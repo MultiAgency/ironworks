@@ -1,0 +1,29 @@
+{
+  "source": "fixture:crm",
+  "record_id": "UMBRELLA-004",
+  "retrieved_at": "2026-08-16T09:00:00Z",
+  "account": {
+    "name": "Umbrella Systems",
+    "domain": "umbrella-systems.example",
+    "industry": "SaaS — healthcare data platform",
+    "employees": 3100,
+    "headquarters": "Boston, US",
+    "cloud": { "providers": ["Azure"], "footprint": "multi-region, ~15 subscriptions, large regulated workloads" },
+    "stated_problem": "Cloud cost attribution across regulated environments is hard; audit prep is heavy.",
+    "current_tooling": "spreadsheets + Azure Cost Management",
+    "budget": "approved — $200k allocated for FinOps tooling this fiscal year",
+    "economic_buyer": "Nadia Fields, VP Infrastructure",
+    "timeline": "evaluating now; wants to purchase this quarter",
+    "decision_process": "VP Infra signs; security review required"
+  },
+  "contacts": [
+    { "name": "Nadia Fields", "title": "VP Infrastructure", "engaged": true, "notes": "Named as buyer in the CRM." }
+  ],
+  "open_opportunities": [
+    { "id": "OPP-441", "name": "Umbrella FinOps tooling", "stage": "Evaluation", "amount": 200000 }
+  ],
+  "recent_activities": [
+    { "date": "2026-08-11", "type": "call", "ref": "fixtures/interactions/umbrella-note.md" }
+  ],
+  "missing": []
+}

@@ -1,0 +1,10 @@
+# Health watchdog: alerts the team Telegram chat when serving breaks. See multi-watchdog.sh.
+# Install: cp multi-watchdog.{service,timer} /etc/systemd/system/ && systemctl daemon-reload
+#          && systemctl enable --now multi-watchdog.timer
+[Unit]
+Description=MultiAgency serve-host watchdog
+
+[Service]
+Type=oneshot
+User=multi
+ExecStart=/opt/ironworks/multi/serve/multi-watchdog.sh

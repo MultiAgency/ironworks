@@ -1,0 +1,98 @@
+name: seam-ci
+
+# Offline gates for the product core: unit tests, shell lint, Python bug-class lint,
+# JS syntax. The live proofs under multi/verify/ need a running instance and are excluded.
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  seam-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install pytest
+      - run: python -m pytest multi/seam -q
+      # The two offline proofs: bridge routing, and the committed-fixtures clean-clone contract.
+      - run: python multi/verify/test_adversarial_routing.py
+      - run: python multi/verify/test_fixtures_offline.py
+      # Unrun, a templating regression ships literal {{SLOT}}s into a live system prompt.
+      - run: python deploy/lib/test_compose_persona.py
+      # The two safety tails must carry the same rules; nothing else reads markdown.
+      - run: python deploy/lib/test_tail_parity.py
+      # Docs cite files constantly; a rename or removal leaves the citation dangling.
+      - run: python deploy/lib/test_doc_refs.py
+      # The graders silently rot: each must still reject a bad answer and accept a good one.
+      - run: python multi/eval/test_graders.py
+
+  shell-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Tracked PLUS untracked-not-ignored. `git ls-files` alone is index-only, so a subtree
+      # nobody has `git add`ed yet would be linted by nothing.
+      - name: shell file set (tracked + new, minus ignored)
+        run: |
+          git ls-files --cached --others --exclude-standard -z -- '*.sh' > /tmp/sh-files.z
+          echo "linting $(tr '\0' '\n' < /tmp/sh-files.z | grep -c .) shell scripts"
+      - name: bash -n (syntax)
+        run: xargs -0 -I{} bash -n {} < /tmp/sh-files.z
+      - name: shellcheck
+        # Run bare: shellcheck exits non-zero on info-level findings, and -S would hide them.
+        # SC1090/SC1091 are disabled repo-wide in .shellcheckrc.
+        run: xargs -0 shellcheck < /tmp/sh-files.z
+      - name: pipefail substitution guard
+        # $(... grep/pgrep ...) under `set -euo pipefail` dies SILENTLY on no match. bash -n
+        # and shellcheck miss it. The `|| true` filter is line-oriented, so the guard must
+        # stay on one line. No \b in the patterns — ERE lacks it on some platforms.
+        run: |
+          hits=$(xargs -0 grep -HnE '\$\( *(pgrep|grep)|\$\(.+\| *(pgrep|grep)' < /tmp/sh-files.z \
+                 | grep -v '|| true' || true)
+          fail=0
+          while IFS= read -r hit; do
+            [ -n "$hit" ] || continue
+            f=${hit%%:*}
+            grep -q 'pipefail' "$f" || continue   # only scripts that opt in are at risk
+            echo "::error::$hit — unmatched grep/pgrep in \$() aborts under pipefail; append '|| true' and test emptiness explicitly"
+            fail=1
+          done <<< "$hits"
+          exit $fail
+
+  python-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Bug-class only (F = pyflakes, E9 = syntax); style stays out of the gate. Whole repo,
+      # so a new subtree is never un-linted. `compose-persona` is named explicitly because it
+      # is Python with no .py extension and ruff discovers by extension. Ruff is pinned like
+      # every other version here — unpinned, a new F-rule reddens an unrelated PR.
+      - run: pipx run ruff==0.16.4 check . deploy/lib/compose-persona --select F,E9
+
+  js-syntax:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+      # `node --check FILE.js` exits 0 on a broken file that contains an `import` — the
+      # ESM-detection path skips the check. Reading it on stdin with --input-type=module
+      # fails correctly. Never accept a bare `node --check foo.js` as evidence it parses.
+      - name: node --check every tracked JS file (as a module)
+        run: |
+          fail=0
+          while IFS= read -r -d '' f; do
+            if node --input-type=module --check < "$f"; then
+              echo "ok    $f"
+            else
+              echo "::error file=$f::does not parse as a module"; fail=1
+            fi
+          done < <(git ls-files --cached --others --exclude-standard -z -- '*.js' '*.mjs')
+          exit $fail

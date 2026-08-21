@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-124",
+ "account": {
+  "name": "Yarrow Landscaping",
+  "domain": "yarrow-landscaping.example",
+  "industry": "Landscaping",
+  "employees": 75,
+  "headquarters": "Bend, OR",
+  "cloud": null,
+  "stated_problem": "Crew schedules are texted each morning.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-124-A1",
+   "occurred_at": "2026-04-17",
+   "kind": "call",
+   "body": "Seasonal. Revisit in spring."
+  }
+ ]
+}

@@ -1,0 +1,58 @@
+#cloud-config
+# The multi serve host, as code — pass at creation and the box builds itself:
+#   sed "s|%%SSH_PUBKEY%%|$(awk '{print $1\" \"$2}' ~/.ssh/id_ed25519.pub)|" cloud-init.yml > /tmp/ci.yml
+#   hcloud server create --name multi-serve --type ccx23 --image ubuntu-24.04 \
+#     --ssh-key <your-key-name> --user-data-from-file /tmp/ci.yml
+# (awk keeps only key-type + material: a stray newline or odd comment in the .pub would
+#  otherwise break the YAML — it did once. Validate: python3 -c "import yaml;yaml.safe_load(open('/tmp/ci.yml'))")
+# Rebuildable from this file alone; SETUP.md drives what comes after (image, stacks, services).
+# Hardening: ufw deny-in (SSH only), key-only SSH, unattended upgrades, non-root `multi` user.
+
+package_update: true
+package_upgrade: true
+packages:
+  - ufw
+  - unattended-upgrades
+  - python3
+  - git
+  - curl
+
+users:
+  - name: multi
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - "%%SSH_PUBKEY%%"
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/99-hardening.conf
+    content: |
+      PasswordAuthentication no
+      PermitRootLogin no
+  - path: /etc/apt/apt.conf.d/20auto-upgrades
+    content: |
+      APT::Periodic::Update-Package-Lists "1";
+      APT::Periodic::Unattended-Upgrade "1";
+
+runcmd:
+  # firewall: SSH in, nothing else. cloudflared is outbound-only — no inbound ports needed.
+  - ufw default deny incoming
+  - ufw default allow outgoing
+  - ufw allow OpenSSH
+  - ufw --force enable
+  - systemctl restart ssh
+  # docker + cloudflared (arm64)
+  # SUPPLY-CHAIN NOTE: the two lines below pipe a vendor script straight into a root shell —
+  # whatever the remote serves at bootstrap runs as root. They are the vendors' official installers
+  # and are left as-is here (rewriting to checksum-pinned tarballs needs an arm64 build-test path we
+  # don't have); if you harden them, pin get.docker.com with `sh -s -- --version <ver>` and verify a
+  # SHA. cloudflared IS pinned below (was `releases/latest` — non-reproducible; whatever ships that
+  # day). Bump the version deliberately and re-verify the arch asset exists.
+  - curl -fsSL https://get.docker.com | sh
+  - systemctl enable --now docker
+  - usermod -aG docker multi
+  - curl -fsSL https://github.com/cloudflare/cloudflared/releases/download/2026.8.2/cloudflared-linux-$(dpkg --print-architecture).deb -o /tmp/cf.deb
+  - dpkg -i /tmp/cf.deb
+  # layout: repo checkout target + the multi user's secret tree (chmod 700 throughout)
+  - install -d -o multi -g multi /opt/ironworks
+  - install -d -m 700 -o multi -g multi /home/multi/.agency /home/multi/.agency/clients /home/multi/.agency/account-identities /home/multi/.agency/account-data

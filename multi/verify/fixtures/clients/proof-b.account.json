@@ -1,0 +1,34 @@
+{
+  "_synthetic": "SYNTHETIC PROOF BOOK \u2014 invented organization, not real. Domains are .example (RFC 2606) so no fabricated detail is ever attached to a registrable name. See multi/verify/fixtures/README.md.",
+  "record_id": "SV-004",
+  "account": {
+    "name": "Studio Vireo",
+    "domain": "studio-vireo.example",
+    "industry": "Creator / marketing brand",
+    "employees": 80,
+    "headquarters": "Los Angeles, CA",
+    "cloud": null,
+    "stated_problem": "Publishes short-form video daily across channels; a 3-person team can't keep pace \u2014 cadence and on-brand consistency are slipping.",
+    "current_tooling": null,
+    "budget": null,
+    "timeline": null,
+    "decision_process": null,
+    "economic_buyer": null
+  },
+  "contacts": [
+    {
+      "name": "Jordan Kim",
+      "title": "Head of Creative Ops",
+      "engaged": true,
+      "notes": "Warm intro; actively looking for a faster way to produce on-brand video."
+    }
+  ],
+  "activities": [
+    {
+      "activity_id": "SV-INT-01",
+      "occurred_at": "2026-08-06",
+      "kind": "note",
+      "body": "Warm intro plus our own research. Daily short-form video production; 3-person team overloaded; cadence and brand consistency slipping. Looking for a faster way to produce on-brand video."
+    }
+  ]
+}

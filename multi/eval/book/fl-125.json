@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-125",
+ "account": {
+  "name": "Ziegler Precision",
+  "domain": "ziegler-precision.example",
+  "industry": "Machining",
+  "employees": 105,
+  "headquarters": "Peoria, IL",
+  "cloud": null,
+  "stated_problem": "Setup sheets are hand-written per job.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-125-A1",
+   "occurred_at": "2026-07-22",
+   "kind": "call",
+   "body": "Engineering lead engaged; owner makes all decisions."
+  }
+ ]
+}

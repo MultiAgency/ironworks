@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-122",
+ "account": {
+  "name": "Vestry Financial Advisory",
+  "domain": "vestry-financial-advisory.example",
+  "industry": "Financial services",
+  "employees": 60,
+  "headquarters": "Charleston, SC",
+  "cloud": null,
+  "stated_problem": "Client onboarding documents are rekeyed.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-122-A1",
+   "occurred_at": "2026-07-01",
+   "kind": "call",
+   "body": "Compliance-heavy. Partner engaged but cautious."
+  }
+ ]
+}

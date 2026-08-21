@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-110",
+ "account": {
+  "name": "Juniper Health Partners",
+  "domain": "juniper-health-partners.example",
+  "industry": "Healthcare admin",
+  "employees": 200,
+  "headquarters": "Boise, ID",
+  "cloud": null,
+  "stated_problem": "Prior-authorisation requests are faxed and tracked in a spreadsheet.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-110-A1",
+   "occurred_at": "2026-07-08",
+   "kind": "call",
+   "body": "Strong pain described. Compliance review would gate anything."
+  }
+ ]
+}

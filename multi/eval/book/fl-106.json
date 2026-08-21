@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-106",
+ "account": {
+  "name": "Fenwick Marine Supply",
+  "domain": "fenwick-marine-supply.example",
+  "industry": "Distribution",
+  "employees": 175,
+  "headquarters": "Norfolk, VA",
+  "cloud": null,
+  "stated_problem": "Backorder reports are compiled by hand every Thursday.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-106-A1",
+   "occurred_at": "2026-07-19",
+   "kind": "call",
+   "body": "Good discovery call. Asked us to follow up in six weeks."
+  }
+ ]
+}

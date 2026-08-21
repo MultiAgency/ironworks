@@ -1,0 +1,34 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "SK-011",
+ "account": {
+  "name": "Skiff Maritime",
+  "domain": "skiff-maritime.example",
+  "industry": "Port services",
+  "employees": 150,
+  "headquarters": "Tacoma, WA",
+  "cloud": null,
+  "stated_problem": "Berth scheduling is coordinated over email and a shared spreadsheet.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [
+  {
+   "name": "Lena Ostrom",
+   "title": "Operations Manager",
+   "engaged": true,
+   "notes": "Interested but junior to the decision."
+  }
+ ],
+ "activities": [
+  {
+   "activity_id": "SK-A1",
+   "occurred_at": "2026-08-01",
+   "kind": "call",
+   "body": "Real pain, clearly described. Lena does not own budget and could not name who does."
+  }
+ ]
+}

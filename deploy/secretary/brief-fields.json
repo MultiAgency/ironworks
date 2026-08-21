@@ -1,0 +1,25 @@
+{
+  "_why": "SINGLE SOURCE for the internal lead brief, read by worker.js (bundled) and by test_aide_discovery.py. It was previously a literal in each, and they diverged in both directions while each validated against its own copy — so both stayed green and no gate could see the gap. This list is the persona-consistent one: PERSONA.md, which the Worker sends every turn, forbids naming an offering or stating terms, so the retired pilot-era fields asked the model to report readiness for something nobody sells. Add a field here and both consumers get it; there is nowhere else to change. Keep this note free of those retired field names — it is inlined into the deployed bundle.",
+  "fields": [
+    "Company",
+    "Sponsor",
+    "Sponsor authority",
+    "Intended users",
+    "Problem",
+    "Current workflow",
+    "What they have tried",
+    "Available data",
+    "Data ownership",
+    "Target customer",
+    "Decisions to improve",
+    "Sensitive-data screen",
+    "Required exclusions",
+    "Timeline",
+    "Urgency",
+    "Confirmed",
+    "Unknown",
+    "Disqualifiers",
+    "Next step"
+  ],
+  "ask_template": "Produce the internal lead brief for the MultiAgency team as ONE JSON object in your reply — no prose, no markdown, no code fence. Use EXACTLY these keys and no others: {FIELDS}. Each value is a short string; write \"unknown\" where something is genuinely unknown. Draw ONLY from this conversation; do not invent facts."
+}

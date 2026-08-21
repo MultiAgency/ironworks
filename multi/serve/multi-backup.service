@@ -1,0 +1,11 @@
+# Nightly backup of the serve host's databases + ~/.agency. See multi-backup.sh for config.
+# Install: cp multi-backup.{service,timer} /etc/systemd/system/ && systemctl daemon-reload
+#          && systemctl enable --now multi-backup.timer
+[Unit]
+Description=MultiAgency serve-host backup (pg_dump + .agency -> restic)
+After=docker.service
+
+[Service]
+Type=oneshot
+User=multi
+ExecStart=/opt/ironworks/multi/serve/multi-backup.sh
