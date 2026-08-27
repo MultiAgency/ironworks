@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-114",
+ "account": {
+  "name": "Northcott Insurance Brokers",
+  "domain": "northcott-insurance-brokers.example",
+  "industry": "Insurance",
+  "employees": 150,
+  "headquarters": "Des Moines, IA",
+  "cloud": null,
+  "stated_problem": "Renewal packets are assembled manually.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-114-A1",
+   "occurred_at": "2026-06-16",
+   "kind": "call",
+   "body": "Two conversations. Waiting on their systems roadmap."
+  }
+ ]
+}

@@ -1,0 +1,63 @@
+qwen/qwen3.5-397b-a17b  # TEE-attested via Chutes, verified end-to-end by NEAR AI
+#
+# The model of record. A pin is a BEHAVIOURAL CLAIM, not a version string: its comment records
+# what was tested, against what, on what date. A model swap re-earns that evidence.
+#
+# ── STATUS: SELECTED 2026-08-27, BEHAVIOUR NOT YET EARNED ────────────────────────────────
+#
+# One real turn has now been served to a real tenant: 2026-09-01, the operator's own org, two
+# real records read from the Account Service, one answer delivered. That retires the older
+# sentence here — "nothing has served a real turn" — and earns nothing else. A single turn on a
+# two-account book is not a behavioural claim, so the reasoning below still must not be cited as
+# this system's evidence. Replace this block when there is a measured result to replace it with,
+# not when the first turn completes.
+#
+# ── WHY THIS ONE ─────────────────────────────────────────────────────────────────────────
+#
+# 1. PRIVACY. The provider describes it as "Attested model served via Chutes TEE (verified
+#    end-to-end by NEAR AI)". A tenant's records go into every prompt, so this is the difference
+#    between a claim we can make and one we cannot. Note the distinction the catalogue itself
+#    draws: anthropic/claude-sonnet-4-5 is described as "Anonymized, not TEE-protected" — an
+#    anonymising proxy is NOT the same guarantee, and picking it would quietly void this reason.
+#
+# 2. COST. $0.50/M input, $3.30/M output, and cached reads at $0.25/M — a 50% discount. That
+#    discount matters more here than it looks: the alloy is a ~14KB prefix re-sent every turn
+#    (the runtime persists `instructions` and replays them), so the cacheable share of a long
+#    thread is large. See the correction below.
+#
+# 3. LINEAGE. It is the same family and generation as the model this replaces, which is the
+#    weakest of the three reasons and is recorded as lineage, not as evidence.
+#
+# ── WHY THE PREVIOUS PIN WAS RETIRED ─────────────────────────────────────────────────────
+#
+# `Qwen/Qwen3.5-122B-A10B` was inherited from ironworks. On 2026-08-27 the provider's catalogue
+# (47 models) contained no 122B variant at all, and a turn naming it was rejected:
+#   Provider nearai_chat rejected the request: HTTP 400:
+#   "Model 'Qwen/Qwen3.5-122B-A10B' not found. It's not a valid model name or alias."
+# It had completed turns against this same instance under an hour earlier, so it was withdrawn
+# from the catalogue rather than mis-specified. Worth carrying as a lesson: a pin can be
+# invalidated by someone else's deployment, with no change on our side and no warning.
+#
+# ── A MEASUREMENT AND ITS CORRECTION ─────────────────────────────────────────────────────
+#
+# Measured 2026-08-27 (docs/experiments/0001-alloy-drift.md): IronClaw's `usage.cost` bills
+# cached and uncached tokens at the SAME rate, so a chained turn reporting 7,360 cached tokens
+# cost slightly MORE than an uncached one. That was first read as "caching saves nothing".
+#
+# It is narrower than that. The provider's own catalogue prices `input_cache_read` at half of
+# `input`, so the discount is real on the bill. What does not model it is IronClaw's COMPUTED
+# cost field — an extension with its own pricing table. So:
+#   * caching IS a genuine saving, at the provider;
+#   * `usage.cost` is an estimate that OVERSTATES the cost of a cached turn;
+#   * never reconcile spend from `usage.cost` alone.
+#
+# ── OPEN ─────────────────────────────────────────────────────────────────────────────────
+#
+# The catalogue reports `is_ready: false` for every TEE-attested model including this one. The
+# previous pin's comment treated that flag as disqualifying for third-party attested models, yet
+# turns against them succeed. Either the flag means something narrower than "usable" or it is
+# stale. Resolve before making a privacy claim to anyone outside this repo.
+#
+# Context window: 128k. The alloy plus a whole-book envelope is ~29KB (~7k tokens) before the
+# runtime's own ~13k-token baseline, so a long chained thread will approach this. That is a
+# second, independent reason for the chain-breaking policy in DESIGN.md.

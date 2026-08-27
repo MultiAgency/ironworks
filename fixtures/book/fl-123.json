@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-123",
+ "account": {
+  "name": "Wexler Auto Group",
+  "domain": "wexler-auto-group.example",
+  "industry": "Automotive retail",
+  "employees": 330,
+  "headquarters": "Grand Rapids, MI",
+  "cloud": null,
+  "stated_problem": "Deal jackets are assembled by hand.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-123-A1",
+   "occurred_at": "2026-06-05",
+   "kind": "call",
+   "body": "Multi-site; each store operates differently."
+  }
+ ]
+}

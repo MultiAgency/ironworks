@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-103",
+ "account": {
+  "name": "Cinder Metalworks",
+  "domain": "cinder-metalworks.example",
+  "industry": "Fabrication",
+  "employees": 130,
+  "headquarters": "Youngstown, OH",
+  "cloud": null,
+  "stated_problem": "Job travellers are printed and annotated by hand.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-103-A1",
+   "occurred_at": "2026-07-02",
+   "kind": "call",
+   "body": "Plant manager walked the floor with us. No budget conversation."
+  }
+ ]
+}

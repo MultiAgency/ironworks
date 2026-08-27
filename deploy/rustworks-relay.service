@@ -1,0 +1,36 @@
+[Unit]
+# The supervisor: one `relay` process per cycle, in series, forever.
+#
+# It depends on the adapter and the store but deliberately does NOT fail when they are down —
+# relay-loop.sh backs off and retries, because the recovery for a cycle that could not reach
+# something is the next cycle, and the journal makes that safe.
+Description=Rust IronWorks relay loop (one process per cycle)
+After=network-online.target rustworks-telegram.service rustworks-devstore.service
+Wants=rustworks-telegram.service rustworks-devstore.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/rustworks
+# relay-loop.sh defaults to target/debug when IRONWORKS_BIN is unset. The other units name
+# target/release explicitly; without this one the loop would serve from a debug build and
+# nothing would say so.
+Environment=IRONWORKS_BIN=/opt/rustworks/target/release/ironworks
+ExecStart=/opt/rustworks/dev/relay-loop.sh \
+    --registry /etc/rustworks/registry.json \
+    --journal /var/lib/rustworks/serve.journal \
+    --channel http://127.0.0.1:3994
+# SIGTERM stops the loop between cycles rather than inside one, so a normal restart leaves
+# nothing for the journal to recover. A cycle mid-turn is safe too; it is just noisier.
+KillSignal=SIGTERM
+TimeoutStopSec=120
+Restart=always
+RestartSec=10
+User=rustworks
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/rustworks
+
+[Install]
+WantedBy=multi-user.target

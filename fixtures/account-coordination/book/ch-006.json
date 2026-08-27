@@ -1,0 +1,31 @@
+{
+  "_synthetic": "SYNTHETIC ACCOUNT-COORDINATION EVALUATION DATA — invented, never a real organization.",
+  "record_id": "CH-006",
+  "account": {
+    "name": "Cedar Harbor Studio",
+    "domain": "cedar-harbor.example",
+    "industry": "Design services",
+    "owner": "Riley",
+    "stage": null,
+    "budget": null,
+    "timeline": null,
+    "updated_at": "2026-08-22T16:00:00+00:00"
+  },
+  "contacts": [
+    {"contact_id": "CH-C1", "name": "Casey Brooks", "title": "Studio Director", "engaged": true}
+  ],
+  "activities": [
+    {
+      "activity_id": "CH-A1",
+      "occurred_at": "2026-08-11",
+      "kind": "agreement",
+      "body": "The pilot ends 2026-09-10. Any extension requires a change note signed by both parties."
+    },
+    {
+      "activity_id": "CH-A2",
+      "occurred_at": "2026-08-22",
+      "kind": "note",
+      "body": "MultiAgency's director expects the pilot to continue and drafted an unsigned change note for a one-month extension."
+    }
+  ]
+}

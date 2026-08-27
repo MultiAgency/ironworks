@@ -1,0 +1,28 @@
+[package]
+name = "ironworks-cli"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "ironworks"
+path = "src/main.rs"
+
+# The package is `ironworks-cli`; its operator-facing binary is simply `ironworks`.
+[dependencies]
+ironworks-records = { path = "../records" }
+ironworks-channel = { path = "../channel" }
+ironworks-channel-http = { path = "../channel-http" }
+ironworks-domain = { path = "../domain" }
+ironworks-services = { path = "../services" }
+ironworks-journal = { path = "../journal" }
+ironworks-lifecycle = { path = "../lifecycle" }
+ironworks-reconcile = { path = "../reconcile" }
+ironworks-proposals = { path = "../proposals" }
+ironworks-ironclaw = { path = "../ironclaw" }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

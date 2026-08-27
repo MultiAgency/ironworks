@@ -1,0 +1,1 @@
+4cb47cfaf3fbacd3a2f575a8da654a6542d5fdfe # ironclaw-v1.4.0 (2026-08-27) — lightweight tag; NOT a descendant of 1.3.0 (release branch vs main). The two 1.3-only fixes were forward-ported: #7721 -> 13eeccabbc, #7723 -> 053c83f513.

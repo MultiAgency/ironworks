@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-119",
+ "account": {
+  "name": "Stonebridge Facilities",
+  "domain": "stonebridge-facilities.example",
+  "industry": "Facilities management",
+  "employees": 290,
+  "headquarters": "Kansas City, MO",
+  "cloud": null,
+  "stated_problem": "Work orders arrive by email and are logged by hand.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-119-A1",
+   "occurred_at": "2026-07-16",
+   "kind": "call",
+   "body": "Good fit on paper. Champion is new in role."
+  }
+ ]
+}

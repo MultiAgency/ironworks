@@ -1,0 +1,25 @@
+[package]
+name = "ironworks-lifecycle"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Operator-side state: what an operator INTENDED for a service instance, how far provisioning
+# reached, and what the authoritative systems say actually exists. Deliberately NOT merged into
+# `ironworks-journal`, which owns turn and delivery durability on the serving path — these answer
+# different questions, at different times, for different readers, and the serving path never
+# reads this one.
+#
+# It owns SQLite for the same reason the turn journal does, and reuses that crate's discipline
+# (explicit schema version, fail closed on an unknown one, atomic writes, read-only inspection
+# with no side effects) without sharing its database.
+[dependencies]
+ironworks-domain = { path = "../domain" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,23 @@
+[package]
+name = "ironworks-channel-http"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The channel transport. It exists so the BINARY cannot open a socket: foreign-system access is
+# visible at adapter-crate boundaries, and reading the dependency graph is how "who can talk to
+# what" stays an answerable question. It lived in the binary for one release of one afternoon and
+# that was already wrong.
+#
+# `ironworks-channel` owns the semantics — cursor, barrier, dispositions — and is forbidden a
+# transport dependency by a test over its own manifest. This is the other half, kept apart for
+# that reason.
+[dependencies]
+ironworks-domain = { path = "../domain" }
+serde_json = { workspace = true }
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
+
+[lints]
+workspace = true

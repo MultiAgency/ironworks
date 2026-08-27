@@ -1,0 +1,22 @@
+[package]
+name = "ironworks-telegram"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "ironworks-telegram"
+path = "src/main.rs"
+
+# An adapter, so it owns a transport — the layering rule is that everything opening a socket is an
+# adapter crate and the binary that serves turns owns none. It depends on no IronWorks crate: it
+# speaks the channel contract as bytes, exactly as `devchannel` does, which is what keeps the
+# serving path unable to acquire a second, looser route to a channel.
+[dependencies]
+serde_json = { workspace = true }
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
+
+[lints]
+workspace = true

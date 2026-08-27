@@ -1,0 +1,35 @@
+{
+  "_synthetic": "SYNTHETIC ACCOUNT-COORDINATION EVALUATION DATA — invented, never a real organization.",
+  "record_id": "LH-004",
+  "account": {
+    "name": "Lakeshore Habitat",
+    "domain": "lakeshore-habitat.example",
+    "industry": "Nonprofit housing",
+    "owner": "Riley",
+    "stage": null,
+    "updated_at": "2026-08-28T09:00:00+00:00"
+  },
+  "contacts": [
+    {"contact_id": "LH-C1", "name": "Jordan Bell", "title": "Executive Director", "engaged": false}
+  ],
+  "activities": [
+    {
+      "activity_id": "LH-A1",
+      "occurred_at": "2026-08-25",
+      "kind": "decision",
+      "body": "The parties agreed to end the engagement on 31 August. MultiAgency requested removal of the service member and record-store credential."
+    },
+    {
+      "activity_id": "LH-A2",
+      "occurred_at": "2026-08-27",
+      "kind": "admin-record",
+      "body": "The runtime administration log records a successful deletion of the service member from the directory."
+    },
+    {
+      "activity_id": "LH-A3",
+      "occurred_at": "2026-08-28",
+      "kind": "admin-record",
+      "body": "The account service confirmed that the record-store credential was disabled."
+    }
+  ]
+}

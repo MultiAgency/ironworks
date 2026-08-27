@@ -1,0 +1,34 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "TF-005",
+ "account": {
+  "name": "Tallow & Finch",
+  "domain": "tallow-finch.example",
+  "industry": "Specialty food distribution",
+  "employees": 120,
+  "headquarters": "Providence, RI",
+  "cloud": null,
+  "stated_problem": null,
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [
+  {
+   "name": "Ike Braun",
+   "title": "Head of Merchandising",
+   "engaged": true,
+   "notes": "Day-to-day contact."
+  }
+ ],
+ "activities": [
+  {
+   "activity_id": "TF-A1",
+   "occurred_at": "2026-08-04",
+   "kind": "note",
+   "body": "Long call covering seasonal SKU planning, a warehouse move, and staffing. Ike mentioned in passing near the end that the board approved an automation initiative last month and the CFO asked us to send pricing by Friday. Also discussed their new label supplier and a packaging delay."
+  }
+ ]
+}

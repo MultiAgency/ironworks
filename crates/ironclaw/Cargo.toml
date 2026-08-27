@@ -1,0 +1,19 @@
+[package]
+name = "ironworks-ironclaw"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The ONLY crate that may name an HTTP dependency. If ureq types, HTTP status codes, or
+# IronClaw's own vocabulary appear anywhere else in the workspace, that is a leak.
+[dependencies]
+ironworks-domain = { path = "../domain" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
+
+[lints]
+workspace = true

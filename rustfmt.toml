@@ -1,0 +1,11 @@
+# The house style is 100 columns, and rustfmt's default sub-width heuristics are what fought it.
+#
+# `max_width` already defaults to 100, but `use_small_heuristics = "Default"` derives tighter caps
+# from it — `chain_width` 60, `fn_call_width` 60, `struct_lit_width` 18 — so a chain that fits the
+# line comfortably still gets exploded across five. That accounted for roughly two thirds of the
+# drift `cargo fmt --check` reported before this file existed: 1332 hunks, of which 840 were the
+# sub-widths disagreeing with a line nobody thought was too long.
+#
+# "Max" sets every sub-width to `max_width`, which is the rule this codebase was actually written
+# to: one line if it fits in 100 columns, wrapped if it does not.
+use_small_heuristics = "Max"

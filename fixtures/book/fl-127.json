@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-127",
+ "account": {
+  "name": "Bellhaven Senior Living",
+  "domain": "bellhaven-senior-living.example",
+  "industry": "Senior care",
+  "employees": 340,
+  "headquarters": "Sarasota, FL",
+  "cloud": null,
+  "stated_problem": "Care plan updates are handwritten then entered.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-127-A1",
+   "occurred_at": "2026-05-30",
+   "kind": "call",
+   "body": "Real pain. Regulatory review would be required."
+  }
+ ]
+}

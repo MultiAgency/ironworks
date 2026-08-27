@@ -1,0 +1,29 @@
+[package]
+name = "ironworks-reconcile"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Where authoritative systems are translated into lifecycle observations. It depends on the
+# adapters (which own the protocols) and on `ironworks-lifecycle` (which owns the vocabulary), so
+# neither has to know about the other — and in particular `records`, which is on the serving path,
+# does not acquire a dependency on operator-side lifecycle types.
+#
+# It is the only crate allowed to answer the question `Reconcile` asks. It creates nothing,
+# changes nothing, and adopts nothing: every method here is a read.
+[dependencies]
+ironworks-records = { path = "../records" }
+ironworks-domain = { path = "../domain" }
+ironworks-lifecycle = { path = "../lifecycle" }
+serde_json = { workspace = true }
+# The IronClaw admin surface is operator-only, and `ironworks-ironclaw` is on the serving path — so
+# the admin protocol is quarantined here rather than widening a crate a tenant turn goes through.
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
+
+[dev-dependencies]
+ureq = { version = "3.4", default-features = false, features = ["rustls"] }
+
+[lints]
+workspace = true

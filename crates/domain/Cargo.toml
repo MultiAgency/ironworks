@@ -1,0 +1,22 @@
+[package]
+name = "ironworks-domain"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Pure. No IO, no clock, no credential values. It names foreign systems only through traits that
+# adapter crates implement, which is what lets the whole domain be exercised without one.
+#
+# `serde` is here because record shapes are parsed from the store's JSON. Parsing is not an
+# effect, and the alternative — a separate crate that `domain` cannot call — is exactly what kept
+# the records envelope outside the verification gate.
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

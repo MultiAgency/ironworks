@@ -1,0 +1,47 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/domain",
+    "crates/records",
+    "crates/channel",
+    "crates/channel-http",
+    "crates/devchannel",
+    "crates/telegram",
+    "crates/devstore",
+    "crates/journal",
+    "crates/lifecycle",
+    "crates/reconcile",
+    "crates/proposals",
+    "crates/services",
+    "crates/ironclaw",
+    "crates/graders",
+    "crates/eval",
+    "crates/claims",
+    "crates/evidence",
+    "crates/page",
+    "crates/site",
+    "crates/cli",
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+rust-version = "1.97"
+repository = "https://github.com/multiagency/ironworks-rs"
+
+# Dependency budget is a design constraint, not an afterthought. The process this becomes holds
+# every tenant's bearer token; the Python it borrows from has zero runtime dependencies, and that
+# property is the one worth most here. Blocking HTTP (no async runtime), bundled SQLite, and
+# nothing that pulls a parser generator. A new transitive dependency is a decision, not a detail.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+todo = "deny"
+unimplemented = "deny"

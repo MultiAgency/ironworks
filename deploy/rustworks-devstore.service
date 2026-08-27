@@ -1,0 +1,32 @@
+[Unit]
+# The record store for the public demo: six invented accounts, in memory, no database.
+#
+# `devstore` calls itself a proof fixture and not a deployment, and running it here is a
+# deliberate exception rather than a contradiction. The demo IS a fixture — the page it backs says
+# so in as many words, every domain in it is RFC 2606 reserved and every record marked synthetic.
+# What this must never become is the record store for a tenant with real records; that path needs
+# the Account Service, and this unit exists precisely so nobody is tempted to point the demo at it.
+Description=Rust IronWorks demo record store (synthetic accounts only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/rustworks
+# `--book ORG=PATH` and `--identity TOKEN=ORG`, not bare paths: a book belongs to an org,
+# because a fixture where every credential resolves to a different org and then reads the
+# same records models resolution without partitioning.
+ExecStart=/opt/rustworks/target/release/ironworks-devstore --port 3996 \
+    --book coordination-eval=fixtures/account-coordination/book \
+    --identity dev-token-coordination=coordination-eval
+Restart=always
+RestartSec=5
+User=rustworks
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/rustworks
+
+[Install]
+WantedBy=multi-user.target

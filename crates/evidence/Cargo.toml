@@ -1,0 +1,22 @@
+[package]
+name = "ironworks-evidence"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# What a recorded run is bound to, and what was said about it afterwards.
+#
+# Both halves are shared: the eval driver writes a book fingerprint into every transcript, and the
+# page generators recompute it to prove an answer may be rendered beside the records it names.
+# Holding them in one crate is what stops a second implementation of either — a fingerprint that
+# disagrees with itself binds nothing, and a ledger read two ways can restate history differently
+# in two places.
+[dependencies]
+ironworks-domain = { path = "../domain" }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

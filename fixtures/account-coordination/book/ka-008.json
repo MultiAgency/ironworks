@@ -1,0 +1,30 @@
+{
+  "_synthetic": "SYNTHETIC ACCOUNT-COORDINATION EVALUATION DATA — invented, never a real organization.",
+  "record_id": "KA-008",
+  "account": {
+    "name": "Kestrel Analytics",
+    "domain": "kestrel-analytics.example",
+    "industry": "Market research",
+    "owner": "Riley",
+    "stage": null,
+    "updated_at": "2026-08-20T15:30:00+00:00"
+  },
+  "contacts": [
+    {"contact_id": "KA-C1", "name": "Imani Cole", "title": "Head of Insights", "engaged": true},
+    {"contact_id": "KA-C2", "name": "Petra Lindqvist", "title": "Finance Manager", "engaged": true}
+  ],
+  "activities": [
+    {
+      "activity_id": "KA-A1",
+      "occurred_at": "2026-06-30",
+      "kind": "agreement",
+      "body": "A twelve-month renewal was signed by both parties, running to 2027-06-30 on unchanged terms."
+    },
+    {
+      "activity_id": "KA-A2",
+      "occurred_at": "2026-08-20",
+      "kind": "note",
+      "body": "Quarterly review held with Imani and Petra. Both confirmed the service is meeting the agreed scope and raised no actions."
+    }
+  ]
+}

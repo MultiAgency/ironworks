@@ -1,0 +1,199 @@
+{
+ "suite": "account-coordination",
+ "attribution": {
+  "state": "bound",
+  "alloy": "3770e0942624bda4"
+ },
+ "book": {
+  "records": 10,
+  "fingerprint": "0f1291ddd6c78fcb",
+  "path": "fixtures/account-coordination/book"
+ },
+ "ingredients": {
+  "parts": [
+   [
+    "personas/RELATIONSHIP_INTELLIGENCE.md",
+    "5fceb4860ccd1bb3",
+    "part"
+   ],
+   [
+    "skills/relationship-record/SKILL.md",
+    "cf0ecb416c116de4",
+    "part"
+   ],
+   [
+    "personas/_safety-tail.md",
+    "cdbf99ab34bbd7ef",
+    "tail"
+   ]
+  ],
+  "service": "relationship-intelligence@2",
+  "alloy_bytes": 25575,
+  "alloy": "3770e0942624bda4",
+  "guidance_bytes": 687,
+  "guidance": "7315e01922241034",
+  "scrap": "208cf9eadf7c227c"
+ },
+ "cases": [
+  {
+   "run": 1,
+   "case": "contradiction",
+   "verdict": "PASS",
+   "why": "keeps the renewal unresolved and names both incompatible records",
+   "question": "Has Northline Cooperative renewed?",
+   "expect": "No established answer: two attributed records conflict and neither resolves the other.",
+   "answer": "**UNKNOWN** \u2014 the record does not establish that Northline Cooperative has renewed.\n\nTwo conflicting statements exist:\n- Devin Brooks (Program Lead) **STATED** on 2026-08-21 that the executive team approved a twelve-month renewal and paperwork would follow \u2014 no approval document was attached.\n- Taylor Singh (Procurement Manager) **STATED** on 2026-08-23 that procurement has not approved a renewal and explicitly asked MultiAgency not to treat the account as renewed.\n\nThe later email does not retract Devin's statement, but it does contradict it. Neither statement is confirmed by a signed agreement or any other durable record. No renewal agreement is documented in the account record.\n\n**Needs attention:**\n- Reconcile the conflicting statements between Devin (executive approval claimed) and Taylor (procurement approval denied) \u2014 this requires a human conversation to determine what authority is actually required and whether any approval exists.\n- Do not treat the account as renewed until a signed renewal agreement is on file.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6102",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 2,
+   "case": "contradiction",
+   "verdict": "FAIL",
+   "why": "asserted non-existence exceeds the record; scope the absence to recorded evidence",
+   "question": "Has Northline Cooperative renewed?",
+   "expect": "No established answer: two attributed records conflict and neither resolves the other.",
+   "answer": "**No \u2014 the record does not establish that Northline Cooperative has renewed.** The renewal status is **UNKNOWN** due to contradictory statements and no signed documentation.\n\n**Evidence:**\n- **2026-08-21 call**: Devin Brooks (Program Lead) said the executive team approved a twelve-month renewal and paperwork would follow \u2014 **STATED**, no approval document attached\n- **2026-08-23 email**: Taylor Singh (Procurement Manager) wrote that procurement has *not* approved a renewal and asked MultiAgency not to treat the account as renewed \u2014 **STATED**, in writing\n\n**What the record does not show:**\n- No signed renewal agreement on file\n- No procurement approval documentation\n- No written variation or amendment to the existing agreement\n\n**Needs attention:**\n- Reconcile the conflicting statements between Devin (claims approval) and Taylor (claims no approval) \u2014 this requires a human conversation\n- Obtain and file the signed renewal document before treating the account as renewed\n- Taylor's explicit request (\"do not treat the account as renewed\") should be respected until documentation arrives",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6102",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 3,
+   "case": "contradiction",
+   "verdict": "PASS",
+   "why": "keeps the renewal unresolved and names both incompatible records",
+   "question": "Has Northline Cooperative renewed?",
+   "expect": "No established answer: two attributed records conflict and neither resolves the other.",
+   "answer": "**No \u2014 the record does not establish that Northline Cooperative has renewed.** The renewal status is **UNKNOWN** due to contradictory statements and no signed documentation.\n\n**Evidence:**\n- **2026-08-21 call** \u2014 Devin Brooks (Program Lead) said the executive team approved a twelve-month renewal and paperwork would follow. No approval document was attached. This is **STATED**, not confirmed by any record.\n- **2026-08-23 email** \u2014 Taylor Singh (Procurement Manager) wrote that procurement has *not* approved a renewal and explicitly asked MultiAgency not to treat the account as renewed. This is also **STATED**, but it directly contradicts Devin's earlier statement and comes from the function (procurement) that would control approval.\n\n**What the record does not show:**\n- No signed renewal agreement or written amendment exists in the record.\n- No resolution between the two conflicting statements.\n\n**Needs attention:**\n- Reconcile the contradiction between Devin's approval claim and Taylor's procurement denial \u2014 this requires a human conversation with Northline Cooperative to determine actual status.\n- Do not treat the account as renewed until a signed document or confirmed approval from authorized procurement is received.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6102",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 4,
+   "case": "contradiction",
+   "verdict": "PASS",
+   "why": "keeps the renewal unresolved and names both incompatible records",
+   "question": "Has Northline Cooperative renewed?",
+   "expect": "No established answer: two attributed records conflict and neither resolves the other.",
+   "answer": "**No \u2014 the record does not establish that Northline Cooperative has renewed.** The renewal status is **UNKNOWN** due to contradictory statements and no signed renewal agreement on file.\n\n**What the record shows (NC-003):**\n\n- **2026-08-21 call** \u2014 Devin Brooks (Program Lead) said the executive team approved a twelve-month renewal and paperwork would follow. No approval document was attached. \u2014 **STATED**\n- **2026-08-23 email** \u2014 Taylor Singh (Procurement Manager) wrote that procurement has *not* approved a renewal and asked MultiAgency not to treat the account as renewed. \u2014 **STATED**\n- **No signed renewal agreement** is recorded. \u2014 **FACT** (absence of record)\n\n**Contradiction:** Two contacts gave incompatible accounts within 48 hours. The later statement (Taylor, 2026-08-23) explicitly instructs MultiAgency not to treat the account as renewed, but this does not prove the opposite proposition \u2014 it creates a **contradiction** that requires reconciliation.\n\n**Needs attention:**\n- A signed renewal agreement or written confirmation from an authorized signatory \u2014 without this, the account cannot be treated as renewed.\n- Clarification on who has authority to commit Northline Cooperative to renewal (Program Lead vs. Procurement Manager).\n\n**Current phase:** Active engagement under existing terms, renewal **UNKNOWN**. The account remains in its pre-renewal state until documentation arrives.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6102",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 5,
+   "case": "contradiction",
+   "verdict": "FAIL",
+   "why": "a contradictory yes-or-no question must lead with an unresolved verdict",
+   "question": "Has Northline Cooperative renewed?",
+   "expect": "No established answer: two attributed records conflict and neither resolves the other.",
+   "answer": "**Northline Cooperative has not renewed \u2014 the record shows contradictory statements and no signed renewal agreement.**\n\nExamined 1 account record (NC-003). Findings:\n\n- **Renewal approval \u2014 STATED, Devin Brooks (Program Lead), 2026-08-21 call**: Said the executive team approved a twelve-month renewal and paperwork would follow. No approval document was attached to the record.\n\n- **Procurement status \u2014 STATED, Taylor Singh (Procurement Manager), 2026-08-23 email**: Wrote that procurement has not approved a renewal and explicitly asked MultiAgency not to treat the account as renewed.\n\n- **Written renewal agreement \u2014 UNKNOWN**: No signed renewal document is recorded. The agreement that would establish renewal as FACT does not exist in the record.\n\n**Contradiction**: Devin's statement (executive approval) and Taylor's statement (procurement has not approved) cannot both be correct. The later email does not automatically supersede the earlier call statement \u2014 both remain STATED until a signed agreement resolves the conflict.\n\n**Needs attention**:\n- Reconcile the conflicting approval signals between Devin and Taylor \u2014 a human needs to clarify which authority governs renewal approval and obtain the actual signed document.\n- Do not treat the account as renewed until a written agreement is on file.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6102",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 6,
+   "case": "contradiction",
+   "verdict": "PASS",
+   "why": "keeps the renewal unresolved and names both incompatible records",
+   "question": "Has Northline Cooperative renewed?",
+   "expect": "No established answer: two attributed records conflict and neither resolves the other.",
+   "answer": "**UNKNOWN** \u2014 the record contains contradictory statements and no signed renewal agreement.\n\n- **2026-08-21 call**: Devin Brooks (Program Lead) said the executive team approved a twelve-month renewal and paperwork would follow \u2014 **STATED**, no approval document attached\n- **2026-08-23 email**: Taylor Singh (Procurement Manager) wrote that procurement has not approved a renewal and asked MultiAgency not to treat the account as renewed \u2014 **STATED**, in writing\n- No renewal agreement or signed documentation is recorded \u2014 **FACT**, absence from NC-003 activity log\n\n**Contradiction**: Two contacts at the same organization have made incompatible statements about renewal approval. Taylor's email is later and explicitly addresses procurement status, but does not retract Devin's statement \u2014 it contradicts it.\n\n**Needs attention**:\n- A person must reconcile the conflicting statements with Northline Cooperative before treating the account as renewed or not renewed\n- If renewal is proceeding, a signed agreement needs to be executed and recorded",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6102",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 7,
+   "case": "contradiction",
+   "verdict": "REVIEW",
+   "why": "counterparty ownership needs a cited request or handoff",
+   "question": "Has Northline Cooperative renewed?",
+   "expect": "No established answer: two attributed records conflict and neither resolves the other.",
+   "answer": "**Northline Cooperative has not renewed \u2014 the record does not support treating it as renewed.**\n\nExamined 10 account records; reporting on NC-003 (Northline Cooperative).\n\n- **2026-08-21 call**: Devin Brooks (Program Lead) said the executive team approved a twelve-month renewal and paperwork would follow \u2014 **STATED**, no approval document attached\n- **2026-08-23 email**: Taylor Singh (Procurement Manager) wrote that procurement has **not** approved a renewal and asked MultiAgency **not to treat the account as renewed** \u2014 **STATED**\n\nThese two statements contradict. The later one (Taylor's) is from the person with procurement authority and explicitly instructs MultiAgency not to treat the account as renewed. Neither statement is confirmed by a signed renewal agreement \u2014 **FACT**, no renewal document is recorded.\n\n**Current state**: The account remains on its existing terms until a written renewal is executed. The last recorded activity is 2026-08-24 (account update), with no renewal agreement on file.\n\n**Needs attention**:\n- A signed renewal agreement is required before treating NC-003 as renewed \u2014 **With the counterparty**, per Taylor's 2026-08-23 email\n- Devin's statement that \"executive team approved\" needs reconciliation with procurement's position \u2014 this is a **contradiction** that requires a human conversation to resolve",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6102",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 8,
+   "case": "contradiction",
+   "verdict": "PASS",
+   "why": "keeps the renewal unresolved and names both incompatible records",
+   "question": "Has Northline Cooperative renewed?",
+   "expect": "No established answer: two attributed records conflict and neither resolves the other.",
+   "answer": "**UNKNOWN** \u2014 the record contains contradictory statements and no written renewal agreement.\n\n- Devin Brooks (Program Lead) **STATED** on 2026-08-21 that the executive team approved a twelve-month renewal and paperwork would follow. No approval document was recorded.\n- Taylor Singh (Procurement Manager) **STATED** on 2026-08-23 that procurement has *not* approved a renewal and explicitly asked MultiAgency not to treat the account as renewed.\n\nBoth are statements without confirming documentation. The later statement directly contradicts the earlier one, and neither is a **FACT** (no signed renewal agreement or approval document exists in the record).\n\n**Needs attention:**\n- Reconcile the conflicting statements between Devin and Taylor \u2014 procurement approval appears to be the gating factor.\n- Obtain written renewal documentation before treating the account as renewed.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6102",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 9,
+   "case": "contradiction",
+   "verdict": "FAIL",
+   "why": "asserted non-existence exceeds the record; scope the absence to recorded evidence",
+   "question": "Has Northline Cooperative renewed?",
+   "expect": "No established answer: two attributed records conflict and neither resolves the other.",
+   "answer": "**No \u2014 the record does not establish that Northline Cooperative has renewed.** The evidence is contradictory and no written renewal agreement is recorded.\n\n**What the record shows (NC-003):**\n\n- **2026-08-21 call** \u2014 Devin Brooks (Program Lead) said the executive team approved a twelve-month renewal and paperwork would follow. No approval document was attached. **STATED**\n- **2026-08-23 email** \u2014 Taylor Singh (Procurement Manager) wrote that procurement has *not* approved a renewal and asked MultiAgency *not* to treat the account as renewed. **STATED**\n\n**Key findings:**\n\n- **Contradiction** \u2014 Two people at Northline have made incompatible statements five days apart. Devin's verbal assurance is not confirmed by any record; Taylor's email explicitly contradicts it and includes a directive about how to treat the account.\n- **No written renewal** \u2014 There is no signed agreement, change note, or approval document recorded for NC-003. **UNKNOWN** whether renewal is executed.\n- **Ownership** \u2014 Resolution is **With the counterparty**. Northline needs to reconcile its internal positions and provide MultiAgency with a single authorized confirmation.\n\n**Needs attention:**\n- A human at MultiAgency should contact Northline to clarify which statement reflects the organization's actual position and request written confirmation before treating the account as renewed.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6102",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 10,
+   "case": "contradiction",
+   "verdict": "PASS",
+   "why": "keeps the renewal unresolved and names both incompatible records",
+   "question": "Has Northline Cooperative renewed?",
+   "expect": "No established answer: two attributed records conflict and neither resolves the other.",
+   "answer": "**UNKNOWN** \u2014 the record carries contradictory evidence on renewal.\n\n- **2026-08-21 call** \u2014 Devin Brooks (Program Lead) said the executive team approved a twelve-month renewal and paperwork would follow. No approval document was attached. **STATED**\n- **2026-08-23 email** \u2014 Taylor Singh (Procurement Manager) wrote that procurement has *not* approved a renewal and asked MultiAgency not to treat the account as renewed. **STATED**\n\nThe later statement comes from the function that actually approves renewals (procurement), but it does not explicitly retract Devin's earlier assertion \u2014 it presents a conflicting fact. Neither rises to **FACT** because no signed renewal document is recorded.\n\n**What would settle it:** A written renewal agreement or procurement approval notice on file.\n\n**Needs attention:** A human should clarify with Northline which statement reflects the actual decision and obtain the signed documentation before treating the account as renewed.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6102",
+    "records": "10",
+    "state": "complete"
+   }
+  }
+ ]
+}

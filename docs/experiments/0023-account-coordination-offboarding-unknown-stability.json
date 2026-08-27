@@ -1,0 +1,199 @@
+{
+ "suite": "account-coordination",
+ "attribution": {
+  "state": "bound",
+  "alloy": "3770e0942624bda4"
+ },
+ "book": {
+  "records": 10,
+  "fingerprint": "0f1291ddd6c78fcb",
+  "path": "fixtures/account-coordination/book"
+ },
+ "ingredients": {
+  "parts": [
+   [
+    "personas/RELATIONSHIP_INTELLIGENCE.md",
+    "5fceb4860ccd1bb3",
+    "part"
+   ],
+   [
+    "skills/relationship-record/SKILL.md",
+    "cf0ecb416c116de4",
+    "part"
+   ],
+   [
+    "personas/_safety-tail.md",
+    "cdbf99ab34bbd7ef",
+    "tail"
+   ]
+  ],
+  "service": "relationship-intelligence@2",
+  "alloy_bytes": 25575,
+  "alloy": "3770e0942624bda4",
+  "guidance_bytes": 687,
+  "guidance": "7315e01922241034",
+  "scrap": "208cf9eadf7c227c"
+ },
+ "cases": [
+  {
+   "run": 1,
+   "case": "offboarding-unknown",
+   "verdict": "PASS",
+   "why": "reports the proven closure and residual authority uncertainty separately",
+   "question": "Is Lakeshore Habitat fully offboarded, including residual access?",
+   "expect": "The record-store credential is disabled; whether other residual authority exists or works is unknown.",
+   "answer": "**Lakeshore Habitat is partially offboarded \u2014 the record proves two access removals but does not establish whether all residual access was terminated.**\n\nEvidence from the LH-004 record:\n\n- **Service member deleted from directory \u2014 FACT**, 2026-08-27 admin-record. The runtime administration log shows successful deletion.\n- **Record-store credential disabled \u2014 FACT**, 2026-08-28 admin-record. The account service confirmed this.\n- **Engagement end date agreed as 31 August \u2014 FACT**, 2026-08-25 decision. Both parties agreed; MultiAgency requested the two removals above.\n\nWhat the record does **not** establish (all **UNKNOWN**):\n\n- Whether any bearer tokens, API keys, or OAuth grants associated with this account were revoked. A disabled credential is not the same as a revoked session token.\n- Whether any other access mechanisms (shared secrets, integration webhooks, data exports) were terminated.\n- Whether final obligations were completed (final invoice sent/paid, data returned or archived, counterparty confirmation of closure).\n\n**Needs attention:**\n\n- **Residual access audit \u2014 With MultiAgency.** The record shows directory and credential removal, but a person should verify whether any other access vectors exist and confirm they are closed before treating offboarding as complete.\n- **Closure confirmation \u2014 With MultiAgency.** No record shows Jordan Bell or Lakeshore Habitat confirming receipt of final deliverables or acknowledging the engagement as closed.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6133",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 2,
+   "case": "offboarding-unknown",
+   "verdict": "FAIL",
+   "why": "the answer must lead with UNKNOWN or say full offboarding is not established",
+   "question": "Is Lakeshore Habitat fully offboarded, including residual access?",
+   "expect": "The record-store credential is disabled; whether other residual authority exists or works is unknown.",
+   "answer": "**Lakeshore Habitat is partially offboarded \u2014 residual access cannot be confirmed closed from the record.**\n\nWhat the record establishes:\n- Engagement end date agreed as 31 August \u2014 **FACT**, 2026-08-25 decision\n- Service member deleted from directory \u2014 **FACT**, 2026-08-27 admin-record\n- Record-store credential disabled \u2014 **FACT**, 2026-08-28 admin-record\n\nWhat the record does **not** establish:\n- Whether any bearer tokens or active sessions remain \u2014 **UNKNOWN**\n- Whether other credentials (API keys, OAuth grants) were revoked \u2014 **UNKNOWN**\n- Whether final invoices were sent or paid \u2014 **UNKNOWN**\n- Whether any data export or handoff obligations were completed \u2014 **UNKNOWN**\n\nThe instructions are explicit: a deleted member and disabled credential do not prove all access paths are closed. Offboarding is complete only to the extent the record proves each authority or obligation closed.\n\n**Needs attention:**\n- Residual access verification \u2014 a person needs to confirm no bearer tokens, sessions, or alternate credentials remain active\n- Final financial closure \u2014 whether any invoices are outstanding or unpaid",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6133",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 3,
+   "case": "offboarding-unknown",
+   "verdict": "PASS",
+   "why": "reports the proven closure and residual authority uncertainty separately",
+   "question": "Is Lakeshore Habitat fully offboarded, including residual access?",
+   "expect": "The record-store credential is disabled; whether other residual authority exists or works is unknown.",
+   "answer": "**Lakeshore Habitat is partially offboarded \u2014 the record proves two access removals, but residual access is UNKNOWN.**\n\n- **Service member deleted from directory** \u2014 FACT, 2026-08-27 admin-record\n- **Record-store credential disabled** \u2014 FACT, 2026-08-28 admin-record\n- **Engagement end date: 31 August** \u2014 FACT, 2026-08-25 decision\n\n**What the record does not establish (residual access):**\n- Whether any bearer tokens, API keys, or active sessions beyond the record-store credential exist \u2014 **UNKNOWN**\n- Whether disabling the credential revoked all authenticated sessions \u2014 **UNKNOWN**\n- Whether any data exports or shared storage remain accessible \u2014 **UNKNOWN**\n- Whether final billing or contractual closeout obligations are complete \u2014 **UNKNOWN**\n\nThe instructions explicitly caution that deleting a service member is not proof that bearer tokens were revoked, and disabling a credential is not proof that all access disappeared. The record shows two specific removals were completed, but it does not enumerate all access vectors that existed or confirm each was closed.\n\n**Needs attention:**\n- A person should verify whether any additional credentials or sessions were issued to Lakeshore Habitat and confirm their revocation before treating offboarding as complete.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6133",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 4,
+   "case": "offboarding-unknown",
+   "verdict": "PASS",
+   "why": "reports the proven closure and residual authority uncertainty separately",
+   "question": "Is Lakeshore Habitat fully offboarded, including residual access?",
+   "expect": "The record-store credential is disabled; whether other residual authority exists or works is unknown.",
+   "answer": "**Lakeshore Habitat is not provably fully offboarded \u2014 the record shows two access items closed, but whether all residual access is revoked is UNKNOWN.**\n\nWhat the record establishes:\n- Engagement end date agreed as 31 August 2026 \u2014 **FACT**, LH-004 decision record 2026-08-25\n- Service member deleted from directory \u2014 **FACT**, admin-record 2026-08-27\n- Record-store credential disabled \u2014 **FACT**, admin-record 2026-08-28\n\nWhat the record does not establish:\n- Whether \"disabled\" means the credential was revoked or merely suspended \u2014 **UNKNOWN**, the admin-record uses \"disabled\" without further detail\n- Whether any other credentials, bearer tokens, or sessions existed beyond the record-store credential \u2014 **UNKNOWN**, the offboarding request named only the record-store credential\n- Whether any data handover, final invoice, or contractual closure occurred \u2014 **UNKNOWN**, no activity records this\n\n**Needs attention:**\n- A person should confirm with the account service whether \"disabled\" equals full revocation for the record-store credential\n- A person should verify whether any other access mechanisms (API keys, sessions, shared credentials) were issued to Lakeshore Habitat and whether those were revoked",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6133",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 5,
+   "case": "offboarding-unknown",
+   "verdict": "FAIL",
+   "why": "residual authority must remain explicitly unresolved",
+   "question": "Is Lakeshore Habitat fully offboarded, including residual access?",
+   "expect": "The record-store credential is disabled; whether other residual authority exists or works is unknown.",
+   "answer": "**Lakeshore Habitat is partially offboarded \u2014 two specific access removals are recorded, but whether all residual access is revoked is UNKNOWN.**\n\nWhat the record establishes:\n- Engagement end date agreed as 31 August \u2014 **FACT**, LH-004 activity 2026-08-25\n- Service member deleted from directory \u2014 **FACT**, admin-record 2026-08-27\n- Record-store credential disabled \u2014 **FACT**, admin-record 2026-08-28\n\nWhat the record does **not** establish (offboarding gaps):\n- Whether any bearer tokens, API keys, or session credentials remain active \u2014 **UNKNOWN**, no record of token revocation audit\n- Whether final invoice was issued and paid \u2014 **UNKNOWN**, no financial closure recorded\n- Whether data retention or archival obligations were addressed \u2014 **UNKNOWN**, no record of data-handling completion\n\n**Needs attention:**\n- Residual access verification \u2014 a person should confirm whether any credentials beyond the service member and record-store credential were issued and whether they've been revoked\n- Financial closure \u2014 confirm final invoice status before marking the account fully offboarded",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6133",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 6,
+   "case": "offboarding-unknown",
+   "verdict": "FAIL",
+   "why": "the answer must lead with UNKNOWN or say full offboarding is not established",
+   "question": "Is Lakeshore Habitat fully offboarded, including residual access?",
+   "expect": "The record-store credential is disabled; whether other residual authority exists or works is unknown.",
+   "answer": "**Lakeshore Habitat is partially offboarded \u2014 residual access cannot be confirmed closed from the record.**\n\nThe record establishes two concrete removal actions:\n- Service member deleted from directory \u2014 **FACT**, 2026-08-27 admin-record\n- Record-store credential disabled \u2014 **FACT**, 2026-08-28 admin-record\n\nBut the record does **not** establish:\n- Whether any bearer tokens or active sessions were revoked \u2014 **UNKNOWN**\n- Whether any other credentials, API keys, or access methods existed and were disabled \u2014 **UNKNOWN**\n- Whether final obligations (data return, final reports, settlement) were completed \u2014 **UNKNOWN**\n\nPer the guidance: *\"A member being deleted is not proof that a bearer token was revoked; offboarding is complete only to the extent the record proves each relevant authority or obligation closed.\"* The record proves two closures but is silent on others.\n\n**Needs attention:**\n- A person should verify whether any bearer tokens, sessions, or alternate credentials were issued to Lakeshore Habitat and confirm their revocation.\n- Confirm whether any final deliverables or data-handling obligations remain open before treating offboarding as complete.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6133",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 7,
+   "case": "offboarding-unknown",
+   "verdict": "PASS",
+   "why": "reports the proven closure and residual authority uncertainty separately",
+   "question": "Is Lakeshore Habitat fully offboarded, including residual access?",
+   "expect": "The record-store credential is disabled; whether other residual authority exists or works is unknown.",
+   "answer": "**Lakeshore Habitat is partially offboarded \u2014 residual access is UNKNOWN.**\n\nThe record establishes two offboarding actions completed:\n- Service member deleted from directory \u2014 **FACT**, admin-record 2026-08-27\n- Record-store credential disabled \u2014 **FACT**, admin-record 2026-08-28\n\nHowever, the record does **not** establish whether residual access was revoked:\n- No record of bearer token revocation \u2014 **UNKNOWN**\n- No record of active session termination \u2014 **UNKNOWN**\n- No record confirming all access methods were audited \u2014 **UNKNOWN**\n\nPer the evidence discipline: a member deletion is not proof that bearer tokens were revoked; a credential being disabled is not proof that no other access vectors remain. Offboarding is complete only to the extent the record proves each relevant authority closed.\n\n**Needs attention:**\n- A person should verify whether any bearer tokens, API keys, or session credentials beyond the record-store credential were issued to Lakeshore Habitat, and confirm their revocation. The engagement end date (31 August) has passed.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6133",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 8,
+   "case": "offboarding-unknown",
+   "verdict": "FAIL",
+   "why": "the answer must lead with UNKNOWN or say full offboarding is not established",
+   "question": "Is Lakeshore Habitat fully offboarded, including residual access?",
+   "expect": "The record-store credential is disabled; whether other residual authority exists or works is unknown.",
+   "answer": "**Lakeshore Habitat is partially offboarded \u2014 two access removals are recorded, but residual access cannot be confirmed closed from the record.**\n\nWhat the record establishes:\n- Engagement end date agreed as 31 August 2026 \u2014 **FACT**, 2026-08-25 decision record\n- Service member deleted from directory \u2014 **FACT**, 2026-08-27 admin-record\n- Record-store credential disabled \u2014 **FACT**, 2026-08-28 admin-record\n\nWhat the record does **not** establish (residual access questions):\n- Whether any bearer tokens or active sessions were revoked \u2014 **UNKNOWN**, no record addresses token/session invalidation\n- Whether any other credentials beyond the record-store credential were issued \u2014 **UNKNOWN**, the record only mentions this one credential\n- Whether any data exports, API keys, or integration bindings remain \u2014 **UNKNOWN**, not documented\n- Whether any post-termination obligations (final invoice, data return, etc.) remain open \u2014 **UNKNOWN**, not recorded\n\n**Needs attention:**\n- A person needs to verify whether token/session revocation was performed and document it.\n- A person needs to confirm whether any other credentials or access paths were ever issued to this account.\n- Until those are recorded, offboarding cannot be stated as fully complete.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6133",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 9,
+   "case": "offboarding-unknown",
+   "verdict": "PASS",
+   "why": "reports the proven closure and residual authority uncertainty separately",
+   "question": "Is Lakeshore Habitat fully offboarded, including residual access?",
+   "expect": "The record-store credential is disabled; whether other residual authority exists or works is unknown.",
+   "answer": "**Lakeshore Habitat is partially offboarded \u2014 residual access is UNKNOWN.**\n\nThe record establishes two offboarding actions completed:\n- Service member deleted from directory \u2014 **FACT**, 2026-08-27 admin-record\n- Record-store credential disabled \u2014 **FACT**, 2026-08-28 admin-record\n\nBut the record does **not** establish:\n- Whether any bearer tokens or active sessions remain valid \u2014 **UNKNOWN**, credential disablement does not prove session termination\n- Whether other access mechanisms existed (API keys, shared credentials, delegated permissions) \u2014 **UNKNOWN**, not recorded\n- Whether the counterparty confirmed offboarding completion \u2014 **UNKNOWN**, Jordan Bell is marked \"not engaged\" and no confirmation is recorded\n- Whether final obligations were closed (final report, invoice, data return) \u2014 **UNKNOWN**, nothing recorded\n\n**Needs attention:**\n- A person should verify whether any bearer sessions or tokens remain active beyond the credential disablement\n- Consider obtaining written confirmation from Jordan Bell that Lakeshore Habitat no longer has access, given the \"not engaged\" status",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6133",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 10,
+   "case": "offboarding-unknown",
+   "verdict": "FAIL",
+   "why": "the answer must lead with UNKNOWN or say full offboarding is not established",
+   "question": "Is Lakeshore Habitat fully offboarded, including residual access?",
+   "expect": "The record-store credential is disabled; whether other residual authority exists or works is unknown.",
+   "answer": "**Lakeshore Habitat is not fully offboarded \u2014 the record establishes two closure actions but does not prove all residual access was revoked.**\n\nExamined 1 account record (LH-004). Findings:\n\n- **Engagement end date agreed: 31 August 2026** \u2014 FACT, 2026-08-25 decision record\n- **Service member deleted from directory** \u2014 FACT, 2026-08-27 admin-record\n- **Record-store credential disabled** \u2014 FACT, 2026-08-28 admin-record\n- **Whether any bearer tokens, API keys, or active sessions remain valid** \u2014 UNKNOWN, no record addresses these\n\nThe instructions explicitly warn that deletion of a service member is not proof that every credential or session was revoked. The record shows the two requested items (member removal, credential disablement) were completed, but offboarding completeness depends on what access vectors existed. If Lakeshore Habitat had bearer tokens, service accounts, or shared keys beyond the named credential, the record does not show those were revoked.\n\n**Needs attention:**\n- A person should verify whether any access methods beyond the record-store credential were issued to this account, and confirm their revocation if so.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6133",
+    "records": "10",
+    "state": "complete"
+   }
+  }
+ ]
+}

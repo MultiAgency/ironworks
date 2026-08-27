@@ -1,0 +1,12 @@
+# Copy to /var/lib/ironclaw/CLIENT/config.toml and replace every CLIENT. The preflight rejects a
+# service whose tenant, default owner, authenticated user and systemd instance do not all agree.
+api_version = "ironclaw.runtime/v1"
+
+[identity]
+tenant = "CLIENT"
+default_owner = "CLIENT"
+default_agent = "CLIENT-agent"
+
+[webui]
+env_token_var = "IRONCLAW_REBORN_WEBUI_TOKEN"
+env_user_id_var = "IRONCLAW_REBORN_WEBUI_USER_ID"

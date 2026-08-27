@@ -1,0 +1,26 @@
+target/
+**/*.rs.bk
+
+# Tenant configuration and guidance never live in the repo. Only synthetic fixtures do.
+*.env
+!fixtures/tenants/*.env.template
+.agency/
+
+# Python bytecode from the dev/ scripts
+__pycache__/
+
+# Local tool state, none of it this repo's business.
+.wrangler/
+.playwright-mcp/
+
+# The whole site is generated. Nothing under it is tracked: a generated page that slips
+# into a commit is a page that can disagree with the composition it claims to describe.
+#
+# **Anchored, and that matters.** Unanchored, `site/` matches at any depth — it swallowed the
+# whole of `crates/site/`, the generator itself, which git then reported as untracked while
+# everything built and tested normally. A leading slash confines it to the output directory.
+/site/
+
+# Where the operator page is generated. Deliberately NOT site/, so regenerating it cannot
+# publish it by ending up in the next deploy.
+/local/

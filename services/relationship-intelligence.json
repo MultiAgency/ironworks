@@ -1,0 +1,21 @@
+{
+  "service": "relationship-intelligence",
+  "version": 2,
+  "responsibility": "Coordinate MultiAgency's accounts from their dated records across onboarding, active delivery, renewal and offboarding: identify commitments, dependencies, changes, contradictions, staleness and what needs a person. Derive current state rather than reading or advancing a stored verdict. Recommend; never act.",
+  "composition": {
+    "parts": [
+      "personas/COORDINATOR.md",
+      "skills/relationship-record/SKILL.md"
+    ],
+    "guidance_heading": "# ORGANIZATION GUIDANCE (scoped to this organization only)",
+    "safety_tail": "personas/_safety-tail.md"
+  },
+  "capabilities": {
+    "records": "read-only",
+    "writes": "none",
+    "egress": "none",
+    "outreach": "none",
+    "runtime_tools": "none"
+  },
+  "evaluation": "fixtures/account-coordination"
+}

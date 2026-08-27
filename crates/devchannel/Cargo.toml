@@ -1,0 +1,22 @@
+[package]
+name = "ironworks-devchannel"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "ironworks-devchannel"
+path = "src/main.rs"
+
+# A semantics fixture, not a Telegram clone. It models the four things IronWorks actually depends
+# on — poll with an offset, per-chunk outbound acceptance, redelivery until acknowledged, and
+# deterministic faults — and nothing else. Every feature beyond those makes the live gate less
+# trustworthy, because the thing under test would be less like a real channel and more like this.
+[dependencies]
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

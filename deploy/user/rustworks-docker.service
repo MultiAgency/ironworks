@@ -1,0 +1,26 @@
+[Unit]
+# Installed once in /etc/systemd/user and enabled only for each ironclaw-<client> account. Docker's
+# supported rootless lifecycle is a user manager, not a system service with User=.
+Description=Rootless Docker sandbox daemon for one IronClaw client
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=notify
+NotifyAccess=all
+Environment=PATH=/usr/bin:/sbin:/usr/sbin
+Environment=DOCKER_HOST=unix://%t/docker.sock
+ExecStart=/usr/bin/dockerd-rootless.sh --host=unix://%t/docker.sock --data-root=%h/docker --exec-root=%t/docker-exec --pidfile=%t/docker.pid
+ExecReload=/bin/kill -s HUP $MAINPID
+Restart=always
+RestartSec=3
+TimeoutStopSec=20
+KillMode=mixed
+Delegate=yes
+TasksMax=infinity
+LimitNOFILE=infinity
+LimitNPROC=infinity
+LimitCORE=infinity
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,87 @@
+# A DISPOSABLE IronClaw at the pinned revision. Not a deployment, and not a dev environment.
+#
+# It exists to answer contract questions about the runtime we build against — how failures
+# classify, what an idempotency conflict looks like, what `GET` reports for `model` — without
+# touching anything real. Brought up and torn down by dev/probe-up.sh.
+#
+# It shares NOTHING with any live stack: its own project name, containers, volume, port, and
+# secrets minted per run. The database is tmpfs, so it dies with the stack.
+#
+# NEARAI_API_KEY defaults to a placeholder. The runtime refuses to start without the variable
+# set, but a turn only reaches the provider at completion time — so every contract question that
+# does not need a model answer is reachable with the placeholder. Export a real key only for the
+# experiments that need a real completion.
+name: multiprobe
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: ${PROBE_PGPW:?minted by dev/probe-up.sh}
+      POSTGRES_DB: ironclaw
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ironclaw"]
+      interval: 3s
+      timeout: 3s
+      retries: 25
+    tmpfs: [/var/lib/postgresql/data]
+    mem_limit: 1g
+    security_opt: [no-new-privileges:true]
+
+  # ── the one-shot that makes 1.4.0 boot without widening the runtime ──────────────────────
+  # From IronClaw 1.4.0 the entrypoint chowns $IRONCLAW_REBORN_HOME to `ironclaw` and THEN,
+  # still running as root, `mkdir -p`s $HOME/workspace — writing into a directory root no longer
+  # owns. Under `cap_drop: [ALL]` root has no DAC_OVERRIDE, so that mkdir fails and boot dies.
+  #
+  # `mkdir -p` on an EXISTING directory is a no-op that never writes to the parent, so creating
+  # it up front removes the failing operation entirely.
+  #
+  # The image bakes /data/ironclaw-reborn as 1000:1000 mode 0755 and a fresh named volume is
+  # seeded from it — which is WHY root fails: root has no DAC_OVERRIDE here, and the directory
+  # belongs to `ironclaw`. So this runs AS `ironclaw`, which owns it, and therefore needs no root
+  # and NO CAPABILITIES AT ALL. It is a strictly smaller authority than the runtime it precedes.
+  #
+  # Deterministic on a fresh volume, and a no-op on an existing one: the runtime's own entrypoint
+  # chowns $IRONCLAW_REBORN_HOME to `ironclaw` on every boot, so the directory this creates stays
+  # owned by the uid that created it.
+  ic-init:
+    image: ${PROBE_IMAGE:?derived from IRONCLAW_PIN by dev/probe-up.sh}
+    user: "1000:1000"
+    entrypoint: ["/bin/sh", "-c"]
+    command: ["mkdir -p /data/ironclaw-reborn/workspace"]
+    volumes: [ic-data:/data]
+    restart: "no"
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  ic:
+    # Tag derived from IRONCLAW_PIN by probe-up.sh. There is no default here on purpose: a
+    # fallback would be the one value that can silently outrank the pin, and a probe that
+    # measured a different revision than the one we build against is worse than no probe.
+    image: ${PROBE_IMAGE:?derived from IRONCLAW_PIN by dev/probe-up.sh}
+    depends_on:
+      db: { condition: service_healthy }
+      ic-init: { condition: service_completed_successfully }
+    environment:
+      IRONCLAW_REBORN_PROFILE: production
+      IRONCLAW_REBORN_POSTGRES_URL: postgres://postgres:${PROBE_PGPW:?}@db:5432/ironclaw
+      DATABASE_SSLMODE: disable
+      IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT: "true"
+      IRONCLAW_REBORN_SECRET_MASTER_KEY: ${PROBE_MASTER_KEY:?}
+      IRONCLAW_REBORN_WEBUI_TOKEN: ${PROBE_WEBUI_TOKEN:?}
+      # Must match the image's baked [identity].default_owner or the runtime refuses to start.
+      IRONCLAW_REBORN_WEBUI_USER_ID: ${PROBE_WEBUI_USER:-reborn-cli}
+      NEARAI_API_KEY: ${NEARAI_API_KEY:-placeholder-no-completions}
+      NEARAI_BASE_URL: https://cloud-api.near.ai
+      IRONCLAW_REBORN_SERVE_HOST: "0.0.0.0"
+      IRONCLAW_REBORN_LOG: info
+      IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON: "true"
+    ports: ["127.0.0.1:${PROBE_PORT:-3997}:3000"]
+    volumes: [ic-data:/data]
+    mem_limit: 4g
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID]
+
+volumes:
+  ic-data:

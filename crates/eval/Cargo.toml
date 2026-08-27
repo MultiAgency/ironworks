@@ -1,0 +1,29 @@
+[package]
+name = "ironworks-eval"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The driver, kept in its own crate so `ironworks-graders` can stay dependency-free.
+#
+# A grader must not be able to reach a runtime, a record store or a credential — one that could
+# would be able to influence what it grades. A driver by definition reaches all three. Splitting
+# them is what lets `crates/graders` declare no dependencies and mean it.
+#
+# `sha2` and `serde_json` are already in the lockfile; this adds no new transitive dependency.
+# `ironworks-evidence` holds the book fingerprint, shared with the page generators rather than
+# reimplemented here: a fingerprint that disagrees with itself binds nothing.
+[[bin]]
+name = "ironworks-eval"
+path = "src/main.rs"
+
+[dependencies]
+ironworks-graders = { path = "../graders" }
+ironworks-evidence = { path = "../evidence" }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+
+[lints]
+workspace = true

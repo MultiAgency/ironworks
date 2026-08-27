@@ -1,0 +1,24 @@
+=== offboarding-unknown, n=10, 2026-09-02T02:48:33Z ===
+eval: account-coordination graders from crates/graders
+eval: composing relationship-intelligence — alloy 25575 (3770e0942624bda4), guidance 7315e01922241034
+eval: 1 case(s) x 10 run(s), fresh journal each, records http://127.0.0.1:3996
+
+  FAIL     offboarding-unknown  asserted non-existence exceeds the record; scope the absence to recorded evidence
+  PASS     offboarding-unknown  reports the proven closure and residual authority uncertainty separately
+  PASS     offboarding-unknown  reports the proven closure and residual authority uncertainty separately
+  PASS     offboarding-unknown  reports the proven closure and residual authority uncertainty separately
+  PASS     offboarding-unknown  reports the proven closure and residual authority uncertainty separately
+  PASS     offboarding-unknown  reports the proven closure and residual authority uncertainty separately
+  PASS     offboarding-unknown  reports the proven closure and residual authority uncertainty separately
+  PASS     offboarding-unknown  reports the proven closure and residual authority uncertainty separately
+  PASS     offboarding-unknown  reports the proven closure and residual authority uncertainty separately
+  PASS     offboarding-unknown  reports the proven closure and residual authority uncertainty separately
+
+--------------------------------------------------------------------------
+  9/10 pass · 1 fail · 0 review · 0 blocked
+  alloy digest 3770e0942624bda4 — this result describes that composition and no other
+  book 0f1291ddd6c78fcb (10 records) · attribution bound
+  scope: one-shot turns, fresh journal per case. No continuation is built, so this
+         is --isolate semantics always.
+  transcript written to docs/experiments/0028-account-coordination-offboarding-held-out.json
+=== exit=2 2026-09-02T02:53:44Z ===

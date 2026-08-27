@@ -1,0 +1,23 @@
+[Unit]
+# The channel adapter: the seam's /poll and /send on one side, the Telegram Bot API on the other.
+Description=Rust IronWorks Telegram channel adapter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/rustworks
+# The token reaches exactly one process and never a command line: an argument is visible in `ps`
+# to every user on the box, and this file is 0600.
+EnvironmentFile=/etc/rustworks/telegram.env
+ExecStart=/opt/rustworks/target/release/ironworks-telegram --port 3994
+Restart=always
+RestartSec=5
+User=rustworks
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,111 @@
+=== probe A: onboarding, n=10, 2026-09-01T20:23:03Z ===
+eval: account-coordination graders from /Users/jlwaugh/agency/multi/fixtures/account-coordination/cases.py
+eval: composing relationship-intelligence@2 — alloy 3770e0942624bda4 (25575 bytes), guidance 7315e01922241034
+eval: 1 case(s) x 10 run(s), fresh journal each, records http://127.0.0.1:3996
+
+==========================================================================
+RUN 1/10
+==========================================================================
+  PASS     onboarding           distinguishes agreed, requested and received onboarding evidence
+==========================================================================
+RUN 2/10
+==========================================================================
+  FAIL     onboarding           one claim carries two evidence tiers; split supported and unknown claims
+==========================================================================
+RUN 3/10
+==========================================================================
+  PASS     onboarding           distinguishes agreed, requested and received onboarding evidence
+==========================================================================
+RUN 4/10
+==========================================================================
+  PASS     onboarding           distinguishes agreed, requested and received onboarding evidence
+==========================================================================
+RUN 5/10
+==========================================================================
+  PASS     onboarding           distinguishes agreed, requested and received onboarding evidence
+==========================================================================
+RUN 6/10
+==========================================================================
+  PASS     onboarding           distinguishes agreed, requested and received onboarding evidence
+==========================================================================
+RUN 7/10
+==========================================================================
+  PASS     onboarding           distinguishes agreed, requested and received onboarding evidence
+==========================================================================
+RUN 8/10
+==========================================================================
+  PASS     onboarding           distinguishes agreed, requested and received onboarding evidence
+==========================================================================
+RUN 9/10
+==========================================================================
+  PASS     onboarding           distinguishes agreed, requested and received onboarding evidence
+==========================================================================
+RUN 10/10
+==========================================================================
+  PASS     onboarding           distinguishes agreed, requested and received onboarding evidence
+
+--------------------------------------------------------------------------
+  9/10 pass · 1 fail · 0 review · 0 blocked
+  alloy digest 3770e0942624bda4 — this result describes that composition and no other
+  consistency: 0/1 cases gave the same verdict every run; UNSTABLE: ['onboarding']
+  scope: one-shot turns, fresh journal per case. Compare against `run_eval.py --isolate`,
+         not its shared-thread default — continuation is not built here.
+  transcript written to docs/experiments/0022-onboarding-stability.json
+=== probe A exit=2 ===
+
+=== probe B: ownership-default, n=10, 2026-09-01T20:30:59Z ===
+eval: account-coordination graders from /Users/jlwaugh/agency/multi/fixtures/account-coordination/cases.py
+eval: composing relationship-intelligence@2 — alloy 3770e0942624bda4 (25575 bytes), guidance 7315e01922241034
+eval: 1 case(s) x 10 run(s), fresh journal each, records http://127.0.0.1:3996
+
+==========================================================================
+RUN 1/10
+==========================================================================
+  ????     ownership-default    counterparty ownership needs a cited request or handoff
+==========================================================================
+RUN 2/10
+==========================================================================
+  ????     ownership-default    counterparty ownership needs a cited request or handoff
+==========================================================================
+RUN 3/10
+==========================================================================
+  PASS     ownership-default    defaults ownership inward because no request or handoff is recorded
+==========================================================================
+RUN 4/10
+==========================================================================
+  FAIL     ownership-default    must explain that no recorded request or handoff moves ownership outward
+==========================================================================
+RUN 5/10
+==========================================================================
+  PASS     ownership-default    defaults ownership inward because no request or handoff is recorded
+==========================================================================
+RUN 6/10
+==========================================================================
+  FAIL     ownership-default    asserted non-existence exceeds the record; scope the absence to recorded evidence
+==========================================================================
+RUN 7/10
+==========================================================================
+  PASS     ownership-default    defaults ownership inward because no request or handoff is recorded
+==========================================================================
+RUN 8/10
+==========================================================================
+  FAIL     ownership-default    must explain that no recorded request or handoff moves ownership outward
+==========================================================================
+RUN 9/10
+==========================================================================
+  FAIL     ownership-default    must explain that no recorded request or handoff moves ownership outward
+==========================================================================
+RUN 10/10
+==========================================================================
+  PASS     ownership-default    defaults ownership inward because no request or handoff is recorded
+
+--------------------------------------------------------------------------
+  4/10 pass · 4 fail · 2 review · 0 blocked
+  REVIEW means the grader could not tell. Read those answers; do not count them.
+  alloy digest 3770e0942624bda4 — this result describes that composition and no other
+  consistency: 0/1 cases gave the same verdict every run; UNSTABLE: ['ownership-default']
+  scope: one-shot turns, fresh journal per case. Compare against `run_eval.py --isolate`,
+         not its shared-thread default — continuation is not built here.
+  transcript written to docs/experiments/0022-ownership-default-stability.json
+=== probe B exit=2 ===
+=== done 2026-09-01T20:35:25Z ===

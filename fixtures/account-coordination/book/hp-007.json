@@ -1,0 +1,35 @@
+{
+  "_synthetic": "SYNTHETIC ACCOUNT-COORDINATION EVALUATION DATA — invented, never a real organization.",
+  "record_id": "HP-007",
+  "account": {
+    "name": "Harbor Point Logistics",
+    "domain": "harbor-point.example",
+    "industry": "Freight forwarding",
+    "owner": "Riley",
+    "stage": null,
+    "updated_at": "2026-08-26T11:00:00+00:00"
+  },
+  "contacts": [
+    {"contact_id": "HP-C1", "name": "Wren Okafor", "title": "Operations Lead", "engaged": true}
+  ],
+  "activities": [
+    {
+      "activity_id": "HP-A1",
+      "occurred_at": "2026-07-14",
+      "kind": "agreement",
+      "body": "Both parties signed the services agreement. Onboarding completed the same week and the record-store credential was issued."
+    },
+    {
+      "activity_id": "HP-A2",
+      "occurred_at": "2026-08-15",
+      "kind": "note",
+      "body": "The August operating report was delivered on the agreed date. Wren acknowledged receipt and raised no questions."
+    },
+    {
+      "activity_id": "HP-A3",
+      "occurred_at": "2026-08-26",
+      "kind": "call",
+      "body": "Routine check-in. Wren confirmed nothing is outstanding on either side. The next review is scheduled for 2026-09-24."
+    }
+  ]
+}

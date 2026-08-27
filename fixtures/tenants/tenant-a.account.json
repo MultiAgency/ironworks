@@ -1,0 +1,40 @@
+{
+  "_synthetic": "SYNTHETIC PROOF BOOK \u2014 invented organization, not real. Domains are .example (RFC 2606) so no fabricated detail is ever attached to a registrable name. See multi/verify/fixtures/README.md.",
+  "record_id": "NW-001",
+  "account": {
+    "name": "Northwind Labs",
+    "domain": "northwind-labs.example",
+    "industry": "B2B SaaS (workflow analytics)",
+    "employees": 600,
+    "headquarters": "Denver, CO",
+    "cloud": null,
+    "stated_problem": "Support team handles 500+ tickets/week from a help center with no chatbot; first-response times are slipping.",
+    "current_tooling": null,
+    "budget": null,
+    "timeline": null,
+    "decision_process": null,
+    "economic_buyer": null
+  },
+  "contacts": [
+    {
+      "name": "Dana Reyes",
+      "title": "Head of Support Ops",
+      "engaged": true,
+      "notes": "Initiated contact; took a first call last week; clearly engaged. Owns the support function."
+    }
+  ],
+  "activities": [
+    {
+      "activity_id": "NW-INT-01",
+      "occurred_at": "2026-08-02",
+      "kind": "note",
+      "body": "Inbound: reached out through the website contact form. Support team underwater \u2014 500+ tickets/week, help center but no chatbot, first-response times slipping."
+    },
+    {
+      "activity_id": "NW-INT-02",
+      "occurred_at": "2026-08-09",
+      "kind": "call",
+      "body": "First call with Dana Reyes (Head of Support Ops). Confirmed the volume and the pain; engaged. Did not cover budget, helpdesk platform, or timeline."
+    }
+  ]
+}

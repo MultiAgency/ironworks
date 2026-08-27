@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-115",
+ "account": {
+  "name": "Orchard Lane Bakeries",
+  "domain": "orchard-lane-bakeries.example",
+  "industry": "Food service",
+  "employees": 70,
+  "headquarters": "Portland, ME",
+  "cloud": null,
+  "stated_problem": "Order sheets are phoned in and transcribed.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-115-A1",
+   "occurred_at": "2026-04-28",
+   "kind": "call",
+   "body": "Small operation. Interest genuine, budget unlikely."
+  }
+ ]
+}

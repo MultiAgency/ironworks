@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-109",
+ "account": {
+  "name": "Ironvale Mining Services",
+  "domain": "ironvale-mining-services.example",
+  "industry": "Mining services",
+  "employees": 540,
+  "headquarters": "Duluth, MN",
+  "cloud": null,
+  "stated_problem": "Shift reports are handwritten and typed later.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-109-A1",
+   "occurred_at": "2026-03-11",
+   "kind": "call",
+   "body": "Early call. Nothing since; contact changed roles."
+  }
+ ]
+}

@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-107",
+ "account": {
+  "name": "Glasshouse Optics",
+  "domain": "glasshouse-optics.example",
+  "industry": "Optical components",
+  "employees": 120,
+  "headquarters": "Rochester, NY",
+  "cloud": null,
+  "stated_problem": "Inspection results are transcribed from instruments.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-107-A1",
+   "occurred_at": "2026-05-14",
+   "kind": "call",
+   "body": "Interested in principle. No named owner."
+  }
+ ]
+}

@@ -1,0 +1,52 @@
+
+.case { margin-top: 44px; }
+.case > .panel { padding: 26px 28px; }
+.ask {
+  font-size: 19px; font-weight: 600; line-height: 1.4; margin: 0 0 4px;
+  text-wrap: balance; letter-spacing: -0.01em;
+}
+.grade { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline; margin-bottom: 22px; }
+.grade .why { color: var(--muted); font-size: 13px; }
+.grade .rg { font-size: 11px; color: var(--muted); border-bottom: 1px solid var(--steel); }
+
+.cols { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 34px; }
+@media (max-width: 860px) { .cols { grid-template-columns: minmax(0, 1fr); } }
+
+.answer p, .answer li { margin: 0 0 12px; }
+.answer .h { font-weight: 600; margin: 18px 0 8px; }
+.answer .h:first-child { margin-top: 0; }
+.answer ul { margin: 0 0 12px; padding-left: 20px; }
+.answer .s { padding: 1px 0; }
+.answer .s.bare {
+  background: var(--blocked-bg); box-shadow: -4px 0 0 var(--blocked);
+  padding-left: 6px; margin-left: 4px;
+}
+.answer .s.named { border-bottom: 1px dotted var(--muted); }
+.answer .s.inherited { border-bottom: 1px dotted var(--rule); }
+.answer .s.anchored { border-bottom: 1px solid var(--pass); }
+.answer .lbl {
+  font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px;
+  letter-spacing: 0.06em;
+}
+.answer .lbl.FACT { color: var(--pass); }
+.answer .lbl.STATED { color: var(--blocked); }
+.answer .lbl.UNKNOWN { color: var(--muted); }
+
+.ev { display: flex; flex-direction: column; gap: 14px; }
+.ev .item { border-left: 2px solid var(--rule); padding-left: 13px; }
+.ev .meta {
+  font-family: "IBM Plex Mono", ui-monospace, monospace; font-size: 11px;
+  color: var(--muted); letter-spacing: 0.03em; display: block; margin-bottom: 5px;
+}
+.ev .body {
+  font-size: 13px; line-height: 1.5; color: var(--ink);
+  background: var(--sunken); padding: 9px 11px; border-radius: 2px;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.ev .loose { color: var(--muted); font-size: 12px; }
+.counts {
+  display: flex; flex-wrap: wrap; gap: 6px 20px; margin-top: 20px; padding-top: 14px;
+  border-top: 1px solid var(--rule); font-size: 12.5px; color: var(--muted);
+}
+.counts b { color: var(--ink); font-weight: 600; }
+.counts .warn { color: var(--blocked); font-weight: 600; }

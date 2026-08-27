@@ -1,0 +1,29 @@
+{
+  "_synthetic": "SYNTHETIC ACCOUNT-COORDINATION EVALUATION DATA — invented, never a real organization.",
+  "record_id": "BF-010",
+  "account": {
+    "name": "Bramble Fields Cooperative",
+    "domain": "bramble-fields.example",
+    "industry": "Agricultural supply",
+    "owner": "Riley",
+    "stage": null,
+    "updated_at": "2026-08-27T13:15:00+00:00"
+  },
+  "contacts": [
+    {"contact_id": "BF-C1", "name": "Dara Whitfield", "title": "General Manager", "engaged": true}
+  ],
+  "activities": [
+    {
+      "activity_id": "BF-A1",
+      "occurred_at": "2026-07-02",
+      "kind": "agreement",
+      "body": "Both parties signed the services agreement. The technical owner and sample export were supplied the same day and onboarding was recorded complete."
+    },
+    {
+      "activity_id": "BF-A2",
+      "occurred_at": "2026-08-27",
+      "kind": "email",
+      "body": "Dara confirmed the July and August invoices were paid and that the cooperative has no open requests. The next check-in is scheduled for 2026-09-30."
+    }
+  ]
+}

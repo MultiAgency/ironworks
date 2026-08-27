@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-102",
+ "account": {
+  "name": "Bramble Foods",
+  "domain": "bramble-foods.example",
+  "industry": "Food manufacturing",
+  "employees": 240,
+  "headquarters": "Fresno, CA",
+  "cloud": null,
+  "stated_problem": "Production schedules are rebuilt in a spreadsheet each Monday.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-102-A1",
+   "occurred_at": "2026-05-28",
+   "kind": "call",
+   "body": "Discussed scheduling. Wants to revisit after harvest season."
+  }
+ ]
+}

@@ -1,0 +1,87 @@
+# An overlay that moves the probe onto the SERVED profile.
+#
+#   docker compose -p multiprobe -f docker-compose.probe.yml -f docker-compose.probe-sandboxed.yml …
+#
+# `dev/probe-up.sh --sandboxed` does that. Everything not mentioned here is inherited from the base
+# file, deliberately: the two stacks must differ only in the things the profile actually changes,
+# or a result that differs between them tells you nothing about the profile.
+#
+# ── why this exists ─────────────────────────────────────────────────────────────────────────
+#
+# `docs/experiments/0037-what-the-seam-never-asked-for.md` measured eight contract questions on
+# `production`, and closed by saying none of them had been repeated on
+# `hosted-single-tenant-volume-sandboxed`. §L-10 and `dev/prove-workspace.sh` need that profile
+# too, and until this file there was no way to stand one up. `deploy/README.md` describes the
+# served topology and needs a deployment host; this needs a laptop.
+#
+# ── why a private daemon and not the host socket ────────────────────────────────────────────
+#
+# The profile boots a per-user worker container, so the control plane needs a Docker daemon. The
+# obvious shortcut is to bind-mount `/var/run/docker.sock` into `ic`, and `deploy/README.md` names
+# exactly why not: it "would give that container control of the host while making the deployment
+# look confined". A probe that models the served shape by breaking its central property is worse
+# than no probe.
+#
+# So `dind` is a daemon of the probe's own, on the probe's own network, thrown away with the stack.
+# It is the disposable analogue of the per-client rootless daemon in ADR 0008 — not the same
+# mechanism, and it must not be described as a proof of that one. What it reproduces is the shape:
+# the control plane reaches a daemon that is not the host's.
+#
+# `privileged: true` is on `dind` and stays off `ic`. That is the whole point of the split — the
+# privilege lives in a container that holds no tenant credential, runs no model, and is deleted on
+# teardown.
+#
+# ── what still has to happen outside this file ──────────────────────────────────────────────
+#
+# Each daemon has its own image store, so images on the host are invisible here — the same fact
+# `deploy/README.md` records for rootless daemons. `dev/probe-up.sh --sandboxed` builds
+# `ironclaw-worker:latest` from the pinned revision and loads it into `dind`. The managed egress
+# proxy is a digest-pinned public image and `dind` pulls it on first use, so this stack needs
+# outbound network the base one does not.
+name: multiprobe
+
+services:
+  dind:
+    image: docker:27-dind
+    privileged: true
+    # TLS off, because the only thing that can reach 2375 is a container on this stack's own
+    # network: the port is never published to the host. Turning it on would add a certificate
+    # dance to a daemon whose entire lifetime is one probe.
+    environment:
+      DOCKER_TLS_CERTDIR: ""
+    command: ["--host=tcp://0.0.0.0:2375", "--host=unix:///var/run/docker.sock"]
+    healthcheck:
+      test: ["CMD", "docker", "info"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+    volumes:
+      # The worker's bind mount is resolved by the daemon that creates it, so the workspace root
+      # must exist at the SAME path in both containers. Mounting one volume twice is what makes
+      # `/workspace-root` mean one directory rather than two empty ones.
+      - ws:/workspace-root
+    mem_limit: 4g
+
+  ic:
+    depends_on:
+      dind: { condition: service_healthy }
+    environment:
+      # The one line this overlay exists for.
+      IRONCLAW_REBORN_PROFILE: hosted-single-tenant-volume-sandboxed
+      # `IRONCLAW_REBORN_DOCKER_HOST`, not `DOCKER_HOST`: the runtime reads its own name and does
+      # not honour the conventional one, so setting the wrong one fails closed with "could not
+      # connect to Docker daemon" — measured, not guessed.
+      IRONCLAW_REBORN_DOCKER_HOST: tcp://dind:2375
+      # The second, separately-named opt-in upstream requires before that variable may point at a
+      # non-loopback plaintext daemon. Its own comment names the case: "a DinD/CI sidecar reachable
+      # at a container-network IP, not 127.0.0.1". The authority being granted is real — the Docker
+      # Engine API can create containers and mount paths — and here it reaches one throwaway daemon
+      # on a network with no route off this machine.
+      IRONCLAW_REBORN_DOCKER_HOST_ALLOW_REMOTE: "true"
+      IRONCLAW_REBORN_WORKSPACE_ROOT: /workspace-root
+    volumes:
+      - ic-data:/data
+      - ws:/workspace-root
+
+volumes:
+  ws:

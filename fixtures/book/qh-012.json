@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "QH-012",
+ "account": {
+  "name": "Quarry Hill Ceramics",
+  "domain": "quarry-hill.example",
+  "industry": "Industrial ceramics",
+  "employees": 85,
+  "headquarters": "Zanesville, OH",
+  "cloud": null,
+  "stated_problem": "Order confirmations are typed from faxed POs.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "QH-A1",
+   "occurred_at": "2026-04-19",
+   "kind": "note",
+   "body": "Brief inbound enquiry. No call scheduled. No response to two follow-ups since."
+  }
+ ]
+}

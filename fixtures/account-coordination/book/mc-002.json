@@ -1,0 +1,29 @@
+{
+  "_synthetic": "SYNTHETIC ACCOUNT-COORDINATION EVALUATION DATA — invented, never a real organization.",
+  "record_id": "MC-002",
+  "account": {
+    "name": "Meridian Commons",
+    "domain": "meridian-commons.example",
+    "industry": "Property operations",
+    "owner": "Riley",
+    "stage": null,
+    "updated_at": "2026-08-20T10:30:00+00:00"
+  },
+  "contacts": [
+    {"contact_id": "MC-C1", "name": "Sam Ortiz", "title": "COO", "engaged": true}
+  ],
+  "activities": [
+    {
+      "activity_id": "MC-A1",
+      "occurred_at": "2026-06-01",
+      "kind": "agreement",
+      "body": "The signed schedule requires MultiAgency to deliver the operating report on the 15th of each month."
+    },
+    {
+      "activity_id": "MC-A2",
+      "occurred_at": "2026-08-18",
+      "kind": "variation",
+      "body": "A written variation signed by both parties replaces the 15th-of-the-month reporting date with the last business day of each month, beginning in August."
+    }
+  ]
+}

@@ -1,0 +1,46 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "BW-010",
+ "account": {
+  "name": "Blackwater Instruments",
+  "domain": "blackwater-inst.example",
+  "industry": "Precision instruments",
+  "employees": 310,
+  "headquarters": "Rochester, NY",
+  "cloud": null,
+  "stated_problem": "Quoting takes 3-5 days because engineering must hand-check every configuration.",
+  "current_tooling": null,
+  "budget": "$60k approved for the quoting initiative",
+  "timeline": "Wants a decision within 6 weeks",
+  "decision_process": "VP Sales recommends; CFO signs.",
+  "economic_buyer": "CFO (Nadia Whitfield)"
+ },
+ "contacts": [
+  {
+   "name": "Owen Marsh",
+   "title": "VP Sales",
+   "engaged": true,
+   "notes": "Sponsor. Pushing internally."
+  },
+  {
+   "name": "Nadia Whitfield",
+   "title": "CFO",
+   "engaged": false,
+   "notes": "Has not met with us."
+  }
+ ],
+ "activities": [
+  {
+   "activity_id": "BW-A1",
+   "occurred_at": "2026-07-28",
+   "kind": "call",
+   "body": "Owen walked through the quoting bottleneck with numbers: 40 quotes/week, 3-5 day turnaround, roughly 15% lost to slow response."
+  },
+  {
+   "activity_id": "BW-A2",
+   "occurred_at": "2026-08-12",
+   "kind": "email",
+   "body": "Owen confirmed $60k is approved and asked what we need from them to move."
+  }
+ ]
+}

@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-111",
+ "account": {
+  "name": "Kestrel Print Group",
+  "domain": "kestrel-print-group.example",
+  "industry": "Commercial printing",
+  "employees": 95,
+  "headquarters": "Louisville, KY",
+  "cloud": null,
+  "stated_problem": "Quote revisions are emailed back and forth.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-111-A1",
+   "occurred_at": "2026-06-02",
+   "kind": "call",
+   "body": "Owner interested but very price-sensitive."
+  }
+ ]
+}

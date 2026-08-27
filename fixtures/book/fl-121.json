@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-121",
+ "account": {
+  "name": "Underhill Publishing",
+  "domain": "underhill-publishing.example",
+  "industry": "Publishing",
+  "employees": 80,
+  "headquarters": "Ann Arbor, MI",
+  "cloud": null,
+  "stated_problem": "Permissions tracking is a shared spreadsheet.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-121-A1",
+   "occurred_at": "2026-05-22",
+   "kind": "call",
+   "body": "Interested; very small team, limited bandwidth."
+  }
+ ]
+}

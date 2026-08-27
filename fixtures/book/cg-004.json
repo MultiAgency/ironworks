@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "CG-004",
+ "account": {
+  "name": "Continental Grain Partners",
+  "domain": "continental-grain.example",
+  "industry": "Agricultural commodities",
+  "employees": 12000,
+  "headquarters": "Chicago, IL",
+  "cloud": null,
+  "stated_problem": null,
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "CG-A1",
+   "occurred_at": "2026-05-03",
+   "kind": "email",
+   "body": "Asked to be removed from all outreach. Stated they have an internal team and no interest. Do not contact again."
+  }
+ ]
+}

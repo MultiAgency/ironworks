@@ -1,0 +1,37 @@
+{
+  "_synthetic": "SYNTHETIC ACCOUNT-COORDINATION EVALUATION DATA — invented, never a real organization.",
+  "record_id": "JW-001",
+  "account": {
+    "name": "Juniper Works",
+    "domain": "juniper-works.example",
+    "industry": "Industrial services",
+    "owner": "Morgan",
+    "stage": null,
+    "budget": null,
+    "timeline": null,
+    "updated_at": "2026-08-12T14:00:00+00:00"
+  },
+  "contacts": [
+    {"contact_id": "JW-C1", "name": "Avery Chen", "title": "Operations Director", "engaged": true}
+  ],
+  "activities": [
+    {
+      "activity_id": "JW-A1",
+      "occurred_at": "2026-08-03",
+      "kind": "agreement",
+      "body": "Both parties signed the services agreement. The agreement says onboarding precedes any live service work."
+    },
+    {
+      "activity_id": "JW-A2",
+      "occurred_at": "2026-08-05",
+      "kind": "email",
+      "body": "MultiAgency sent the onboarding checklist and asked Juniper Works for a representative sample export and the name of the technical owner. The note says the technical review can be scheduled after both arrive."
+    },
+    {
+      "activity_id": "JW-A3",
+      "occurred_at": "2026-08-09",
+      "kind": "email",
+      "body": "Avery supplied security and billing contacts."
+    }
+  ]
+}

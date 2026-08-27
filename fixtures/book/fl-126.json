@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-126",
+ "account": {
+  "name": "Ashford Wholesale",
+  "domain": "ashford-wholesale.example",
+  "industry": "Wholesale",
+  "employees": 215,
+  "headquarters": "Memphis, TN",
+  "cloud": null,
+  "stated_problem": "Pick lists are printed and marked up.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-126-A1",
+   "occurred_at": "2026-06-13",
+   "kind": "call",
+   "body": "Warehouse manager interested; IT is the blocker."
+  }
+ ]
+}

@@ -1,0 +1,40 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "CD-002",
+ "account": {
+  "name": "Cobalt Dental Group",
+  "domain": "cobalt-dental.example",
+  "industry": "Multi-site dental",
+  "employees": 210,
+  "headquarters": "Columbus, OH",
+  "cloud": null,
+  "stated_problem": "Front-desk staff spend hours reconciling insurance eligibility by phone.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [
+  {
+   "name": "Priya Raman",
+   "title": "Director of Revenue Cycle",
+   "engaged": true,
+   "notes": "Strong internal advocate; ran the pilot conversation."
+  }
+ ],
+ "activities": [
+  {
+   "activity_id": "CD-A1",
+   "occurred_at": "2026-02-14",
+   "kind": "call",
+   "body": "Priya is a genuine champion \u2014 offered to socialize this with the COO and pull a data sample."
+  },
+  {
+   "activity_id": "CD-A2",
+   "occurred_at": "2026-07-22",
+   "kind": "note",
+   "body": "Heard from the front desk that Priya left Cobalt in June. No replacement named. No one has picked this up since."
+  }
+ ]
+}

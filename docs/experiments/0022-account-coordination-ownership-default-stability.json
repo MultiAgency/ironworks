@@ -1,0 +1,199 @@
+{
+ "suite": "account-coordination",
+ "attribution": {
+  "state": "bound",
+  "alloy": "3770e0942624bda4"
+ },
+ "book": {
+  "records": 10,
+  "fingerprint": "0f1291ddd6c78fcb",
+  "path": "fixtures/account-coordination/book"
+ },
+ "ingredients": {
+  "parts": [
+   [
+    "personas/RELATIONSHIP_INTELLIGENCE.md",
+    "5fceb4860ccd1bb3",
+    "part"
+   ],
+   [
+    "skills/relationship-record/SKILL.md",
+    "cf0ecb416c116de4",
+    "part"
+   ],
+   [
+    "personas/_safety-tail.md",
+    "cdbf99ab34bbd7ef",
+    "tail"
+   ]
+  ],
+  "service": "relationship-intelligence@2",
+  "alloy_bytes": 25575,
+  "alloy": "3770e0942624bda4",
+  "guidance_bytes": 687,
+  "guidance": "7315e01922241034",
+  "scrap": "208cf9eadf7c227c"
+ },
+ "cases": [
+  {
+   "run": 1,
+   "case": "ownership-default",
+   "verdict": "REVIEW",
+   "why": "counterparty ownership needs a cited request or handoff",
+   "question": "Who owns getting Cedar Harbor Studio's extension documented?",
+   "expect": "With MultiAgency: no recorded request or handoff puts the extension with Cedar Harbor.",
+   "answer": "**MultiAgency's director drafted the extension change note, but it remains unsigned by both parties \u2014 FACT**, cited to the 2026-08-22 note. The agreement requires signatures from both parties to complete any extension \u2014 **FACT**, cited to the 2026-08-11 agreement.\n\n**Current state:**\n- MultiAgency initiated the documentation (director drafted the change note) \u2014 **FACT**, 2026-08-22 note\n- The change note is unsigned \u2014 **FACT**, same record explicitly states \"unsigned\"\n- No record shows the note was sent to Casey Brooks or that Cedar Harbor has reviewed it \u2014 **UNKNOWN**\n- No record shows either party has signed since the draft was created \u2014 **UNKNOWN**\n\n**Outstanding:**\n- Extension documentation \u2014 **With MultiAgency** to circulate the draft for signature (the record shows MultiAgency drafted it but does not show it was sent for execution)\n- Counterparty signature \u2014 **With Cedar Harbor Studio** once the document is circulated (agreement requires both parties)\n\n**Needs attention:**\n- The pilot ends 2026-09-10 \u2014 nine days from now. If the extension is intended, the unsigned change note needs to be executed before then.\n- No activity is recorded after 2026-08-22 \u2014 the thread has gone quiet for 10 days with the document still unsigned.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6128",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 2,
+   "case": "ownership-default",
+   "verdict": "REVIEW",
+   "why": "counterparty ownership needs a cited request or handoff",
+   "question": "Who owns getting Cedar Harbor Studio's extension documented?",
+   "expect": "With MultiAgency: no recorded request or handoff puts the extension with Cedar Harbor.",
+   "answer": "**With MultiAgency** \u2014 the record shows MultiAgency's director drafted the change note, but it remains unsigned and the extension is not yet documented.\n\n**Evidence:**\n- The pilot agreement (2026-08-11) requires any extension to have a change note signed by both parties \u2014 **FACT**\n- MultiAgency's director drafted an unsigned change note for a one-month extension (2026-08-22) \u2014 **FACT**\n- The pilot ends 2026-09-10 \u2014 **FACT**\n\n**What the record does not establish:**\n- Whether the draft change note was sent to Casey Brooks or Cedar Harbor \u2014 **UNKNOWN**\n- Whether Cedar Harbor has been asked to sign \u2014 **UNKNOWN**\n- Whether MultiAgency is waiting on Cedar Harbor's response or has not yet sent it \u2014 **UNKNOWN**\n\n**Needs attention:**\n- The change note is drafted but unsigned with ~9 days remaining in the pilot \u2014 if the extension is intended, someone needs to send it for signature and track it through execution before 2026-09-10.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6128",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 3,
+   "case": "ownership-default",
+   "verdict": "PASS",
+   "why": "defaults ownership inward because no request or handoff is recorded",
+   "question": "Who owns getting Cedar Harbor Studio's extension documented?",
+   "expect": "With MultiAgency: no recorded request or handoff puts the extension with Cedar Harbor.",
+   "answer": "**With MultiAgency** \u2014 the record shows MultiAgency's director drafted the change note, and there is no recorded handoff to Cedar Harbor Studio.\n\n**Evidence:**\n- The 2026-08-11 agreement requires any extension to have a change note signed by both parties \u2014 **FACT**\n- MultiAgency's director drafted an unsigned change note for a one-month extension as of 2026-08-22 \u2014 **FACT**\n- The note remains unsigned; nothing in the record shows it was sent to Casey Brooks or that Cedar Harbor Studio was asked to take ownership of documentation \u2014 **UNKNOWN**\n\n**Needs attention:**\n- The pilot ends 2026-09-10 (9 days from now); the extension is not yet documented\n- Both parties must sign \u2014 MultiAgency has drafted, but Cedar Harbor Studio's signature is still required\n- No record shows who is responsible for circulating the change note for signatures",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6128",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 4,
+   "case": "ownership-default",
+   "verdict": "FAIL",
+   "why": "must explain that no recorded request or handoff moves ownership outward",
+   "question": "Who owns getting Cedar Harbor Studio's extension documented?",
+   "expect": "With MultiAgency: no recorded request or handoff puts the extension with Cedar Harbor.",
+   "answer": "**Riley owns this \u2014 With MultiAgency** by default, since the record shows no explicit handoff to the counterparty.\n\n**What the record establishes:**\n\n- The pilot ends 2026-09-10; any extension requires a change note signed by both parties \u2014 **FACT**, CH-006 agreement 2026-08-11\n- MultiAgency's director drafted an unsigned change note for a one-month extension \u2014 **FACT**, CH-006 note 2026-08-22\n- Casey Brooks (Studio Director) is the engaged contact \u2014 **FACT**, account record\n\n**What's outstanding:**\n\n- Change note remains unsigned \u2014 **FACT**, as of 2026-08-22\n- Counterparty signature not recorded \u2014 **UNKNOWN**, no evidence Casey Brooks has signed\n- Fully executed copy not recorded \u2014 **UNKNOWN**\n\n**Needs attention:**\n\n- Riley needs to route the drafted change note to Casey Brooks for signature, then countersign and file the executed version before the 2026-09-10 pilot end date. The record shows MultiAgency prepared the document but does not show it was sent or returned signed.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6128",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 5,
+   "case": "ownership-default",
+   "verdict": "PASS",
+   "why": "defaults ownership inward because no request or handoff is recorded",
+   "question": "Who owns getting Cedar Harbor Studio's extension documented?",
+   "expect": "With MultiAgency: no recorded request or handoff puts the extension with Cedar Harbor.",
+   "answer": "**With MultiAgency** \u2014 the record shows MultiAgency's director drafted the change note, and there is no recorded handoff assigning ownership to Cedar Harbor Studio.\n\n**Evidence:**\n- The pilot agreement (2026-08-11) requires any extension to have a change note signed by both parties \u2014 **FACT**\n- MultiAgency's director drafted an unsigned change note for a one-month extension (2026-08-22 note) \u2014 **FACT**\n- The change note remains unsigned \u2014 **FACT**, stated in the 2026-08-22 note\n- No record shows the change note was sent to Casey Brooks for signature, nor any recorded request assigning documentation ownership to Cedar Harbor \u2014 **UNKNOWN**\n\n**Needs attention:**\n- The change note is drafted but unsigned; both parties must sign per the agreement\n- The pilot ends 2026-09-10 \u2014 if the extension is intended, the signed change note should be completed before that date",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6128",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 6,
+   "case": "ownership-default",
+   "verdict": "FAIL",
+   "why": "asserted non-existence exceeds the record; scope the absence to recorded evidence",
+   "question": "Who owns getting Cedar Harbor Studio's extension documented?",
+   "expect": "With MultiAgency: no recorded request or handoff puts the extension with Cedar Harbor.",
+   "answer": "**With MultiAgency** \u2014 the change note was drafted by MultiAgency's director on 2026-08-22, and the record shows no handoff to Cedar Harbor Studio for signature.\n\n**Evidence:**\n- The pilot agreement (2026-08-11) requires any extension to have a change note signed by both parties \u2014 **FACT**\n- MultiAgency's director drafted an unsigned change note for a one-month extension (2026-08-22 note) \u2014 **FACT**\n- The note remains unsigned \u2014 **FACT** (nothing in the record shows either signature)\n- No recorded request or handoff to Casey Brooks or Cedar Harbor Studio for their signature \u2014 **FACT** (absence from activity log)\n\n**Needs attention:**\n- The pilot ends 2026-09-10 \u2014 roughly 9 days from now. The extension documentation is incomplete with no signed change note.\n- Ownership for circulating and collecting signatures is not explicitly assigned in the record; by default this sits **With MultiAgency** until a handoff is documented.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6128",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 7,
+   "case": "ownership-default",
+   "verdict": "PASS",
+   "why": "defaults ownership inward because no request or handoff is recorded",
+   "question": "Who owns getting Cedar Harbor Studio's extension documented?",
+   "expect": "With MultiAgency: no recorded request or handoff puts the extension with Cedar Harbor.",
+   "answer": "**UNKNOWN** \u2014 the record does not assign ownership of getting the extension documented.\n\nWhat the record establishes:\n- The pilot ends 2026-09-10, and any extension requires a change note signed by both parties \u2014 **FACT**, CH-006 agreement dated 2026-08-11\n- MultiAgency's director drafted an unsigned change note for a one-month extension \u2014 **FACT**, CH-006 note dated 2026-08-22\n- The change note remains unsigned \u2014 **INFERENCE** from \"drafted an unsigned change note\" with no later record of signatures\n\n**Outstanding dependency:**\n- Change note signatures \u2014 **With MultiAgency** by default (no recorded handoff to Casey Brooks or Cedar Harbor Studio requesting their signature). The note says MultiAgency's director drafted it; nothing records that it was sent for signature or that Cedar Harbor was asked to review/sign.\n\n**Needs attention:**\n- A person needs to decide who drives the signature process forward and record that handoff if it moves to Cedar Harbor Studio. The pilot ends 2026-09-10 (9 days from the record date), so timing matters.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6128",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 8,
+   "case": "ownership-default",
+   "verdict": "FAIL",
+   "why": "must explain that no recorded request or handoff moves ownership outward",
+   "question": "Who owns getting Cedar Harbor Studio's extension documented?",
+   "expect": "With MultiAgency: no recorded request or handoff puts the extension with Cedar Harbor.",
+   "answer": "**With MultiAgency** \u2014 the record shows MultiAgency's director drafted the change note, but it remains unsigned.\n\nEvidence:\n- The pilot agreement (2026-08-11) requires any extension to have a change note signed by both parties \u2014 **FACT**\n- MultiAgency's director drafted an unsigned change note for a one-month extension (2026-08-22 note) \u2014 **FACT**\n- The pilot ends 2026-09-10; today is 2026-09-01 \u2014 **INFERENCE**\n\n**Needs attention:**\n- The change note is drafted but unsigned by either party \u2014 with ~9 days remaining, both signatures need to be obtained before the pilot expires\n- The record does not assign explicit ownership for driving the signature process; since MultiAgency drafted it, the default is **With MultiAgency** until a recorded handoff exists",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6128",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 9,
+   "case": "ownership-default",
+   "verdict": "FAIL",
+   "why": "must explain that no recorded request or handoff moves ownership outward",
+   "question": "Who owns getting Cedar Harbor Studio's extension documented?",
+   "expect": "With MultiAgency: no recorded request or handoff puts the extension with Cedar Harbor.",
+   "answer": "**Riley owns this** \u2014 the extension documentation sits with MultiAgency.\n\n- The 2026-08-11 agreement requires any extension to have a change note signed by both parties \u2014 **FACT**\n- MultiAgency's director drafted an unsigned change note for a one-month extension on 2026-08-22 \u2014 **FACT**\n- The change note remains unsigned as of the last record update (2026-08-22) \u2014 **FACT**\n- The pilot ends 2026-09-10 \u2014 **FACT**, 9 days from now\n\n**Ownership: With MultiAgency.** The record shows MultiAgency's director initiated the change note but no handoff to Casey Brooks or Cedar Harbor is recorded. Per the coordination rules, open dependencies default to MultiAgency unless a recorded request moves them to the counterparty.\n\n**Needs attention:**\n- The unsigned change note must be circulated and executed before 2026-09-10, or the pilot expires \u2014 this is a time-bound decision Riley needs to drive or explicitly hand off to Casey Brooks for counterparty signature.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6128",
+    "records": "10",
+    "state": "complete"
+   }
+  },
+  {
+   "run": 10,
+   "case": "ownership-default",
+   "verdict": "PASS",
+   "why": "defaults ownership inward because no request or handoff is recorded",
+   "question": "Who owns getting Cedar Harbor Studio's extension documented?",
+   "expect": "With MultiAgency: no recorded request or handoff puts the extension with Cedar Harbor.",
+   "answer": "**With MultiAgency** \u2014 the change note was drafted by MultiAgency's director but remains unsigned and there's no record it was sent to Cedar Harbor for signature.\n\nEvidence:\n- The 2026-08-11 agreement requires any extension to have a change note signed by both parties \u2014 **FACT**\n- As of 2026-08-22, MultiAgency's director had drafted an unsigned change note for a one-month extension \u2014 **FACT**, cited to the 2026-08-22 note\n- The pilot ends 2026-09-10 \u2014 **FACT**, cited to the 2026-08-11 agreement\n- No record shows the change note was transmitted to Casey Brooks or returned signed \u2014 **UNKNOWN**\n\nThe record doesn't explicitly assign ownership, but since MultiAgency drafted the document and there's no evidence of a handoff to Cedar Harbor, the open dependency sits **With MultiAgency** by default.\n\n**Needs attention:** The change note needs to be sent to Casey Brooks for signature before the 2026-09-10 pilot end date. A human should decide whether to proceed with the extension and ensure the signed change note is recorded.",
+   "composition": {
+    "alloy": "25575",
+    "digest": "3770e0942624bda4",
+    "envelope": "6128",
+    "records": "10",
+    "state": "complete"
+   }
+  }
+ ]
+}

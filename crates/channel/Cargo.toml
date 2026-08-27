@@ -1,0 +1,33 @@
+[package]
+name = "ironworks-channel"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# THIS DEPENDENCY LIST IS AN INVARIANT, not a convenience, and `dependencies_are_the_narrow_set`
+# in src/lib.rs asserts it byte for byte.
+#
+# A channel cursor is shared across tenants, so the thing that computes it is the one object in
+# this system that is not scoped to a single verified instance. It must therefore be structurally
+# incapable of holding tenant business authority or model context — and the cheapest way to make
+# that structural rather than careful is to deny it the crates where those types live. It cannot
+# reach a record, a service definition, a persona or the runtime transport, because it cannot
+# NAME them.
+#
+# It learns exactly one thing about a tenant's work, through `ironworks_domain::TurnProgress`:
+# open, or settled.
+[dependencies]
+ironworks-domain = { path = "../domain" }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+thiserror = { workspace = true }
+
+# Dev-only, and deliberately so: the crash boundaries are about how the channel journal and the
+# turn journal recover *together*, which cannot be shown from either side alone. A dev-dependency
+# reaches the tests and never the library, so the rule above still holds where it matters.
+[dev-dependencies]
+ironworks-journal = { path = "../journal" }
+
+[lints]
+workspace = true

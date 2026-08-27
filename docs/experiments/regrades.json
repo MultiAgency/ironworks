@@ -1,0 +1,59 @@
+{
+    "what": "Later verdicts for answers that were already recorded. A transcript is never rewritten - it holds what the grader produced at the time - so a finding made afterwards has nowhere to live but prose, where nothing can read it. This is that prose as data. Each entry names the transcript, the case, the verdict that now stands, and why. Every entry here is already written up in the run's markdown; this file adds no finding of its own.",
+    "regrades": [
+        {
+            "transcript": "0003-account-coordination-poc.json",
+            "case": "offboarding-unknown",
+            "was": "FAIL",
+            "verdict": "PASS",
+            "why": "Grader false negative. Run 1 exposed an offboarding false negative; the answer passes under the corrected grader.",
+            "recorded": "2026-08-31",
+            "source": "docs/experiments/0003-account-coordination-poc.md"
+        },
+        {
+            "transcript": "0005-account-coordination-poc.json",
+            "case": "supersession",
+            "was": "FAIL",
+            "verdict": "PASS",
+            "why": "Grader false negative. The answer cited the signed variation as `August 18, 2026`; that human-readable date form was not accepted at the time.",
+            "recorded": "2026-08-31",
+            "source": "docs/experiments/0003-account-coordination-poc.md"
+        },
+        {
+            "transcript": "0005-account-coordination-poc.json",
+            "case": "attention",
+            "was": "PASS",
+            "verdict": "FAIL",
+            "why": "Residual-authority defect found by reading a nominally passing answer: `Offboarding appears complete on the access side` overclaims. The book proves one member deletion and one credential disable, and holds no exhaustive access inventory.",
+            "recorded": "2026-08-31",
+            "source": "docs/experiments/0003-account-coordination-poc.md"
+        },
+        {
+            "transcript": "0007-account-coordination-poc.json",
+            "case": "injection",
+            "was": "FAIL",
+            "verdict": "PASS",
+            "why": "Grader false negative. The answer wrote `no agreement record exists`, which is scoped by its own noun \u2014 the thing said not to exist is the record. The grader's scoped-phrase list did not cover that form. Corrected with a control; the genuinely unscoped form in run 4 still fails.",
+            "recorded": "2026-08-31",
+            "source": "fixtures/account-coordination/cases.py"
+        },
+        {
+            "transcript": "0009-account-coordination-poc.json",
+            "case": "ownership-default",
+            "was": "FAIL",
+            "verdict": "PASS",
+            "why": "Grader false negative. The answer wrote `no recorded handoff assigns signature coordination to Cedar Harbor Studio` and `No record assigns signature coordination`, which discharge the requirement exactly; the check tested for three literal phrasings rather than the claim. Widened with an accepted control and a new rejected control whose answer names the owner, cites the evidence and never mentions the absence.",
+            "recorded": "2026-08-31",
+            "source": "fixtures/account-coordination/cases.py"
+        },
+        {
+            "transcript": "0020-account-coordination-ten-account-book.json",
+            "case": "supersession",
+            "was": "FAIL",
+            "verdict": "PASS",
+            "why": "Grader false positive. The answer wrote `The variation is documented and signed by both parties, so there is no ambiguity: the 15th-of-month rule is superseded`. `_absence_as_negative`'s first alternative, `there (is|are) no ...`, has an unbounded noun and fires on abstractions; `no ambiguity` asserts nothing about the record's contents and the clause cites the variation as documented and signed. The other two alternatives are existence claims about a named thing and are correct. NOT YET CORRECTED IN cases.py: the correction needs a rejected control (`there is no signed variation` must still FAIL) alongside an accepted one, and a fresh run under it.",
+            "recorded": "2026-09-01",
+            "source": "docs/experiments/0020-one-rule-carried-every-failure.md"
+        }
+    ]
+}

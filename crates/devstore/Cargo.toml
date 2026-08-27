@@ -1,0 +1,23 @@
+[package]
+name = "ironworks-devstore"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "ironworks-devstore"
+path = "src/main.rs"
+
+# Deliberately minimal: no database, no framework, no migrations. This is a proof fixture, not a
+# deployment, and anything it grows makes the live gate less trustworthy rather than more.
+[dependencies]
+# For `ContributorId`: the contributor grammar the append route enforces is a domain rule, and
+# asking the type is what makes this fixture agree with production by construction rather than by
+# a restated regex.
+ironworks-domain = { path = "../domain" }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

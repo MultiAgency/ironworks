@@ -1,0 +1,54 @@
+/* the demo: pick a question, watch it answered against the records it was given */
+
+.lede { padding: 8px 0 4px; }
+.lede h1 { font-size: 34px; line-height: 1.15; letter-spacing: -0.02em; margin: 12px 0 18px;
+           max-width: 22ch; }
+.lede p { font-size: 17px; line-height: 1.55; max-width: 62ch; margin: 0 0 14px; }
+.lede .kicker { color: var(--muted); }
+
+.job { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 20px;
+       margin: 6px 0 2px; }
+.job div { border-left: 2px solid var(--rule); padding-left: 14px; }
+.job b { display: block; font-size: 14px; margin-bottom: 4px; }
+.job span { color: var(--muted); font-size: 14px; line-height: 1.5; }
+
+/* The picker is radio inputs and labels: no script, and the page works with none. */
+.picker { display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 20px; }
+.picker label { border: 1px solid var(--rule); border-radius: 999px; padding: 7px 14px;
+                font-size: 13px; cursor: pointer; color: var(--muted); background: var(--panel); }
+.picker label:hover { border-color: var(--steel); color: var(--ink); }
+.demo input { position: absolute; opacity: 0; pointer-events: none; }
+.demo input:focus-visible + .picker label[data-first] { outline: 2px solid var(--steel);
+                                                        outline-offset: 2px; }
+
+.shown { display: none; }
+#pick-0:checked ~ .panels > .shown:nth-of-type(1),
+#pick-1:checked ~ .panels > .shown:nth-of-type(2),
+#pick-2:checked ~ .panels > .shown:nth-of-type(3),
+#pick-3:checked ~ .panels > .shown:nth-of-type(4),
+#pick-4:checked ~ .panels > .shown:nth-of-type(5),
+#pick-5:checked ~ .panels > .shown:nth-of-type(6),
+#pick-6:checked ~ .panels > .shown:nth-of-type(7) { display: block; }
+
+#pick-0:checked ~ .picker label[for="pick-0"],
+#pick-1:checked ~ .picker label[for="pick-1"],
+#pick-2:checked ~ .picker label[for="pick-2"],
+#pick-3:checked ~ .picker label[for="pick-3"],
+#pick-4:checked ~ .picker label[for="pick-4"],
+#pick-5:checked ~ .picker label[for="pick-5"],
+#pick-6:checked ~ .picker label[for="pick-6"] {
+  background: var(--steel); border-color: var(--steel); color: var(--bg); font-weight: 500;
+}
+
+.recorded { color: var(--muted); font-size: 12.5px; margin: 0 0 16px; }
+.recorded .mono { color: var(--ink); }
+
+.trust ul { margin: 0; padding-left: 20px; }
+.trust li { margin: 0 0 10px; line-height: 1.55; }
+.trust b { font-weight: 600; }
+
+.gap { border-left: 2px solid var(--amber); padding-left: 16px; }
+.gap p { margin: 0 0 10px; }
+
+.ask .big { font-size: 20px; font-weight: 600; margin: 0 0 12px; }
+.ask .cta a { color: var(--steel); font-weight: 500; }

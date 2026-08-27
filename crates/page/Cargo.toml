@@ -1,0 +1,17 @@
+[package]
+name = "ironworks-page"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Shared page furniture: one palette, one type scale, one set of panel and table rules, so a
+# second page cannot quietly become a second design. Each generator adds only what is its own.
+#
+# No dependencies. Escaping and a document shell need none, and a template engine here would be a
+# dependency in the one place where the output is read by strangers.
+[dependencies]
+
+[lints]
+workspace = true

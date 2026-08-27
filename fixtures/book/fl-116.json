@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-116",
+ "account": {
+  "name": "Pelham Instruments",
+  "domain": "pelham-instruments.example",
+  "industry": "Test equipment",
+  "employees": 145,
+  "headquarters": "Nashua, NH",
+  "cloud": null,
+  "stated_problem": "Calibration records are kept in binders.",
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-116-A1",
+   "occurred_at": "2026-07-11",
+   "kind": "call",
+   "body": "Quality lead engaged. Wants a written scope before anything."
+  }
+ ]
+}

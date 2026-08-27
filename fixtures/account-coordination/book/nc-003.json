@@ -1,0 +1,30 @@
+{
+  "_synthetic": "SYNTHETIC ACCOUNT-COORDINATION EVALUATION DATA — invented, never a real organization.",
+  "record_id": "NC-003",
+  "account": {
+    "name": "Northline Cooperative",
+    "domain": "northline-cooperative.example",
+    "industry": "Logistics cooperative",
+    "owner": "Morgan",
+    "stage": null,
+    "updated_at": "2026-08-24T16:00:00+00:00"
+  },
+  "contacts": [
+    {"contact_id": "NC-C1", "name": "Devin Brooks", "title": "Program Lead", "engaged": true},
+    {"contact_id": "NC-C2", "name": "Taylor Singh", "title": "Procurement Manager", "engaged": true}
+  ],
+  "activities": [
+    {
+      "activity_id": "NC-A1",
+      "occurred_at": "2026-08-21",
+      "kind": "call",
+      "body": "Devin said the executive team approved a twelve-month renewal and that paperwork would follow. No approval document was attached."
+    },
+    {
+      "activity_id": "NC-A2",
+      "occurred_at": "2026-08-23",
+      "kind": "email",
+      "body": "Taylor wrote that procurement has not approved a renewal and asked MultiAgency not to treat the account as renewed."
+    }
+  ]
+}

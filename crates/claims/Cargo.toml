@@ -1,0 +1,30 @@
+[package]
+name = "ironworks-claims"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Fail when a written claim disagrees with what the tree measures.
+#
+# Most checks are ordinary `#[test]`s and run with everything else; two cannot be, and
+# the reason is worth stating rather than discovering:
+#
+#   - the **documented commands** check asks `target/debug/ironworks` whether it knows a flag, so
+#     it depends on a build artifact that may not exist when tests run. A check that reports
+#     BLOCKED half the time teaches its reader to skim it.
+#   - the **toolchain** check shells out to `cargo test` and `cargo clippy`. As a `#[test]` the
+#     first would invoke the harness running it.
+#
+# So `cargo test` enforces the ones that are pure file reading — which are also the ones that have
+# actually caught drift — and `ironworks-claims` runs all of them.
+[[bin]]
+name = "ironworks-claims"
+path = "src/main.rs"
+
+[dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

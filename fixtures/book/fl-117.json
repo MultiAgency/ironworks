@@ -1,0 +1,27 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "FL-117",
+ "account": {
+  "name": "Quill & Sons Joinery",
+  "domain": "quill-sons-joinery.example",
+  "industry": "Millwork",
+  "employees": 55,
+  "headquarters": "Asheville, NC",
+  "cloud": null,
+  "stated_problem": null,
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": [
+  {
+   "activity_id": "FL-117-A1",
+   "occurred_at": "2026-05-06",
+   "kind": "call",
+   "body": "Enquiry via website. One call, no follow-up."
+  }
+ ]
+}

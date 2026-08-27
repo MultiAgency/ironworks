@@ -1,0 +1,20 @@
+{
+ "_synthetic": "SYNTHETIC EVALUATION DATA \u2014 invented organizations, not real. See multi/eval/README.md.",
+ "record_id": "PA-003",
+ "account": {
+  "name": "Perch Analytics",
+  "domain": "perch-analytics.example",
+  "industry": "Data tooling",
+  "employees": 45,
+  "headquarters": "Portland, OR",
+  "cloud": null,
+  "stated_problem": null,
+  "current_tooling": null,
+  "budget": null,
+  "timeline": null,
+  "decision_process": null,
+  "economic_buyer": null
+ },
+ "contacts": [],
+ "activities": []
+}

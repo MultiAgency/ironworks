@@ -1,0 +1,29 @@
+{
+  "_synthetic": "SYNTHETIC ACCOUNT-COORDINATION EVALUATION DATA — invented, never a real organization.",
+  "record_id": "AG-009",
+  "account": {
+    "name": "Alder Grove Trust",
+    "domain": "alder-grove.example",
+    "industry": "Land conservation",
+    "owner": "Riley",
+    "stage": null,
+    "updated_at": "2026-08-29T08:45:00+00:00"
+  },
+  "contacts": [
+    {"contact_id": "AG-C1", "name": "Nils Bergstrom", "title": "Programme Director", "engaged": true}
+  ],
+  "activities": [
+    {
+      "activity_id": "AG-A1",
+      "occurred_at": "2026-05-19",
+      "kind": "agreement",
+      "body": "The signed schedule sets a monthly summary due on the last business day. Onboarding completed 2026-05-22."
+    },
+    {
+      "activity_id": "AG-A2",
+      "occurred_at": "2026-08-29",
+      "kind": "note",
+      "body": "The August summary was delivered on the last business day, as it has been each month since May. Nils confirmed receipt."
+    }
+  ]
+}
