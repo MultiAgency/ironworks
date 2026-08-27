@@ -154,6 +154,15 @@ non-zero on *info*-level findings. A local `-S warning` hides those, so your fil
 every time you check it and fails the gate anyway. Your local check and the gate must ask the
 same question, and the gate's is the stricter one.
 
+**Match the pinned version, too — `shellcheck 0.11.0`.** The flag is not the only way the two
+questions come apart. CI used to `apt-get install -y shellcheck`, which takes whatever the runner
+image carries, so the gate drifted with Ubuntu and could not be reproduced anywhere: on
+2026-08-27 the runner's copy raised three SC2015 findings that 0.11.0 does not, seam-ci had been
+red on every run because of it, and five Dependabot PRs were blocked behind a failure none of
+them had caused. `.github/workflows/seam-ci.yml` now installs a checksummed release, so
+`shellcheck --version` matching that pin is what makes your local run mean anything. Bumping the
+pin means re-reading whatever it newly reports rather than assuming the tree moved.
+
 **Do not trust a bare `node --check FILE.js`.** It exits 0 on a syntactically broken file when
 that file contains an `import` — the ESM-detection path skips the check. Reading the file on
 stdin with `--input-type=module` fails correctly on both. This is not hypothetical; see the

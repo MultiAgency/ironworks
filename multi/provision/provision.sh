@@ -423,8 +423,15 @@ else
   fi
   IRONCLAW_USER_ID="$(printf '%s' "$sealed_out" | sed -n 's/^IRONCLAW_USER_ID=//p')"
   IRONCLAW_TOKEN="$(printf '%s' "$sealed_out" | sed -n 's/^IRONCLAW_TOKEN=//p')"
-  [ -n "$IRONCLAW_USER_ID" ] && [ -n "$IRONCLAW_TOKEN" ] \
-    || { echo "!! provision-client.sh --env returned no usable IRONCLAW_USER_ID/IRONCLAW_TOKEN" >&2; exit 1; }
+  # `if`, not `A && B || C`. Both operands here are pure `[` tests, so the old form behaved
+  # correctly — but this guards a member credential that has just been MINTED, and the next
+  # line records it in the journal. In that shape any command later inserted between the
+  # operands makes its failure fire the abort too, silently widening what "no usable id" means.
+  # The compensator path is the wrong place to leave that edge.
+  if [ -z "$IRONCLAW_USER_ID" ] || [ -z "$IRONCLAW_TOKEN" ]; then
+    echo "!! provision-client.sh --env returned no usable IRONCLAW_USER_ID/IRONCLAW_TOKEN" >&2
+    exit 1
+  fi
   CREATED_MEMBER=1
   journal set "$SLUG" member_minted "ironclaw_user_id=$IRONCLAW_USER_ID" >/dev/null
 
