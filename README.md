@@ -1,131 +1,127 @@
-# ironworks — the MultiAgency agent fleet
+# IronWorks
 
-This repo is the config + tooling for **MultiAgency**, all of it running on the
-**official, unmodified [ironclaw](https://github.com/nearai/ironclaw) binary** (the
-agent OS / harness). **No custom binary, no fork, no edits to ironclaw** — everything
-here is config, data (personas), and scripts.
+IronWorks is MultiAgency's operator-run application layer around official, unmodified
+[IronClaw](https://github.com/nearai/ironclaw). It supplies organization scope, service
+composition, trusted business records, tenant lifecycle, answer-quality evaluation for the
+account-analysis composition, and operational security.
 
-**The product is [`multi/`](multi/)**: one Multi agent serving many clients, each
-sealed in their own account on a single **multi-tenant** ironclaw instance. The
-instance seals the data; the persona and each client's business context are injected
-**per turn** by the channel seam. Data isolation between clients is harness-enforced
-and proven on both the compliant and the hostile path (cross-account reads 404, no
-code-exec — see [`multi/verify/`](multi/verify/)).
+Two services currently share one multi-tenant path:
 
-Alongside it runs **the internal control plane** — **Multron**, the crew's own
-coordination agent, an isolated single-tenant ironclaw instance (own container, bot,
-persona, memory). Earlier control-plane agents were retired; `deploy/provision-agent.sh`
-stands up a replacement from any persona file, so the pattern outlives any one of them.
+- `account-analysis@1` — external organization-scoped account analysis;
+- `relationship-intelligence@1` — MultiAgency's private relationship record, running on the
+  canonical multi-tenant product path.
 
-This repo — **`ironworks`** — is the foundry that builds and runs all of it; the
-system is **MultiAgency**.
+The product derives current commitments, obligations, relationship state, risk, and next actions
+from durable account, contact, and activity records. Guidance carries policy; records carry facts.
+It is not a sales pipeline, workflow engine, general ontology, self-service platform, or IronClaw
+fork. New domain entities require a current use the existing record cannot represent.
 
-## The one rule
+## Architecture
 
-> Run unmodified official ironclaw. Everything here is config, data, and tooling.
+```text
+Telegram group
+  -> one trusted bridge and private tenant registry
+  -> organization-scoped Account Service context
+  -> service definition + mandatory tenant guidance + safety tail
+  -> tenant's sealed IronClaw account
+  -> SQLite delivery journal and Telegram reply
+```
 
-The old setup ran a *patched ironclaw fork*, so every upstream pull conflicted. Now
-nothing here edits ironclaw's tree — pulling upstream is a clean rebuild. Pull updates =
-bump the pinned rev, rebuild the image, re-provision.
+The runtime owns model execution, threads, memory, tools, and sealed accounts; IronWorks owns the
+adapter around it. An organization scopes business data and the tenant is the application boundary
+that binds that scope to routing, a sealed member, guidance, and a service definition. Member
+tokens belong exclusively to the seam, and runtime state is measured with operator commands rather
+than documented as an inventory. [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) owns the
+boundaries and what the adapter may and may not do; [`SECURITY.md`](SECURITY.md) owns the security
+contract.
 
-The version of record for ironclaw is the one-line `IRONCLAW_PIN` file at this repo's
-root — the rev every image is built from, bumped only via `deploy/UPGRADE.md`. Between a
-pin edit and the rebuild that follows it the fleet still serves the *previous* rev; the
-bump commit records both, and `deploy/UPGRADE.md` is the procedure that closes the gap.
-"Verified at the pinned rev" elsewhere in the docs means a fact was checked against
-whatever `IRONCLAW_PIN` held at the time — so a bump is what obliges re-checking it, not
-the passage of time.
+## Components
 
-There is a second pin beside it: **`MODEL_PIN`** names the model of record for every
-agent, and — unusually for a one-line file — says *why*, because the choice is a product
-promise and not just a cost line. Changing it changes what can honestly be claimed about
-where prompts are processed, so the file asks you to re-test behaviour before editing it.
+- `multi/services/`: committed service compositions.
+- `multi/clients/`: registry and tenant-guidance schema; live files are private.
+- `multi/seam/`: trusted context adapter, composition, bridge, redaction, and delivery state.
+- `multi/provision/`: resumable tenant activation, confinement, and deletion.
+- `multi/serve/`: private-host units, watchdog, and backups.
+- `deploy/account-intel/`: organization-scoped Account Service.
+- `multi/verify/`: runnable isolation and recovery proofs.
+- `agent/identity/` and `skills/`: executable prompt data, not ordinary documentation.
 
-`MODEL_PIN` has the same edit-to-deployment gap as `IRONCLAW_PIN` above, and it does not
-close everywhere at once — so after a bump the fleet is briefly split across two models.
-The proofs read the pin per run, so they move immediately. The seam reads it at import
-(`multi/seam/context_ingress.py`), so the bridge moves on its next restart. The secretary
-Worker bundles it at BUILD time, so it moves only on the next `wrangler deploy` — it is
-the laggard, and it is the visitor-facing one. Bump the pin, then redeploy the Worker;
-until you do, the front desk is still answering on the previous model and nothing in a
-reply will say so.
+## What else is in this repository
 
-## Quickstart
+Two things here are operated and maintained but are **not** the canonical product path above.
+Nothing in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) or [`SECURITY.md`](SECURITY.md)
+describes them, and they hold none of the tenant, organization, guidance, or service-definition
+constructs that define IronWorks.
 
-You bring an [official ironclaw](https://github.com/nearai/ironclaw) build and a few
-credentials; the scripts here do the wiring.
+- **The single-tenant fleet** (`deploy/provision-agent.sh`, `deploy/doctor.sh`,
+  `deploy/migrate-image.sh`, `deploy/update-persona.sh`, `deploy/enable-device-link.sh`,
+  `deploy/vidgen/`, and the group personas in `agent/identity/`): one IronClaw instance, volume,
+  bot, and baked persona per agent. Supported adjunct and shared operational tooling — it runs
+  MultiAgency's own contributor agents and standalone group agents, shares `IRONCLAW_PIN`,
+  `MODEL_PIN`, and `deploy/lib/`, and is covered by the same upgrade runbook. It is not an
+  organization-scoped service and does not carry the product path's boundaries. Procedure:
+  [`deploy/README.md`](deploy/README.md) § Fleet-agent handoff.
+- **The Secretary** (`deploy/secretary/`): MultiAgency's own public front desk — a separate
+  application built on IronClaw, running its own instance, volume, and trust domain behind a
+  Cloudflare Worker. It shares this repository's pin, image, and secret conventions and nothing
+  else. Details: [`deploy/secretary/worker/README.md`](deploy/secretary/worker/README.md).
 
-**Prerequisites**
-- Docker, and the `ironclaw:main` image built locally from the **unmodified** official source
-- a [NEAR AI](https://near.ai) API key (the model gateway)
-- a Telegram bot from BotFather (token + username) — the one manual step per agent
-- a named `cloudflared` tunnel for inbound webhooks
+Both run the pinned runtime, so both are in scope for [`deploy/UPGRADE.md`](deploy/UPGRADE.md).
+Neither is in scope for the guarantees the product path documents.
 
-**Run the multi-tenant client product** — one instance, many sealed client accounts:
-copy [`multi/instance/.env.example`](multi/instance/.env.example) to `.env` and fill it,
-bring up `multi/instance/`, then provision each client with
-[`multi/provision/provision-client.sh`](multi/provision/provision-client.sh). Data
-isolation between accounts is harness-enforced (proven: cross-account reads 404, no
-code-exec). See [`multi/`](multi/).
+## Quickstart and operator commands
 
-**Stand up one isolated internal agent (the fleet model)**
-1. Build the `ironclaw:main` image from the official source (unmodified).
-2. Create the bot with BotFather; have your NEAR AI key ready.
-3. Run `deploy/provision-agent.sh` — its header documents the exact arguments and env it expects.
-4. Verify with `deploy/doctor.sh` (health-checks one agent or the whole fleet).
+Build `ironclaw:main` from `IRONCLAW_PIN`, prepare private values from
+`multi/instance/.env.example`, and start the compose stack. Then:
 
-## What's here
+```sh
+multi/provision/provision.sh <slug> "<display name>" <group-id> --service <service> --dry-run
+multi/provision/provision.sh <slug> "<display name>" <group-id> --service <service>
 
-- **`multi/`** — the product: the multi-tenant instance definition, the channel seam
-  (persona + context injection, Telegram bridge), client provisioning, the registry
-  schema, and the reproducible isolation proofs (`multi/verify/`).
-- **`agent/identity/`** — the persona files (product, control-plane, template,
-  frozen-experiment personas + the shared safety tail). The exhaustive inventory,
-  and the only place their count is stated, is `docs/ARCHITECTURE.md` § Personas.
-- **`skills/`** — skill files composed into the product personas per turn.
-- **`deploy/`** — fleet tooling (`provision-agent.sh`, `doctor.sh`) and
-  the supporting live services (`secretary/`, `account-intel/`); per-subdirectory
-  status in `deploy/README.md`.
-- **`docs/ARCHITECTURE.md`** — how it all fits (topology of record).
+./deploy/ironworks doctor [--offline] [--json]
+./deploy/ironworks tenants status
+./deploy/ironworks tenant inspect <slug>
+./deploy/ironworks bridge status
+./deploy/ironworks egress status
+./deploy/ironworks account-db migration-status
+./deploy/ironworks service validate
+./deploy/ironworks release verify [--offline-only]
+./deploy/ironworks test
+```
 
-## Isolation (why it's safe)
+Private configuration, guidance, credentials, and runtime state live under `~/.agency/` or in
+service volumes. A blocked or unevaluated check is not a pass.
 
-Three layers, all harness-enforced:
-- **Between agents** — each is a separate ironclaw instance with its own state store; one
-  agent cannot see another's data.
-- **Within an agent** — each member's turns run *as them* (run-acts-as-invoker), with their own memory.
-  Unpaired actors fail closed.
-- **Between clients on the product instance** — one sealed account per client:
-  cross-account reads 404, no code-exec, no token crossover — proven on the compliant
-  path, the hostile path, and the tenant-wide surfaces (`multi/verify/`).
+Documentation map:
 
-## Runtime state & secrets
+- [`docs/PRODUCT_DIRECTION.md`](docs/PRODUCT_DIRECTION.md): intent, maturity, and non-goals;
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): topology, boundaries, and ownership;
+- [`SECURITY.md`](SECURITY.md): security contract and known limitations;
+- [`docs/EGRESS_CONTAINMENT.md`](docs/EGRESS_CONTAINMENT.md): network guarantee and operations;
+- [`docs/BRIDGE_DELIVERY.md`](docs/BRIDGE_DELIVERY.md): delivery and recovery semantics;
+- [`docs/INCIDENT_RESPONSE.md`](docs/INCIDENT_RESPONSE.md): procedures for failures with no
+  in-product remedy;
+- [`docs/IRONCLAW_RUNTIME_CONSTRAINTS.md`](docs/IRONCLAW_RUNTIME_CONSTRAINTS.md): pinned-runtime
+  constraints and their probes;
+- [ADR 0001: Reborn bridge compatibility boundary](docs/adr/0001-reborn-bridge-compatibility-boundary.md):
+  accepted ownership decision and bridge-deletion gates;
+- [ADR 0001 spike plan](docs/adr/0001-spike-plan.md): sequenced upstream
+  experiments for satisfying those gates;
+- [Shared-conversation admission constraint](docs/upstream-proposals/shared-conversation-admission.md):
+  internal S1 compatibility-constraint record; no upstream action is planned;
+- [Managed shared-conversation authority constraint](docs/upstream-proposals/organizational-conversation-authority.md):
+  internal S2 compatibility-constraint record; the bridge remains required;
+- [`multi/services/README.md`](multi/services/README.md): what a service definition is and what
+  it does not yet do;
+- [`deploy/README.md`](deploy/README.md): lifecycle, incidents, upgrades, and recovery;
+- [`deploy/UPGRADE.md`](deploy/UPGRADE.md): the runtime pin-bump procedure of record;
+- [`multi/verify/README.md`](multi/verify/README.md): runnable proof index.
 
-State (users, pairings, memory, threads) is **not** in this repo — it lives in each
-instance's data volume. Per-agent secrets live outside the repo under `~/.agency/`
-(operator tokens, webhook secrets, bot tokens) and are gitignored. This repo is the
-*source of what the fleet is*; the volumes are where instances *run*.
+## Repository rules
 
-## Historical note
+Current code, service JSON, tests, pins, and live commands outrank prose. `MODEL_PIN` is part of
+the product promise and changes only through the verified upgrade procedure. Secrets and client
+identities never enter the repository.
 
-An earlier direction explored native harness features (guest admission for anonymous
-participants in shared groups, a per-channel capability floor, suspension enforcement).
-The fleet uses **instance-per-agent + per-member pairing** instead, which needs none of
-it. That work is frozen as the `guest-admission-reference` tag in the ironclaw repo — not
-a dependency.
-
-## License
-
-Licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE))
-- MIT license ([LICENSE-MIT](LICENSE-MIT))
-
-at your option — the same dual license as [ironclaw](https://github.com/nearai/ironclaw),
-which this repo builds on. **No ironclaw source is vendored here at all** — not a file, not an
-interface contract. Everything in this repo is config, data (personas), and scripts that run
-around the stock binary.
-
-Unless you explicitly state otherwise, any contribution intentionally submitted for
-inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed
-as above, without any additional terms or conditions.
+See [`CONTRIBUTING.md`](CONTRIBUTING.md). IronWorks is dual licensed under Apache-2.0 or MIT at
+your option.

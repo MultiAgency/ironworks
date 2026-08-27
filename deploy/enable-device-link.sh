@@ -1,16 +1,18 @@
 #!/usr/bin/env bash
 # enable-device-link.sh — add MTProto api_id/api_hash to a fleet agent's Telegram config
-# so the instance can run device-link (Telegram's v1.3.0 account-connection ceremony).
+# so the instance can run device-link (Telegram's MTProto account-connection ceremony).
 #
 # WHAT DEVICE-LINK IS FOR (read before using this): device-link is MTProto *account*
 # linking — it logs IronClaw into a Telegram account as a third-party client so the agent
-# can act AS that account (the linked-account tools). On v1.3.0 (#7464) it replaced the old
-# lightweight deep-link pairing as Telegram's `[channel.connection]` strategy. It fits the
+# can act AS that account (the linked-account tools). That purpose is INDEPENDENT of which
+# `[channel.connection]` strategy telegram declares at the pinned rev — upstream has moved
+# that both ways (#7464 to device_link, #7766 back to web_generated_code), and
+# `doctor.sh --deep` derives the current one from the pin instead of assuming. It fits the
 # SINGLE-USER case: one person connects THEIR own account to a fleet agent. It is NOT the
 # right tool for onboarding a GROUP of contributors to chat — that's heavyweight (each must
 # MTProto-link their whole account) and unverified for group @mentions; use the multi-tenant
 # seam bridge (multi/seam/telegram_bridge.py, chat.id binding) for many-people chat instead.
-# See docs/ARCHITECTURE.md § Member access.
+# See README.md and SECURITY.md for member access and token custody.
 #
 # A BOT-ONLY agent (no api creds) fails every device-link attempt with "cannot be completed
 # for this account" (verified: multron failed until these were set, multimediator with creds
@@ -40,13 +42,19 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 ENVFILE="$(fleet_agent_env "$SLUG")"
 [ -f "$ENVFILE" ] || { echo "!! no agent env: $ENVFILE" >&2; exit 1; }
-set -a; . "$ENVFILE"; set +a          # IRONCLAW_API_BASE, IRONCLAW_REBORN_WEBUI_TOKEN, AGENT_HOSTNAME, CONTAINER, TELEGRAM_WEBHOOK_SECRET, TELEGRAM_BOT_USERNAME
+# Plain source, no `set -a` (CONTRIBUTING.md, "Sourcing an env file"): every value is copied
+# into a shell variable on the next three lines and reaches its child explicitly — argv for
+# docker, a `VAR=… python3` prefix for the api_id/api_hash pair, `TG_BOT_TOKEN=`/`TG_WH_SECRET=`
+# for the config PUT. Nothing here reads its config out of an inherited environment, so
+# exporting only put TELEGRAM_WEBHOOK_SECRET and the operator token into every child's
+# environment for the length of the run.
+. "$ENVFILE"                          # IRONCLAW_API_BASE, IRONCLAW_REBORN_WEBUI_TOKEN, AGENT_HOSTNAME, CONTAINER, TELEGRAM_WEBHOOK_SECRET, TELEGRAM_BOT_USERNAME
 API="${IRONCLAW_API_BASE:?}"; OP_TOKEN="${IRONCLAW_REBORN_WEBUI_TOKEN:?}"
 BOT_USERNAME="${TELEGRAM_BOT_USERNAME:?}"; WH_SECRET="${TELEGRAM_WEBHOOK_SECRET:?}"
 CONTAINER="${CONTAINER:?}"; HOSTN="${AGENT_HOSTNAME:?}"
 WEBHOOK_URL="https://$HOSTN/webhooks/extensions/telegram/updates"
 
-TOKEN_FILE="$HOME/.agency/$SLUG.token"
+TOKEN_FILE="$FLEET_AGENCY_DIR/$SLUG.token"
 [ -f "$TOKEN_FILE" ] || { echo "!! no bot token file: $TOKEN_FILE" >&2; exit 1; }
 BOT_TOKEN="$(cat "$TOKEN_FILE")"
 

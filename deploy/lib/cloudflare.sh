@@ -1,9 +1,16 @@
 # deploy/lib/cloudflare.sh — the cloudflared tunnel surface: ingress rules, reload, DNS wait.
 #
-# Factored out when two scripts carried divergent copies of all of this. Only one of them
-# ships now (provision-agent.sh), so the swap/presence helpers that served the other are gone
-# with it — but the two lessons their divergence taught are kept, because both are easy to
-# reintroduce and neither announces itself:
+# Factored out when two scripts carried divergent copies of all of this. Both sourcers still
+# exist: provision-agent.sh (tracked) and repoint-hostname.sh (GITIGNORED, .gitignore:55, but
+# present on operator boxes). Removing an export from this file needs
+# `find . -type f -exec grep -l`, not `grep -r`, which does not descend into ignored paths —
+# this header once said only one script shipped, and a caller in the invisible half spent that
+# whole time calling a `cf_ingress_swap` that had been removed along with the divergent copies.
+# It is defined below now, because the caller needs it: a library that documents a broken
+# caller instead of serving it has described the drift rather than closed it.
+#
+# The two lessons their divergence taught are kept, because both are easy to reintroduce and
+# neither announces itself:
 #
 #   1. MATCH THE WHOLE RULE LINE, never a substring. The retired copy used
 #      `f"hostname: {old}" in s` plus a file-wide `str.replace`, which failed silently two
@@ -39,6 +46,44 @@ if not inserted:
 open(cfg, "w").write("\n".join(out) + "\n")
 print("   ingress: added", host, "->", "http://localhost:" + port)
 PY
+}
+
+# cf_ingress_swap <config> <old-hostname> <new-hostname> — repoint one existing rule.
+#
+# The rule MOVES rather than being duplicated: leaving the old rule behind is what would keep
+# the old hostname serving, and repoint-hostname.sh promises the opposite in its header ("the
+# old DNS CNAME stops routing once the ingress rule is swapped").
+#
+# Lesson 1 above governs every match here — whole stripped line, never a substring — so a
+# commented-out `# was: hostname: ...` cannot satisfy a presence test, and a hostname appearing
+# in two rules is reported rather than having both rewritten. Absent-old is a HARD ERROR unless
+# the new rule is already there (the idempotent re-run), because "swap a rule that is not in
+# this file" has no correct silent answer.
+cf_ingress_swap() {
+  python3 - "$1" "$2" "$3" <<'CFSWAP'
+import sys
+cfg, old, new = sys.argv[1], sys.argv[2], sys.argv[3]
+lines = open(cfg).read().splitlines()
+olds = [i for i, l in enumerate(lines) if l.strip() == f"- hostname: {old}"]
+news = [i for i, l in enumerate(lines) if l.strip() == f"- hostname: {new}"]
+if old == new:
+    if not olds:
+        sys.exit(f"!! ingress: no rule for {new} in {cfg} - nothing to re-register against")
+    print("   ingress: same hostname, rule left as is"); sys.exit(0)
+if news:
+    if olds:
+        sys.exit(f"!! ingress: BOTH {old} and {new} have rules in {cfg} - resolve by hand; "
+                 "a swap here would leave one of them serving")
+    print("   ingress: rule already points at", new); sys.exit(0)
+if not olds:
+    sys.exit(f"!! ingress: no rule for {old} in {cfg} - refusing to guess which one to repoint")
+if len(olds) > 1:
+    sys.exit(f"!! ingress: {len(olds)} rules for {old} in {cfg} - resolve by hand")
+i = olds[0]
+lines[i] = lines[i].replace(f"- hostname: {old}", f"- hostname: {new}")
+open(cfg, "w").write("\n".join(lines) + "\n")
+print("   ingress: swapped", old, "->", new)
+CFSWAP
 }
 
 # cf_reload — SIGHUP hot-reloads ingress without dropping other tunnels.

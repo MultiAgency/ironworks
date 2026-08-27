@@ -46,8 +46,45 @@ tg_extension_install() {
     "$2/api/webchat/v2/extensions/install"
 }
 
-# tg_webhook_info <bot-token> — one line: registration state + last delivery error.
-tg_webhook_info() {
+# tg_webhook_get <bot-token> — the registered webhook URL and the last delivery error,
+# TAB-separated, from ONE getWebhookInfo call. Both views below read from here, so the response
+# shape is known in exactly one place and a caller needing both fields pays for one round trip.
+#
+# TAB-separated, and the URL first, so an EMPTY url stays positional — an unregistered bot
+# reports `url: ""`, and that is precisely the case a caller must be able to see rather than
+# have collapse into a missing field.
+#
+# `d.get("last_error_message") or "(none)"`, not `.get(k, default)`: a two-argument .get only
+# substitutes the default when the KEY IS ABSENT, so a key present with a null returns the null
+# and prints the string "None" into the operator's line. Verified against both response shapes.
+tg_webhook_get() {
   curl_tg "$1" getWebhookInfo -s --max-time 12 \
-    | python3 -c "import sys,json;d=json.load(sys.stdin)['result'];print('registered' if d.get('url') else 'NOT-registered','| last_error:',d.get('last_error_message','(none)'))"
+    | python3 -c "import sys,json;d=json.load(sys.stdin)['result'];print(d.get('url','') + chr(9) + (d.get('last_error_message') or '(none)'))"
+}
+
+# tg_webhook_url <bot-token> — just the registered URL; empty when the bot has no webhook.
+#
+# THIS EXISTS BECAUSE tg_webhook_info CANNOT ANSWER IT. That helper prints
+# `registered | last_error: (none)` and never a URL, so a caller comparing its output against an
+# expected URL can never match. repoint-hostname.sh did exactly that: the comparison fell through
+# on every run, including the fully successful one, and exited 1 after the container restart and
+# before the new hostname was recorded. A question the library could not answer got asked of the
+# helper that looked closest, which is the failure this function closes.
+tg_webhook_url() {
+  tg_webhook_get "$1" | cut -f1
+}
+
+# tg_webhook_info <bot-token> — one line: registration state + last delivery error.
+#
+# SPLIT WITH PARAMETER EXPANSION, NOT `IFS=$'\t' read`. TAB is IFS *whitespace*, and read
+# discards leading IFS whitespace before assigning — so on the unregistered case, where the URL
+# field is empty, the leading tab was eaten and the ERROR landed in the url variable. Every bot
+# then reported `registered`, which is the opposite of what this line exists to say.
+tg_webhook_info() {
+  local _r _url _err
+  _r="$(tg_webhook_get "$1")"
+  _url="${_r%%	*}"     # up to the first TAB
+  _err="${_r#*	}"      # after the first TAB
+  if [ -n "$_url" ]; then printf 'registered | last_error: %s\n' "$_err"
+  else printf 'NOT-registered | last_error: %s\n' "$_err"; fi
 }

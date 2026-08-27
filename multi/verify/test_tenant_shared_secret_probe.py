@@ -30,11 +30,8 @@
 #       (staging positive half:) MULTI_STAGING=1 python3 test_tenant_shared_secret_probe.py \
 #           --staging --handle probe_throwaway --expect <seeded-value>
 import os, pathlib, sys, json, subprocess, urllib.parse
-
-os.environ.setdefault("IRONCLAW_API", "http://127.0.0.1:3020")
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from common import post, text_of, DEFAULT_API, model_pin, Checks  # noqa: E402
 
 
@@ -173,11 +170,4 @@ else:
             except Exception as e:
                 block("(c) staging positive half", f"instance call failed: {e}")
 
-ok = checks.ok if checks.ran else False
-print(f"\nscore: {checks.passed}/{checks.ran} run"
-      + (f", {len(checks.blocked)} BLOCKED" if checks.blocked else "")
-      + (" — tenant-shared secret surface dormant & contained" if ok and checks.ran else ""))
-if checks.blocked and not checks.results:
-    print("ALL LEGS BLOCKED — no assertions ran; not a pass. Operator: run on the VM (see header).")
-    sys.exit(2)
-sys.exit(0 if ok else 1)
+checks.finish("tenant-shared secret surface dormant & contained")

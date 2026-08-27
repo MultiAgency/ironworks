@@ -17,15 +17,18 @@
 #   ./deploy/verify-pin.sh multiclaw ironclaw-hq   # explicit container list
 set -euo pipefail
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-PIN_FILE="$REPO/IRONCLAW_PIN"
-[ -f "$PIN_FILE" ] || { echo "!! no IRONCLAW_PIN at $PIN_FILE" >&2; exit 1; }
-PIN="$(cut -d' ' -f1 "$PIN_FILE")"
-[ -n "$PIN" ] || { echo "!! IRONCLAW_PIN is empty" >&2; exit 1; }
 
 # The MT container name is derived, never hardcoded (the laptop/VM rename thrash this avoids).
 # fleet_mt_container owns the precedence and the "hard error on a missing compose" rule — a
 # provenance gate must NEVER silently check the wrong container. It honours MT_CONTAINER itself.
+#
+# fleet_ironclaw_pin owns the pin PARSE for the same reason. This gate compares the pin to an
+# image label with `=`, so a parse that keeps a trailing `#`, or that returns a second comment
+# line along with the rev, fails EVERY container rather than none. That is what the `cut -d' '`
+# this replaced would have done the first time IRONCLAW_PIN grew a second line of prose.
 . "$REPO/deploy/lib/fleet.sh"
+
+PIN="$(fleet_ironclaw_pin)"
 
 if [ "$#" -gt 0 ]; then
   containers=("$@")

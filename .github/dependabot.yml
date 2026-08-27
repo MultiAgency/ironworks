@@ -14,3 +14,27 @@ updates:
     directory: /
     schedule:
       interval: monthly
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+  - package-ecosystem: pip
+    directory: /deploy/account-intel/data
+    schedule:
+      interval: monthly
+  - package-ecosystem: docker
+    directory: /deploy/account-intel/data
+    schedule:
+      interval: monthly
+  - package-ecosystem: docker
+    directory: /deploy/egress
+    schedule:
+      interval: monthly
+  - package-ecosystem: docker
+    directory: /deploy/egress/proof
+    schedule:
+      interval: monthly
+  - package-ecosystem: docker
+    directory: /multi/instance
+    schedule:
+      interval: monthly

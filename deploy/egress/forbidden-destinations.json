@@ -1,0 +1,53 @@
+{
+  "_why": "THE ONE LIST of destinations the runtime must not reach, read by BOTH egress probes. It was two lists. deploy/egress/probe-egress.sh asserted four destinations; deploy/egress/proof/proof_checks.py asserted ten. The four were the generic internet (a public hostname, a public IP, cloud metadata, one RFC1918 address); the six only proof_checks.py carried were the ones that matter most on a real host — the private Account Service by two names, its database, plain HTTP, the 172.16/12 range, and link-local. probe-egress.sh is the probe whose PASS writes the VERIFIED stamp that `ironworks doctor` reports and that gates a deploy. So the WEAKER probe was the certifying one, and a runtime that could reach the Account Service would have been stamped VERIFIED. Add a destination here and both probes assert it; there is nowhere else to add one.",
+  "_shape": "label: operator-visible name. host/port: the attempt. Both probes make a PLAIN TCP connection and require it to fail — TLS is not needed to prove a socket cannot be opened, and staying at TCP keeps the two probes making the identical attempt.",
+  "_addressability": "EVERY HOST HERE MUST BE ADDRESSABLE FROM A CONTAINER, or the leg proves nothing. Three entries were not, and passed anyway. `127.0.0.1:8443` (\"the private Account Service (host port)\") and `127.0.0.1:5432` (\"the account database\") were attempted from inside `--network container:<runtime>`, where loopback is the RUNTIME'S OWN loopback and never the docker host — so they measured that the runtime does not serve Postgres to itself. `host.docker.internal` does not resolve inside a container on Linux unless something maps it, so it failed at DNS. All three returned \"blocked\" against a container with completely unrestricted egress, and probe-egress.sh counted them into the assertion total written to the VERIFIED stamp. They now name `host.docker.internal`, and the mapping lives on the CONTAINER UNDER TEST — `extra_hosts` on the `ironclaw` service in docker-compose.egress.yml and on `ic` in proof/docker-compose.proof.yml. It cannot be a probe flag: probe-egress.sh joins the runtime's namespace with `--network container:`, and docker refuses `--add-host` alongside that mode (\"conflicting options: custom host-to-IP mapping and the network mode\"). Only the UNCONTAINED control run, which is an ordinary bridge container, passes `--add-host`. The two duplicate Account Service entries collapsed into one because after the fix they were the same attempt.",
+  "_control": "A NEGATIVE NEEDS A POSITIVE CONTROL, AND A FORBIDDEN LEG HAS THREE STATES. `probe-egress.sh` attempts this same list from an UNCONTAINED container first and sorts every destination into one of three: DISCRIMINATING — the uncontained container completed a handshake, so this leg failing inside the boundary is evidence the boundary did it; CORROBORATING — routable but nothing answered (a timeout, or an active refusal), so the attempt fails identically with the boundary present and absent; UNMEASURABLE — no name and no route from any vantage. Unmeasurable legs are excluded and the run refuses to stamp. Corroborating legs are still ASSERTED (a REACHED there would be a real failure) but are NOT counted, because `EGRESS_CHECKS_PASSED` becomes `checks_passed` in the stamp and is read back as \"assertions proved\". Measured: run the contained probe body against a container on the default bridge with no gateway and five of these nine legs score PASS with no boundary at all — merging DISCRIMINATING and CORROBORATING under one \"measurable\" flag put exactly those five into the evidence count.",
+  "destinations": [
+    {
+      "label": "arbitrary public hostname",
+      "host": "example.com",
+      "port": 443
+    },
+    {
+      "label": "arbitrary plain HTTP",
+      "host": "example.com",
+      "port": 80
+    },
+    {
+      "label": "literal public IP",
+      "host": "1.1.1.1",
+      "port": 443
+    },
+    {
+      "label": "cloud metadata",
+      "host": "169.254.169.254",
+      "port": 80
+    },
+    {
+      "label": "link-local",
+      "host": "169.254.1.1",
+      "port": 80
+    },
+    {
+      "label": "private range 10/8",
+      "host": "10.0.0.1",
+      "port": 8443
+    },
+    {
+      "label": "private range 172.16/12",
+      "host": "172.16.0.1",
+      "port": 80
+    },
+    {
+      "label": "the private Account Service (docker host)",
+      "host": "host.docker.internal",
+      "port": 8443
+    },
+    {
+      "label": "the account database (docker host)",
+      "host": "host.docker.internal",
+      "port": 5432
+    }
+  ]
+}

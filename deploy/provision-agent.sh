@@ -4,10 +4,16 @@
 # binary. Each agent is its own container + volume + bot + persona; the harness
 # enforces isolation between them (separate processes, separate SQLite-VFS state).
 #
-# This is the go-forward model: per-group-on-ONE-bot needs an
-# upstream scope-resolver that doesn't exist yet, so each group gets its own
-# instance instead. Ceiling is Telegram bot creation (BotFather is manual), which
-# is fine for a handful/dozens.
+# NOT the canonical IronWorks product path. This is the single-tenant fleet: a supported
+# adjunct and shared operational tooling (README.md "What else is in this repository"). It
+# predates the seam, which solved one-bot-many-groups a different way — many sealed members
+# on ONE multi-tenant instance, organization-scoped, with guidance and confinement
+# (multi/README.md). The two are not successor and predecessor: this path gives an agent its
+# own tools, memory, volume, and bot, all of which the product path deliberately denies, and
+# it gives it none of the tenant, organization, or service-definition constructs.
+# Reach for the seam for organization-scoped business services and many-people chat; reach
+# for this for a standalone group agent. Ceiling is Telegram bot creation (BotFather is
+# manual), which is fine for a handful/dozens.
 #
 # PREREQUISITES you provide:
 #   - a Telegram bot from BotFather (token + username)   [the one manual step]
@@ -49,7 +55,7 @@ BASE_DOMAIN="${BASE_DOMAIN:?set BASE_DOMAIN — the domain your agent hostnames 
 TUNNEL="${CLOUDFLARED_TUNNEL:-ironclaw}"
 CF_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config.yml}"
 # Images are built as rev-named tags (ironclaw:<9-char rev> from IRONCLAW_PIN);
-# ironclaw:main is retagged to the current pin. See deploy/UPGRADE.md.
+# ironclaw:main is retagged to the current pin. See deploy/README.md.
 IMAGE="${IRONCLAW_IMAGE:-ironclaw:main}"
 
 # Guard against a shell prepared for ANOTHER agent: the documented intake step
@@ -61,14 +67,14 @@ IMAGE="${IRONCLAW_IMAGE:-ironclaw:main}"
 # Deliberate reuse (e.g. the AGENT_HOSTNAME repurpose override, or an explicit
 # custom PERSONA_SOURCE) must say so with PROVISION_FROM_ENV=1.
 if [ "${PROVISION_FROM_ENV:-}" != 1 ] && [ -n "${CONTAINER:-}${IRONCLAW_REBORN_WEBUI_TOKEN:-}${TELEGRAM_WEBHOOK_SECRET:-}${AGENT_HOSTNAME:-}${_inherited_persona_source}" ]; then
-  echo "!! environment carries another agent's provisioning state"
-  echo "   (one of CONTAINER / IRONCLAW_REBORN_WEBUI_TOKEN / TELEGRAM_WEBHOOK_SECRET / AGENT_HOSTNAME / PERSONA_SOURCE is set)."
-  echo "   Run from a clean shell, or set PROVISION_FROM_ENV=1 to use the inherited values deliberately."
+  echo "!! environment carries another agent's provisioning state" >&2
+  echo "   (one of CONTAINER / IRONCLAW_REBORN_WEBUI_TOKEN / TELEGRAM_WEBHOOK_SECRET / AGENT_HOSTNAME / PERSONA_SOURCE is set)." >&2
+  echo "   Run from a clean shell, or set PROVISION_FROM_ENV=1 to use the inherited values deliberately." >&2
   exit 1
 fi
 
 slug="$(printf '%s' "$NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//')"
-[ -n "$slug" ] || { echo "!! could not derive a slug from '$NAME'"; exit 1; }
+[ -n "$slug" ] || { echo "!! could not derive a slug from '$NAME'" >&2; exit 1; }
 container="ironclaw-$slug"
 volume="ironclaw-$slug-data"
 hostname="${AGENT_HOSTNAME:-$slug.$BASE_DOMAIN}"   # override to repurpose an existing host (e.g. point a new agent at an existing console hostname)
@@ -78,7 +84,7 @@ webhook_url="https://$hostname/webhooks/extensions/telegram/updates"
 # or DNS record exists (the old sed pipeline died here on a '/' in PURPOSE, after
 # docker run — leaving an orphan the re-run guard then blocked) ---------------------
 case "$PERSONA_SOURCE" in /*) ;; *) PERSONA_SOURCE="$REPO_DIR/$PERSONA_SOURCE" ;; esac
-[ -f "$PERSONA_SOURCE" ] || { echo "!! persona source not found: $PERSONA_SOURCE"; exit 1; }
+[ -f "$PERSONA_SOURCE" ] || { echo "!! persona source not found: $PERSONA_SOURCE" >&2; exit 1; }
 persona_prompt="$("$REPO_DIR/deploy/lib/compose-persona" compose \
   --persona "$PERSONA_SOURCE" --tail "$REPO_DIR/agent/identity/_operational-tail.md" \
   --slug "$slug" --slot "AGENT_NAME=$AGENT_NAME" --slot "PURPOSE=$PURPOSE")"
@@ -94,7 +100,7 @@ port=""
 for p in $(seq 3001 3099); do
   if ! printf '%s\n' "$listening" | grep -qx "$p"; then port="$p"; break; fi
 done
-[ -n "$port" ] || { echo "!! no free port in 3001-3099"; exit 1; }
+[ -n "$port" ] || { echo "!! no free port in 3001-3099" >&2; exit 1; }
 
 # --- secrets: fresh operator token + webhook secret per instance -----------------
 OP_TOKEN="$(openssl rand -hex 32)"
@@ -113,7 +119,7 @@ echo
 
 # --- 1) run the stock ironclaw instance ------------------------------------------
 if docker ps -a --format '{{.Names}}' | grep -qx "$container"; then
-  echo "!! container $container already exists — pick a different name or remove it"; exit 1
+  echo "!! container $container already exists — pick a different name or remove it" >&2; exit 1
 fi
 docker run -d --name "$container" --restart unless-stopped \
   -p "127.0.0.1:$port:3000" -v "$volume:/data" \
@@ -174,7 +180,7 @@ wh=$(tg_webhook_info "$BOT_TOKEN")
 echo "-- telegram webhook: $wh"
 
 # --- write per-agent secrets to a gitignored file (never to stdout) --------------
-SECRETS_DIR="${MULTRON_SECRETS_DIR:-$HOME/.agency/agents}"
+SECRETS_DIR="${MULTRON_SECRETS_DIR:-$FLEET_AGENCY_DIR/agents}"
 umask 077; mkdir -p "$SECRETS_DIR"
 secfile="$SECRETS_DIR/$slug.env"
 q() { local s=$1 sq=\'; printf "'%s'" "${s//$sq/$sq\\$sq$sq}"; }   # single-quote for source-compat (PURPOSE has spaces)
@@ -197,9 +203,9 @@ echo "================= agent ready — 1 manual step left ================="
 echo "1) Add @$BOT_USERNAME to the group AND make it an ADMIN. (Admin upgrades a basic"
 echo "   group to a supergroup and guarantees the bot receives @mentions — basic groups"
 echo "   with privacy-mode ON silently drop them. Learned the hard way with Multiplex.)"
-echo "   The group is served once the bot is an admin. There is NO per-member link to send:"
-echo "   v1.3.0 is a device-link build — #7464 switched Telegram to device-link, retiring the"
-echo "   deep-link DM pairing the old intake/provision-user.sh minted. See deploy/UPGRADE.md."
+echo "   The group is served once the bot is an admin. Provisioning mints NO per-member link,"
+echo "   and whether the pinned rev offers a per-member connect ceremony at all varies —"
+echo "   upstream has moved it both ways (#7464, #7766). See deploy/README.md."
 echo "===================================================================="
 echo
 echo "agent '$NAME' -> $container on 127.0.0.1:$port, https://$hostname, bot @$BOT_USERNAME"

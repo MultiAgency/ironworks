@@ -34,13 +34,12 @@ ROOT  = pathlib.Path(__file__).resolve().parents[2]
 # cannot diverge. Reads a committed guidance file — no provisioned registry needed, so this
 # stays an instance-tier proof.
 sys.path.insert(0, str(ROOT / "multi/seam"))
-from persona import compose_client_persona
+from persona import compose_client_persona  # noqa: E402
 FIX = pathlib.Path(__file__).resolve().parent / "fixtures" / "clients"
 persona = compose_client_persona(str(FIX / "proof-a.guidance.md"), "proof-a", ROOT)
 
 # 2) trusted-context envelope built by the REAL seam code — same reason compose_persona is
 # imported: the proof must exercise the product's envelope, not a hand-maintained replica.
-os.environ.setdefault("IRONCLAW_API", API)
 import context_ingress as ing  # noqa: E402  (needs env + sys.path set first)
 
 nw = json.loads((FIX / "proof-a.account.json").read_text())

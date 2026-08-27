@@ -1,0 +1,1761 @@
+#!/usr/bin/env python3
+"""ironworks — the MultiAgency operator's console.
+
+    ./deploy/ironworks doctor                 everything, in one screen
+    ./deploy/ironworks tenants status         one line per tenant
+    ./deploy/ironworks tenant inspect <slug>  one tenant, in depth
+    ./deploy/ironworks tenant reset-thread <slug>  explicit conversation/context reset
+    ./deploy/ironworks bridge status          delivery-loop forward progress
+    ./deploy/ironworks bridge redeliver <id>  explicit stored-answer delivery reconciliation
+    ./deploy/ironworks egress status          the network boundary: RUNNING/VERIFIED/FAILED
+    ./deploy/ironworks account-db migration-status  Account Store schema readiness
+    ./deploy/ironworks service validate       the committed service definitions
+    ./deploy/ironworks release verify         the readiness artifact for a release
+    ./deploy/ironworks test                   the complete local/CI quality gate
+
+WHY A CONSOLE. The operator is IronWorks's primary user, and until now answering "is this
+tenant healthy, on which service, on which pins, with valid guidance, actually confined, and
+safe to upgrade?" meant reading a registry env, a guidance file, two pin files, a compose file,
+`docker ps`, and running three proofs by hand — per tenant. That cost does not fall when a
+second tenant arrives; it doubles. This is the command that makes it flat.
+
+WHAT IT IS NOT. It re-implements no security rule. Every judgement here is delegated:
+
+    registry validity, credential-uniqueness, operator-token rejection  context_ingress.load_clients
+    guidance validity, slug- and service-binding                        persona.load_guidance
+    service definitions                                                 services.load_service
+    tool-catalog parsing, what counts as egress                         deploy/lib/tool_surface
+    image provenance                                                    deploy/verify-pin.sh
+    session revocation truth                                            multi/verify/test_session_revocation.py
+
+If a rule needs changing, it changes there and this console follows. A console that carried its
+own copy of "what counts as confined" would be a second, quieter answer to a security question.
+
+OUTPUT CONTRACT
+  - Human output by default; `--json` for a machine, on stdout, with nothing else on stdout.
+  - Every check is CONFIG (does the configuration say the right thing?) or LIVE (did we ask the
+    running system?), and the two are never merged into one word.
+  - Verdicts: PASS · FAIL · BLOCKED (could not be evaluated) · SKIPPED (deliberately not run).
+  - NO SECRETS, ever — output passes through multi/seam/redact.py before it is printed.
+
+EXIT CODES (stable; scripts may depend on them)
+  0   every evaluated check passed
+  2   at least one check FAILED — a guarantee is broken or a tenant is degraded
+  3   nothing failed, but at least one check was BLOCKED — a guarantee is unevaluated
+  64  usage error
+A BLOCKED guarantee is deliberately non-zero: "we could not check" must never read as "fine".
+"""
+import argparse
+import json
+import os
+import pathlib
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "multi" / "seam"))
+sys.path.insert(0, str(ROOT / "deploy" / "lib"))
+
+# Imported at module scope, unlike the other seam modules this console reaches for lazily
+# inside a check: `pins` reads files and holds no environment, so importing it cannot fail on
+# a box where the product is not configured.
+import pins  # noqa: E402
+
+EXIT_OK, EXIT_FAILED, EXIT_BLOCKED, EXIT_USAGE = 0, 2, 3, 64
+
+PASS, FAIL, BLOCKED, SKIPPED = "PASS", "FAIL", "BLOCKED", "SKIPPED"
+CONFIG, LIVE = "config", "live"
+
+_MARK = {PASS: "x", FAIL: "!", BLOCKED: "~", SKIPPED: "-"}
+
+
+# ── report ────────────────────────────────────────────────────────────────────────────
+
+class Report:
+    """Checks plus their verdicts, in one place, so the exit code is derived and not chosen.
+
+    The redaction set is bound to the report rather than applied at each print site: a call
+    site that forgets is the whole failure mode, so there is exactly one print path."""
+
+    def __init__(self, command):
+        self.command = command
+        self.checks = []
+        self.data = {}
+        self.secrets = set()
+        self._redact = None
+
+    def bind_secrets(self, secrets):
+        import redact
+        self.secrets |= {s for s in secrets if s}
+        self._redact = redact
+
+    def scrub(self, text):
+        if self._redact is None:
+            import redact
+            self._redact = redact
+        return self._redact.redact(text, self.secrets)
+
+    def add(self, cid, kind, verdict, title, detail=""):
+        self.checks.append({"id": cid, "kind": kind, "verdict": verdict,
+                            "title": title, "detail": self.scrub(detail)})
+        return verdict
+
+    def ok(self, cid, kind, title, detail=""):
+        return self.add(cid, kind, PASS, title, detail)
+
+    def fail(self, cid, kind, title, detail=""):
+        return self.add(cid, kind, FAIL, title, detail)
+
+    def blocked(self, cid, kind, title, why):
+        return self.add(cid, kind, BLOCKED, title, why)
+
+    def skipped(self, cid, kind, title, why):
+        return self.add(cid, kind, SKIPPED, title, why)
+
+    def verdict(self, ok, cid, kind, title, detail=""):
+        """`detail` explains a FAILURE, so it is dropped on a pass. Carrying it either way made
+        the JSON artifact read as if a passing check had a caveat attached."""
+        return self.add(cid, kind, PASS if ok else FAIL, title, "" if ok else detail)
+
+    @property
+    def exit_code(self):
+        if any(c["verdict"] == FAIL for c in self.checks):
+            return EXIT_FAILED
+        if any(c["verdict"] == BLOCKED for c in self.checks):
+            return EXIT_BLOCKED
+        # A REPORT THAT EVALUATED NOTHING IS NOT A PASS. Zero PASS/FAIL/BLOCKED rows beside one
+        # or more SKIPPED ones means every claim was declined, and exit 0 is read as a verdict:
+        # SECURITY.md documents `bridge status` as "exit 0 is healthy, 2 unhealthy, 3
+        # unevaluated", so an all-skipped run exiting 0 says HEALTHY about a bridge nothing
+        # looked at. `multi/verify/common.Checks.finish` already holds this doctrine for the
+        # proof suites ("`ran == 0` is NOT a pass: a suite that asserted nothing has proven
+        # nothing"); a report with any evaluated row is unaffected, so `--offline doctor` — nine
+        # passing CONFIG rows beside five skipped LIVE ones — still exits 0.
+        if self.checks and all(c["verdict"] == SKIPPED for c in self.checks):
+            return EXIT_BLOCKED
+        return EXIT_OK
+
+    def scrub_tree(self, node):
+        """`scrub`, applied to the half of the artifact that is not a check.
+
+        `add()` redacts every detail on the way in, which covered what an operator reads on
+        screen and nothing of what a script consumes: `rep.data` carries upstream response
+        bodies and reaches stdout untouched. The contract is that output passes through the
+        redactor, not that most of it does — and the moment a check starts surfacing a
+        non-2xx body, "most" is the wrong half."""
+        if isinstance(node, dict):
+            return {k: self.scrub_tree(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [self.scrub_tree(v) for v in node]
+        return self.scrub(node) if isinstance(node, str) else node
+
+    def emit(self, as_json, title=None):
+        if as_json:
+            print(json.dumps({"command": self.command, "exit_code": self.exit_code,
+                              "checks": self.checks, **self.scrub_tree(self.data)},
+                             indent=1, sort_keys=True))
+            return self.exit_code
+        if title:
+            print(f"== {title} ==")
+        width = max((len(c["id"]) for c in self.checks), default=0)
+        for c in self.checks:
+            line = f"  [{_MARK[c['verdict']]}] {c['id']:<{width}}  {c['title']}"
+            if c["detail"] and c["verdict"] != PASS:
+                line += f"\n        {c['kind'].upper()}: {c['detail']}"
+            print(line)
+        tally = {v: sum(1 for c in self.checks if c["verdict"] == v)
+                 for v in (PASS, FAIL, BLOCKED, SKIPPED)}
+        print(f"\n  {tally[PASS]} pass · {tally[FAIL]} FAIL · {tally[BLOCKED]} BLOCKED"
+              f" · {tally[SKIPPED]} skipped   -> exit {self.exit_code}")
+        if tally[BLOCKED]:
+            print("  BLOCKED means a guarantee was NOT evaluated. It is not a pass.")
+        return self.exit_code
+
+
+# ── small helpers ─────────────────────────────────────────────────────────────────────
+
+def pin_file(name):
+    """First non-comment token of a repo-root pin file, or (None, why).
+
+    Delegates to the seam's reader (`multi/seam/pins.py`) rather than parsing again: the
+    console's job is to report on what the product reads, so reading it a second way could
+    make the console green on a pin the seam refuses. The non-raising shape is this console's
+    requirement, and `pins.pin_value` exists for it."""
+    return pins.pin_value(name, ROOT)
+
+
+def http(url, timeout=5, token=None, method="GET", limit=4000):
+    """(status, body-or-None). Never raises. A body is returned for a non-2xx too.
+
+    THE ERROR BODY IS THE DIAGNOSTIC. Discarding it — which this did — threw away the only
+    thing an API says about a 4xx/5xx at exactly the moment an operator needs it, and left
+    every caller printing a bare `HTTP 503`. `HTTPError` is itself a readable response, so
+    the error path reads it the same way and under the same cap. Callers already gate success
+    on the status, so nothing reads a failure body as a pass; what changes is that
+    `/ready`'s own `problems` list now reaches the operator instead of being dropped.
+
+    None still means there was no body to read: a transport failure, or a response whose
+    body could not be read at all.
+
+    `limit` caps the body because most callers only sniff it for a marker and a health body
+    has no business being large. The tool catalog is the exception — ~26KB at the pinned rev —
+    and a caller that parses JSON must raise the cap, or the truncation becomes a decode error
+    that reads as 'unreadable surface' (which fails closed, but for the wrong reason)."""
+    headers = {"User-Agent": "ironworks-console"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    req = urllib.request.Request(url, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, r.read().decode("utf-8", "replace")[:limit]
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, e.read().decode("utf-8", "replace")[:limit]
+        except OSError:
+            return e.code, None
+    except OSError:
+        return 0, None
+
+
+def excerpt(body, limit=300):
+    """A response body reduced to one pasteable line, or "" when there is nothing to show.
+
+    No redaction here on purpose: every detail passes `Report.scrub()` on the way into the
+    report, and a second redaction point is how one of them ends up being the stale one."""
+    if not body:
+        return ""
+    text = " ".join(str(body).split())
+    return text if len(text) <= limit else text[:limit] + " …(truncated)"
+
+
+def health_doc(body):
+    """(doc, why) — a health body parsed as a JSON object, or None with the reason.
+
+    Substring-matching a health body made the verdict depend on the runtime's JSON
+    WHITESPACE: `{"status": "healthy"}` and `{"status":"healthy"}` are the same answer and
+    one of them read as unhealthy, so a formatting change upstream would have taken a healthy
+    fleet red. Its sibling hack — `'"ok": true' in body.replace('"ok":true', '"ok": true')` —
+    was a hand-rolled normaliser standing in for the parse that the `/ready` check in this
+    same file was already doing correctly. One idiom now, and it is that one."""
+    if not body:
+        return None, "no body"
+    try:
+        doc = json.loads(body)
+    except ValueError as e:
+        return None, f"body is not JSON ({e}): {excerpt(body, 200)}"
+    if not isinstance(doc, dict):
+        return None, f"body is JSON but not an object ({type(doc).__name__})"
+    return doc, ""
+
+
+def instance_api():
+    return (os.environ.get("IRONCLAW_API") or "http://127.0.0.1:3020").rstrip("/")
+
+
+def account_base():
+    return (os.environ.get("ACCOUNT_BASE") or "http://127.0.0.1:8443").rstrip("/")
+
+
+def account_guards():
+    """The Account Service's pure guards — the authority on what its routes may say.
+
+    APPENDED to `sys.path`, never inserted: that directory also holds a `service.py` and a
+    `seed.py`, and putting it in front would let either shadow a module this console imports
+    for something else entirely. `service_guards` imports nothing but `uuid`, which is why it
+    is reachable from here at all."""
+    guards_dir = str(ROOT / "deploy" / "account-intel" / "data")
+    if guards_dir not in sys.path:
+        sys.path.append(guards_dir)
+    import service_guards
+    return service_guards
+
+
+def load_registry(rep):
+    """The tenants, or None with the reason already recorded as a FAIL.
+
+    `load_clients` is the authority: it enforces credential uniqueness, rejects the operator
+    token, refuses duplicate group ids, and validates every guidance file. Calling it IS the
+    configuration check — that is the point of not re-implementing it here."""
+    # The seam reads IRONCLAW_API at import and refuses to start without it — correct for the
+    # bridge, which must never guess which instance it is serving. The console is a read-only
+    # inspector with the same default the compose file publishes, so it supplies one rather
+    # than making every operator export a variable before they can look at anything.
+    os.environ.setdefault("IRONCLAW_API", instance_api())
+    try:
+        import context_ingress as ing
+        import redact
+        import registry
+    except Exception as e:      # a broken checkout, a missing MODEL_PIN, a bad PERSONA_ROOT
+        rep.fail("registry.import", CONFIG, "the seam imports", f"{type(e).__name__}: {e}")
+        return None
+    try:
+        clients = ing.load_clients()
+    except Exception as e:
+        rep.fail("registry.load", CONFIG,
+                 "the client registry loads (fail-closed validation)", f"{type(e).__name__}: {e}")
+        return None
+    # `redact.secrets_of` takes the extras for a reason: this box holds credentials no tenant
+    # env contains — the bot token and the OPERATOR token the sealed-member proof runs with —
+    # and a live probe's exception text goes through `rep.scrub()` on its way to the screen.
+    rep.bind_secrets(redact.secrets_of(
+        clients, os.environ.get("TELEGRAM_BOT_TOKEN"),
+        *(os.environ.get(k) for k in registry.OPERATOR_TOKEN_VARS)))
+    rep.ok("registry.load", CONFIG,
+           f"the client registry loads ({len(clients)} tenant(s), all validations passed)")
+    return clients
+
+
+def _bridge_paths():
+    """Where the bridge keeps its store — asked of the bridge, never re-derived here.
+
+    A second copy of the BRIDGE_STATE_DB/BRIDGE_STATE precedence is a second answer to "where
+    is the store?", and the console's answer when it guesses wrong is not an error: it is
+    `SKIPPED — no bridge runs here` printed against a live bridge. telegram_bridge resolves
+    these at CALL time on purpose (see its docstring), so this calls and never captures."""
+    import telegram_bridge as tb
+    return tb.state_db_path(), tb.state_json_path()
+
+
+def bridge_state():
+    """Per-group thread state, read from the bridge's transactional store.
+
+    Falls back to the retired JSON file when no store exists yet, so a host that has not run
+    the migrated bridge still reports rather than going blank — the console must not imply a
+    tenant has never been used just because the storage moved."""
+    try:
+        db, legacy = _bridge_paths()
+    except Exception:
+        return {}
+    if db.exists():
+        try:
+            import bridge_state as _bs
+            # READ-ONLY. This is the console's per-tenant thread view, reached by `doctor` and
+            # `tenant inspect` — and with the default it MIGRATED the operator's live store on
+            # every invocation, including `--offline doctor`. The `except Exception: return {}`
+            # below is what hid it: a MigrationRequired now lands there and the view is simply
+            # empty, which is what "I did not look" should have said all along.
+            st = _bs.BridgeState(db, migrate=False)
+            out = {r["gid"]: {"prev": r["prev"],
+                              "supplied": json.loads(r["supplied"] or "{}"),
+                              "ever_supplied": bool(r["ever_supplied"]),
+                              "last_turn_at": r["last_turn_at"],
+                              "orphans": json.loads(r["orphans"] or "{}")}
+                   for r in st.all_thread_rows()}
+            st.close()
+            return out
+        except Exception:
+            return {}
+    try:
+        return json.loads(legacy.read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+# ── checks ────────────────────────────────────────────────────────────────────────────
+
+def check_pins(rep):
+    ic, why = pin_file("IRONCLAW_PIN")
+    if ic:
+        rep.ok("pin.ironclaw", CONFIG, f"IRONCLAW_PIN = {ic[:9]}")
+        rep.data["ironclaw_pin"] = ic
+    else:
+        rep.fail("pin.ironclaw", CONFIG, "IRONCLAW_PIN is readable and names a rev", why)
+    md, why = pin_file("MODEL_PIN")
+    if md:
+        rep.ok("pin.model", CONFIG, f"MODEL_PIN = {md}")
+        rep.data["model_pin"] = md
+    else:
+        rep.fail("pin.model", CONFIG, "MODEL_PIN is readable and names a model", why)
+
+
+def check_services(rep):
+    try:
+        import services
+    except Exception as e:
+        return rep.fail("service.import", CONFIG, "service definitions import", str(e))
+    names = services.available(ROOT)
+    if not names:
+        return rep.fail("service.present", CONFIG, "at least one service definition exists",
+                        f"{services.services_dir(ROOT)} holds no *.json")
+    bad = []
+    loaded = {}
+    for n in names:
+        try:
+            loaded[n] = services.load_service(n, ROOT)
+        except Exception as e:
+            bad.append(f"{n}: {e}")
+    if bad:
+        return rep.fail("service.valid", CONFIG, "every service definition validates",
+                        "; ".join(bad))
+    rep.data["services"] = {n: {"version": d["version"], "audience": d["audience"],
+                                "model_policy": d["model_policy"],
+                                "capabilities": d["capabilities"]}
+                            for n, d in loaded.items()}
+    rep.ok("service.valid", CONFIG,
+           "every service definition validates (" +
+           ", ".join(f"{n}@{d['version']}" for n, d in sorted(loaded.items())) + ")")
+    default_ok = loaded.get(services.DEFAULT_SERVICE, {}).get("audience") == "external"
+    rep.verdict(default_ok, "service.default", CONFIG,
+                f"the default service ({services.DEFAULT_SERVICE}) is the external one",
+                "a forgotten SERVICE= key would land a tenant on an internal composition")
+
+
+def check_model_agreement(rep, clients):
+    """Report the serving invariant already enforced by load_clients, defense in depth.
+
+    Canonical registry tenants cannot deliberately override MODEL_PIN. If this check ever sees
+    an off-pin ClientConfig, a non-registry caller bypassed the production loader.
+    """
+    pin, _ = pin_file("MODEL_PIN")
+    if not pin or clients is None:
+        return
+    off = sorted(c.slug for c in clients.values() if c.model != pin)
+    rep.verdict(not off, "tenant.model", CONFIG,
+                "every tenant runs the pinned model",
+                f"off-pin: {', '.join(off)} — canonical serving must refuse this configuration")
+
+
+def check_instance(rep):
+    api = instance_api()
+    code, body = http(api + "/api/health")
+    if code == 0:
+        return rep.blocked("instance.health", LIVE, f"IronClaw instance answers at {api}",
+                           "no response — the instance is down, or this box is not the one "
+                           "running it (the registry is per-box; so is this check)")
+    doc, why = health_doc(body)
+    status = doc.get("status") if doc else None
+    rep.verdict(code == 200 and status == "healthy", "instance.health", LIVE,
+                f"IronClaw instance healthy at {api}",
+                f"HTTP {code}; " + (why or f"status={status!r}, not 'healthy' — "
+                                           f"{excerpt(body)}"))
+    # A revocation route would change the deprovisioning story entirely, so watch for one
+    # arriving rather than assuming the recorded answer stays true across a pin bump.
+    lcode, _ = http(api + "/auth/logout", method="POST")
+    if lcode == 0:
+        rep.blocked("instance.revocation_route", LIVE,
+                    "session-revocation route status", "instance unreachable")
+    elif lcode == 404:
+        rep.ok("instance.revocation_route", LIVE,
+               "no session-revocation route (expected: env-bearer mode mounts none) — "
+               "deprovisioning cannot cut a token; see SECURITY.md")
+    else:
+        rep.fail("instance.revocation_route", LIVE,
+                 "session-revocation route status changed",
+                 f"POST /auth/logout answered HTTP {lcode}, not 404. This is GOOD NEWS and a "
+                 "docs bug: a revocation path now exists. Re-read the pinned source, then "
+                 "update SECURITY.md and deprovision.sh.")
+
+
+def bare_token(value):
+    """Is this string one identifier-shaped token — no space, no punctuation, no newline?
+
+    The weakest of the three value rules, and the only one that is a SHAPE generalisation
+    rather than the service's actual vocabulary — see `account_health_leak` for what that
+    leaves open. Used only where nothing tighter is available to delegate to."""
+    return 0 < len(value) <= 64 and all(ch.isalnum() or ch in "_-" for ch in value)
+
+
+def ref_shaped(value, reference):
+    """Is this the shape `service_guards.new_ref()` emits — its width, its alphabet?
+
+    A correlation ref is fixed-width hex, so it is pinned exactly instead of falling back to
+    the general token rule: `mia_sales_token` is a clean bare token and is not a ref. The
+    width comes from a freshly minted reference rather than a literal, so a change to
+    `new_ref()` carries this with it; the alphabet is hex because `uuid4().hex` is, and one
+    sample cannot be expected to contain all sixteen digits."""
+    return len(value) == len(reference) and all(ch in "0123456789abcdef" for ch in value)
+
+
+def account_health_leak(doc):
+    """(leaked, why) for one parsed /health body — None when it could not be evaluated.
+
+    DELEGATED, NOT RE-IMPLEMENTED. `deploy/account-intel/data/service_guards.safe_error` IS
+    the Account Service's answer to what a caller may learn when the backend fails, so its
+    keys are the entire failure vocabulary and `{"ok": true}` is the entire success one.
+
+    What stood here was a keyword denylist — "traceback", "psycopg", "dsn=", "password" — and
+    a denylist only ever catches the leak it was told about. A psycopg connection string
+    reaches a caller as `host=… port=… user=… dbname=…`; carrying `host=` but not `dsn=`, it
+    walked straight through. An allowlist inverts the default: anything the service was not
+    designed to say is the finding, including the shape nobody thought of.
+
+    Values are judged as well as keys, because a permitted key can carry a forbidden value —
+    the exact failure this guards is `str(e)` landing in `error`. Each key is held to the
+    tightest rule its authority supports:
+
+        ok     must be a bool.
+        ref    must be the shape `new_ref()` emits (`ref_shaped`) — fixed-width hex.
+        error  can only be shape-checked: it must be a bare token.
+
+    Prose on a route that needs no credential is the diagnostic that must not be there, and
+    length alone does not find it: `FATAL: password authentication failed for user …` is 54
+    characters.
+
+    RESIDUAL GAP, stated rather than left to be derived. A token-shaped `error` value passes:
+    `{"ok": false, "error": "mia_sales_token"}` is bare-token clean, and an auth route
+    echoing the credential it just rejected is a plausible way to produce one. It survives
+    because `safe_error(code=...)` accepts any code and no enumeration of them exists to
+    check against — closing it means giving `service_guards` a code vocabulary, not writing
+    a code list here. A list here would be the console's own second answer to a question the
+    service already owns, which is the thing this function exists NOT to do. `ok` and `ref`
+    have no such gap.
+
+    The offending value is NEVER echoed: this detail is read in a ticket, and the operator
+    reads the real exception in the process log via `ref`."""
+    try:
+        guards = account_guards()
+    except Exception as e:
+        return None, ("cannot ask the Account Service what it is allowed to say: "
+                      f"{type(e).__name__}: {e}")
+    allowed = {"ok"} | set(guards.safe_error()[0])
+    extra = sorted(k for k in doc if k not in allowed)
+    if extra:
+        return True, ("the health body carries field(s) the service is not allowed to expose: "
+                      + ", ".join(map(repr, extra)))
+    for key, value in sorted(doc.items()):
+        if key == "ok":
+            permitted = isinstance(value, bool)
+        elif key == "ref":
+            permitted = isinstance(value, str) and ref_shaped(value, guards.new_ref())
+        else:
+            permitted = isinstance(value, str) and bare_token(value)
+        if not permitted:
+            return True, (f"the health field {key!r} is not a stable code — a raw diagnostic "
+                          "reached a route that needs no credential. The value is withheld "
+                          "here; read the process log for the exception behind `ref`.")
+    return False, ""
+
+
+def check_account_service(rep):
+    base = account_base()
+    code, body = http(base + "/health")
+    if code == 0:
+        return rep.blocked("account.health", LIVE, f"Account Service answers at {base}",
+                           "no response — the org-scoped data layer is unreachable from here")
+    doc, why = health_doc(body)
+    rep.verdict(code == 200 and doc is not None and doc.get("ok") is True,
+                "account.health", LIVE, f"Account Service healthy at {base}",
+                f"HTTP {code}; " + (why or f"ok={doc.get('ok')!r}, not true — {excerpt(body)}"))
+    # The leak this check exists for is on the FAILURE path — `str(e)` on a psycopg error
+    # reaching a route that needs no credential — so it is asked of every answered body, not
+    # only of a healthy one, which is where it used to stop.
+    if doc is None:
+        rep.blocked("account.health_redacted", LIVE,
+                    "the health response carries no internal diagnostic",
+                    f"nothing to inspect: {why}")
+    else:
+        leaked, leak_why = account_health_leak(doc)
+        if leaked is None:
+            rep.blocked("account.health_redacted", LIVE,
+                        "the health response carries no internal diagnostic", leak_why)
+        else:
+            rep.verdict(not leaked, "account.health_redacted", LIVE,
+                        "the health response carries no internal diagnostic", leak_why)
+    rcode, rbody = http(base + "/ready")
+    if rcode == 0:
+        rep.blocked("account.ready", LIVE, "Account Service is ready to serve records",
+                    "the readiness endpoint is unreachable")
+        return
+    try:
+        readiness = json.loads(rbody) if rbody else {}
+    except ValueError:
+        readiness = {}
+    rep.data["account_db"] = readiness
+    rep.verdict(rcode == 200 and readiness.get("ok") is True,
+                "account.ready", LIVE,
+                "Account Service schema and identity source are ready",
+                "; ".join(readiness.get("problems") or [f"HTTP {rcode}"]))
+
+
+def check_containment(rep, clients, live):
+    """Is each tenant's member surface still confined? Asked with the tenant's OWN token,
+    which is the only bearer that can read its catalog (an operator read returns the
+    operator's own — measured, see test_registry_reconciliation.py)."""
+    if clients is None:
+        return
+    if not live:
+        return rep.skipped("tenant.confined", LIVE, "member surfaces are confined",
+                           "--offline requested")
+    try:
+        from tool_surface import egress_observed_off, parse_catalog
+    except Exception as e:
+        return rep.blocked("tenant.confined", LIVE, "member surfaces are confined",
+                           f"cannot import the shared catalog reader: {e}")
+    api = instance_api()
+    unconfined, blocked = [], []
+    for slug, c in sorted(clients.items()):
+        code, body = http(f"{api}/api/webchat/v2/settings/tools", token=c.ironclaw_token,
+                          timeout=15, limit=1 << 20)
+        if code != 200 or not body:
+            blocked.append(f"{slug} (HTTP {code})")
+            continue
+        try:
+            state = parse_catalog(json.loads(body), slug)
+            egress_observed_off(state, slug)
+        except SystemExit as e:            # tool_surface fails closed by exiting
+            unconfined.append(f"{slug}: {e}")
+        except Exception as e:
+            blocked.append(f"{slug} ({type(e).__name__})")
+    if unconfined:
+        rep.fail("tenant.confined", LIVE, "every tenant's member surface is confined",
+                 "; ".join(unconfined))
+    elif blocked and len(blocked) == len(clients):
+        rep.blocked("tenant.confined", LIVE, "every tenant's member surface is confined",
+                    "could not read any tenant's catalog: " + ", ".join(blocked))
+    elif blocked:
+        rep.fail("tenant.confined", LIVE, "every tenant's member surface is confined",
+                 "unreadable for: " + ", ".join(blocked) +
+                 " — an unreadable surface is not a confined one")
+    else:
+        rep.ok("tenant.confined", LIVE,
+               f"every tenant's member surface is confined ({len(clients)} checked, "
+               "egress tools observed disabled)")
+
+
+def check_sealed_members(rep, clients, live):
+    """Would the bridge start? Every tenant's token must be a sealed MEMBER, not the operator.
+
+    THE POINT OF PUTTING IT HERE. `telegram_bridge.main()` runs this check at startup and refuses
+    to serve if it fails or cannot be evaluated. Without a `doctor` equivalent, the first real
+    run of that control is a restart — quite possibly one taken during an incident, when the last
+    thing an operator wants is a new refusal to diagnose. This makes it answerable in advance.
+
+    Delegates to the seam rather than re-implementing the rule, like every other check here: a
+    console carrying its own copy of "what counts as a sealed member" would be a second, quieter
+    answer to a security question."""
+    if clients is None:
+        return
+    if not live:
+        return rep.skipped("tenant.sealed", LIVE, "every tenant is a sealed member, not the operator",
+                           "--offline requested")
+    try:
+        import context_ingress as ing
+    except Exception as e:
+        return rep.blocked("tenant.sealed", LIVE, "every tenant is a sealed member, not the operator",
+                           f"cannot import the seam: {e}")
+    try:
+        ing.assert_no_member_is_the_operator(clients)
+    except ing.OperatorTokenInRegistry as e:
+        # The bridge treats BOTH of these as refuse-to-start. The console separates them, because
+        # "a tenant holds the operator token" and "the instance is down" need different operators
+        # doing different things — and only the first is a security finding.
+        unreachable = "cannot reach" in str(e)
+        return (rep.blocked if unreachable else rep.fail)(
+            "tenant.sealed", LIVE, "every tenant is a sealed member, not the operator",
+            rep.scrub(str(e)) + ("  (the bridge would refuse to start)" if not unreachable
+                                 else "  (the bridge would refuse to start until this is reachable)"))
+    except Exception as e:
+        return rep.blocked("tenant.sealed", LIVE, "every tenant is a sealed member, not the operator",
+                           f"probe failed: {type(e).__name__}: {e}")
+    rep.ok("tenant.sealed", LIVE,
+           f"every tenant is a sealed member ({len(clients)} checked, refused on the admin surface)")
+
+
+def egress_state():
+    """The boundary's live state, derived from the running container — never from files.
+
+    A compose overlay on disk proves an intention. `docker inspect` proves a fact. Reading the
+    overlay to decide this — which an earlier version of this console did — is how a control
+    that was edited but never recreated reports green forever."""
+    try:
+        import egress_status as es
+    except Exception as e:
+        return {"state": "BLOCKED", "why": [f"egress_status did not import: {e}"]}
+    container = os.environ.get("MT_CONTAINER")
+    if not container:
+        container, why = _mt_container_name()
+        if not container:
+            # Not a boundary failure — a boundary we could not locate, which is a different
+            # sentence. Naming a container we guessed at would answer the operator's question
+            # about the wrong one.
+            return {"state": "BLOCKED", "why": [why]}
+    st = es.evaluate(container)
+    ok_cfg, why_cfg = es.overlay_configured(ROOT)
+    st["overlay_configured"] = ok_cfg
+    if not ok_cfg and why_cfg:
+        st.setdefault("why", []).append(f"overlay does not validate: {why_cfg}")
+    return st
+
+
+def _mt_container_name():
+    """(name, why) — the configured MT container name from `fleet.sh`, or None and a reason.
+
+    The repo already has exactly one authority for this (`fleet_mt_container_configured`), and
+    it is the CONFIGURED resolver rather than the live one because what runs on this laptop
+    says nothing about what runs on a remote target. A second parser here drifted immediately:
+    it kept the trailing comment from `container_name: multiclaw  # …` and produced a container
+    nothing could inspect.
+
+    NO FALLBACK LITERAL, and the reason is the one `CONTRIBUTING.md` gives for `MODEL_PIN`: a
+    default is the one value that can silently outrank the authority it stands in for. This
+    returned "multi-ironclaw-1" whenever the subprocess failed. The configured name is
+    `multiclaw`, so the guess named a different container — and because that literal is what
+    compose's default project-service naming produces, it is a name that plausibly EXISTS on
+    another box without being the instance this registry serves. Evaluating that one and
+    reporting VERIFIED is the "green against the wrong thing" `check_egress_containment`
+    exists to prevent. Even where it merely fails, it fails wrongly: `evaluate()` answers
+    BLOCKED "no such container: multi-ironclaw-1", sending the operator after a container
+    that vanished instead of after the resolver that did not answer.
+
+    A name we could not establish is not a name. The caller reports BLOCKED, which is what
+    that verdict is for, and `fleet_mt_container_configured` treats a missing compose as a
+    hard error for the same reason: a provenance check aimed at the wrong container certifies
+    nothing.
+
+    `returncode` is honoured too — it was not. That resolver exits non-zero with its reason on
+    stderr when the compose file is missing, and the failure used to reach the literal."""
+    try:
+        p = subprocess.run(
+            ["bash", "-c", '. "$1/deploy/lib/fleet.sh"; fleet_mt_container_configured',
+             "_", str(ROOT)],
+            capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        return None, ("could not ask deploy/lib/fleet.sh for the MT container name: "
+                      f"{type(e).__name__}: {e}")
+    if p.returncode != 0:
+        detail = (p.stderr.strip().splitlines() or [f"exit {p.returncode}"])[-1].strip()
+        return None, f"deploy/lib/fleet.sh could not resolve the MT container name: {detail}"
+    name = (p.stdout.strip().splitlines() or [""])[-1].strip()
+    if not name:
+        return None, "deploy/lib/fleet.sh named no MT container"
+    return name, ""
+
+
+def check_egress_containment(rep, live=True):
+    """Report the boundary honestly, and make an unproved boundary cost a non-zero exit.
+
+    VERIFIED is the ONLY state that may be described as containment. RUNNING means structurally
+    contained but unproved; FAILED means an active tenant is being served without the boundary;
+    BLOCKED means nothing was evaluated, which is never a pass."""
+    if not live:
+        return rep.skipped("egress.network", LIVE,
+                           "the runtime sits behind a default-deny egress boundary",
+                           "--offline requested")
+    st = egress_state()
+    rep.data["egress"] = {k: v for k, v in st.items() if k != "stamp"}
+    rep.data["egress"]["verified_at"] = (st.get("stamp") or {}).get("at_iso")
+    state, why = st["state"], "; ".join(st.get("why") or [])
+    if state == "VERIFIED":
+        return rep.ok("egress.network", LIVE,
+                      "the runtime has no direct public route; egress is restricted to the "
+                      f"configured provider path (verified {(st.get('stamp') or {}).get('at_iso')})")
+    if state == "BLOCKED":
+        return rep.blocked("egress.network", LIVE,
+                           "the runtime sits behind a default-deny egress boundary", why)
+    if state == "RUNNING":
+        return rep.fail("egress.network", LIVE,
+                        "the egress boundary is PROVED, not merely present",
+                        why + " — structurally contained but unproved. Run "
+                              "./deploy/egress/probe-egress.sh <container>")
+    return rep.fail("egress.network", LIVE,
+                    "the runtime sits behind a default-deny egress boundary",
+                    why + " Design and guarantee: SECURITY.md; runbook: deploy/README.md")
+
+
+def _pid_alive(pid):
+    """Is the recorded bridge process still running on THIS host? True / False / None.
+
+    `os.kill(pid, 0)` sends no signal; it asks the kernel whether the pid exists and whether we
+    may signal it. Stdlib only, works the same on macOS and Linux, and needs no `ps` parsing, no
+    psutil, and nothing from systemd — so the answer is identical on the serve host and on a
+    workstation.
+
+    None when there is nothing to check: no pid recorded (an older store, or a bridge that
+    stopped cleanly and cleared it — the caller then falls back to judging the heartbeat, which
+    is the pre-existing behaviour).
+
+    TWO HONEST LIMITS. A recycled pid could belong to an unrelated process, which would read as
+    alive; pids do not recycle within a two-minute heartbeat window in practice, and the failure
+    direction is the safe one — this check only ever turns a green into a red. And a pid owned by
+    another user raises PermissionError, which proves a process EXISTS, so that counts as alive.
+    """
+    if pid in (None, "", "None"):
+        return None
+    try:
+        os.kill(int(pid), 0)
+    except (ValueError, TypeError):
+        return None                  # unparseable — do not invent a verdict
+    except ProcessLookupError:
+        return False                 # the kernel has no such process: it is gone
+    except PermissionError:
+        return True                  # exists, owned by someone else
+    return True
+
+
+def _turn_budget():
+    return float(os.environ.get("TURN_BUDGET_SECONDS", "180"))
+
+
+def _bridge_read(want_blocked=False):
+    """Open the bridge store once and read what both bridge readers need.
+
+    `doctor` and `bridge status` ask the same five-step question — import the bridge modules,
+    resolve the store, open it, snapshot, close. They differ only in what absence MEANS, so
+    the steps live here and the verdict stays at the call site: an absent store is
+    (db, None, [], None), not an error, because doctor SKIPs a laptop that runs no bridge
+    while `bridge status` BLOCKs — you asked about a bridge and nothing was measured."""
+    try:
+        import bridge_core           # noqa: F401 — imported HERE so its failure is a verdict
+        import bridge_state
+        db = str(_bridge_paths()[0])
+    except Exception as e:
+        return None, None, [], f"bridge modules did not import: {type(e).__name__}: {e}"
+    if not pathlib.Path(db).exists():
+        return db, None, [], None
+    try:
+        # READ-ONLY, because this is a status path. Opening runs `_check_version`, so with the
+        # default this reported nothing and silently MIGRATED the operator's live store —
+        # `--offline doctor` included, which promises to measure nothing live. Observed on a real
+        # host during a verification run: schema upgraded, backup written beside it, no output.
+        st = bridge_state.BridgeState(db, migrate=False)
+        snap = st.progress_snapshot()
+        blocked = [dict(r) for r in st.blocked_updates()] if want_blocked else []
+        st.close()
+    except bridge_state.MigrationRequired as e:
+        return db, {"needs_migration": e.got}, [], None
+    except Exception as e:
+        return db, {"unreadable": type(e).__name__}, [], None
+    return db, snap, blocked, None
+
+
+def _bridge_health(snap, budget, alive):
+    """Only ever called after `_bridge_read` returned no error, which is what makes this import
+    safe: `bridge_core` is imported inside that guard so a broken one becomes BLOCKED rather
+    than a traceback out of `doctor`. It survives today only because telegram_bridge happens to
+    import bridge_core too — a transitive guard is not a guard."""
+    import bridge_core
+    return bridge_core.health(snap, time.time(), budget, pid_alive=alive)
+
+
+def check_bridge(rep):
+    """Fold the bridge's forward-progress verdict into the one-screen view, without failing a
+    host that legitimately runs no bridge (the laptop does not; the serve VM does)."""
+    db, snap, _, err = _bridge_read()
+    if err:
+        return rep.blocked("bridge.progress", LIVE, "the bridge is making forward progress", err)
+    if snap is None:
+        return rep.skipped("bridge.progress", LIVE, "the bridge is making forward progress",
+                           "no bridge state store on this host — no bridge runs here")
+    if snap.get("needs_migration"):
+        return rep.blocked("bridge.progress", LIVE, "the bridge is making forward progress",
+                           f"the store is schema version {snap['needs_migration']} and needs an "
+                           "upgrade. This command will not perform one — start the bridge, which "
+                           "migrates and backs up, then re-check.")
+    ok, reasons = _bridge_health(snap, _turn_budget(), _pid_alive(snap.get("pid")))
+    rep.verdict(ok, "bridge.progress", LIVE, "the bridge is making forward progress",
+                "; ".join(reasons))
+
+
+def check_identity_duplicates(rep):
+    """How many live Account-Service credentials each org holds.
+
+    REPORTED ON THE PASS LINE, NOT A GATE — deliberately. Two live tokens for one org is what a
+    credential ROTATION looks like mid-flight (`service_guards.duplicate_orgs` says so in its own
+    docstring), so a check that FAILED here would go red on every legitimate rotation, and a gate
+    people learn to ignore is worse than no gate. Same shape as `revocation.waived`: the fact
+    stays in front of the operator without blocking anything.
+
+    It exists because the condition is otherwise INVISIBLE. Fifteen credentials accumulated
+    across six orgs, three of them duplicated, and nothing surfaced it until provisioning refused
+    to run — the Account Service's own warning goes to a container log nobody reads, and a
+    service process that predates the code emitting that warning never emits it at all.
+
+    Counts only. No token value ever enters this report."""
+    try:
+        import identities as ids
+        doc = ids.load()
+    except Exception as e:
+        return rep.blocked("identities.duplicates", CONFIG,
+                           "no org holds more than one Account-Service credential",
+                           f"identity state unreadable: {type(e).__name__}: {e}")
+    per = ids.org_token_counts(doc)
+    dupes = {o: n for o, n in per.items() if n > 1}
+    rep.data["identity_credentials"] = {"orgs": len(per), "tokens": len(doc), "duplicates": dupes}
+    if dupes:
+        detail = ", ".join(f"{o} ({n})" for o, n in dupes.items())
+        rep.ok("identities.duplicates", CONFIG,
+               f"{len(dupes)} org(s) hold MORE THAN ONE live Account-Service credential — "
+               f"{detail}. A mid-rotation state, or authority a re-provision left behind; "
+               "provisioning refuses an org in this state until it is reconciled")
+    else:
+        rep.ok("identities.duplicates", CONFIG,
+               f"every org holds exactly one Account-Service credential "
+               f"({len(per)} org(s), {len(doc)} token(s))")
+
+
+def check_residual_authority(rep):
+    """Two checks, deliberately, because a residual session has two separate facts about it:
+    whether the token still authenticates (measured) and whether that matters (declared).
+
+    Collapsing them means either a gate that stays red until 2027 — which people learn to
+    ignore, and an ignored gate is worse than none — or a green one bought by deleting the
+    evidence. Neither is acceptable, so the ledger keeps reporting every live session and only
+    ACTIVE_RISK ones fail."""
+    try:
+        import lifecycle as lc
+    except Exception as e:
+        return rep.blocked("revocation.residual", CONFIG,
+                           "no deprovisioned tenant holds residual authority", str(e))
+    outstanding, expired = lc.residual_list()
+    blocking, waived = lc.residual_split(outstanding)
+    rep.data["residual_authority"] = {"blocking": blocking, "waived": waived}
+
+    if blocking:
+        soonest = min(e.get("expires_at", "?") for e in blocking.values())
+        rep.fail("revocation.residual", CONFIG,
+                 f"{len(blocking)} deprovisioned tenant(s) still hold a valid member session",
+                 f"{', '.join(sorted(blocking))} — earliest expiry {soonest}. Containment is "
+                 "custody plus the global rotation in deploy/README.md; this is not a "
+                 "pass until it expires, is revoked, or is explicitly classified.")
+    elif outstanding:
+        rep.ok("revocation.residual", CONFIG,
+               "no ACTIVE_RISK residual authority outstanding")
+    else:
+        rep.ok("revocation.residual", CONFIG,
+               f"no deprovisioned tenant is carrying residual session authority "
+               f"({len(expired)} historical entr(ies))")
+
+    # The waived ones are still LIVE TOKENS. Printed on the PASS line, so the fact stays in
+    # front of the operator even though it no longer blocks a release.
+    if waived:
+        detail = "; ".join(
+            f"{s} ({e.get('classification')}, valid until {e.get('expires_at')}: "
+            f"{e.get('waiver_reason')})" for s, e in sorted(waived.items()))
+        rep.ok("revocation.waived", CONFIG,
+               f"{len(waived)} residual session(s) STILL AUTHENTICATE but are classified "
+               f"non-blocking — {detail}")
+
+
+# ── tenant view ───────────────────────────────────────────────────────────────────────
+
+_ACCOUNT_STATUS = {}
+
+
+def account_service_status(base):
+    """Is the Account Service behind `base` answering? Asked once per base, per command.
+
+    The catalog needs the tenant's org token as X-Service-Token, which `http` does not send; an
+    unauthenticated probe only tells us the service is up, which is what we want here —
+    per-tenant record access is checked by `tenant inspect --deep`. That makes the answer a
+    property of the BASE, not of the tenant, and every tenant shares one by default: probing
+    per tenant is N identical round trips for one fact, on the command whose whole point is
+    that its cost stays flat as tenants arrive."""
+    if base not in _ACCOUNT_STATUS:
+        code, _ = http(f"{base}/list_accounts", timeout=10)
+        _ACCOUNT_STATUS[base] = "service-up" if code in (200, 401) else (
+            "unreachable" if code == 0 else f"http-{code}")
+    return _ACCOUNT_STATUS[base]
+
+
+AUTH_ACCEPTED, AUTH_REJECTED, AUTH_UNREACHABLE, AUTH_UNDETERMINED = (
+    "accepted", "rejected", "unreachable", "undetermined")
+
+
+def auth_verdict(code):
+    """What one status off the bearer probe says about a tenant's member token.
+
+    The probe is `GET /v1/responses/<id-that-does-not-exist>`, and what its codes mean is
+    established by `multi/verify/test_session_revocation.py` (source-traced at the pin, then
+    measured) and read the same way by `multi/provision/deprovision.sh`:
+
+        401 / 403  the bearer was refused                          -> rejected
+        2xx / 404  the bearer was accepted and the id is not real  -> accepted
+        0          nothing answered                                -> unreachable
+
+    404 is the ordinary answer, not the edge case: measured 2026-08-26 against the local
+    instance at `IRONCLAW_PIN`, all four registered tenants probe 404. Narrowing "accepted"
+    to 2xx would take a healthy fleet red.
+
+    Everything else is UNDETERMINED, and that is the fix. This mapped every unlisted code to
+    "accepted", so a 500, a 502 from a proxy in front of the instance, or a 429 printed a
+    green line for a tenant whose auth was never established — the console asserting a
+    guarantee it had not evaluated. A gateway that never reached the auth decision has told
+    us nothing about the token, and "we could not check" must not read as "fine".
+
+    The revocation proof reads its own unlisted codes as ACCEPTED, and that is not a
+    disagreement: there, ACCEPTED keeps a deprovisioning gate RED, so the unknown falls on
+    the safe side. Here the same reading falls on the unsafe one."""
+    if code == 0:
+        return AUTH_UNREACHABLE
+    if code in (401, 403):
+        return AUTH_REJECTED
+    if 200 <= code < 300 or code == 404:
+        return AUTH_ACCEPTED
+    return AUTH_UNDETERMINED
+
+
+def report_auth(rep, cid, claim, row):
+    """One tenant's probe -> one verdict, from the single place that knows what a code means.
+
+    Both tenant views ask the same question of the same probe, so they must not answer it two
+    ways: `tenants status` PASSing a status that `tenant inspect` BLOCKs is a disagreement an
+    operator settles by believing whichever screen is greener."""
+    auth, code = row["auth"], row["auth_status"]
+    if auth == AUTH_ACCEPTED:
+        return rep.ok(cid, LIVE, claim)
+    if auth == AUTH_REJECTED:
+        return rep.fail(cid, LIVE, claim,
+                        f"the instance refused this tenant's member token (HTTP {code}) — it "
+                        "cannot be served; re-provision or restore its registry entry")
+    if auth == AUTH_UNREACHABLE:
+        return rep.blocked(cid, LIVE, claim, "instance unreachable — nothing was measured")
+    return rep.blocked(cid, LIVE, claim,
+                       f"the instance answered HTTP {code}, which says nothing about the "
+                       "token: the request did not reach the auth decision")
+
+
+def tenant_row(c, state, live, api):
+    """One tenant's operator-visible facts. No credential value ever enters this dict."""
+    gid = str(c.telegram_group_id or "")
+    st = state.get(gid) or {}
+    row = {
+        "slug": c.slug,
+        "name": c.name,
+        "service": c.service_id,
+        "persona_sha": c.persona_sha,
+        "model": c.model,
+        "routing": "active" if gid else "unrouted",
+        "telegram_group_bound": bool(gid),
+        "thread_started": bool(st.get("prev")),
+        "accounts_supplied": len(st.get("supplied") or {}),
+        "last_turn_at": st.get("last_turn_at"),
+        # Accounts this tenant's catalog lists but whose context does not resolve. A store
+        # inconsistency the client never sees and the operator otherwise never learns about.
+        "catalog_orphans": sorted((st.get("orphans") or {}).keys()),
+        "auth": None,
+        # The probe's raw status, kept beside the verdict so a BLOCKED line can name what the
+        # instance actually answered. No credential is involved in either value.
+        "auth_status": None,
+        "records": None,
+    }
+    if live:
+        code, _ = http(f"{api}/v1/responses/resp_{'0' * 32}", token=c.ironclaw_token, timeout=10)
+        row["auth"], row["auth_status"] = auth_verdict(code), code
+        row["records"] = account_service_status(c.account_base)
+    return row
+
+
+def tenant_records(c):
+    """(count, error) for one tenant's own book, using that tenant's org token."""
+    req = urllib.request.Request(c.account_base + "/list_accounts",
+                                 headers={"X-Service-Token": c.account_token,
+                                          "User-Agent": "ironworks-console"})
+    try:
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return json.loads(r.read()).get("count"), None
+    except urllib.error.HTTPError as e:
+        return None, f"HTTP {e.code}"
+    except Exception as e:
+        return None, type(e).__name__
+
+
+# ── commands ──────────────────────────────────────────────────────────────────────────
+
+def cmd_doctor(args):
+    rep = Report("doctor")
+    check_pins(rep)
+    check_services(rep)
+    clients = load_registry(rep)
+    check_model_agreement(rep, clients)
+    check_residual_authority(rep)
+    check_identity_duplicates(rep)
+    check_egress_containment(rep, live=not args.offline)
+    if args.offline:
+        for cid, title in (("instance.health", "IronClaw instance healthy"),
+                           ("account.health", "Account Service healthy")):
+            rep.skipped(cid, LIVE, title, "--offline requested")
+    else:
+        check_instance(rep)
+        check_account_service(rep)
+    check_containment(rep, clients, live=not args.offline)
+    check_sealed_members(rep, clients, live=not args.offline)
+    if not args.offline:
+        check_bridge(rep)
+    if clients is not None:
+        state = bridge_state()
+        rep.data["tenants"] = [tenant_row(c, state, live=False, api=instance_api())
+                               for _, c in sorted(clients.items())]
+    return rep.emit(args.json, "ironworks doctor")
+
+
+def cmd_tenants_status(args):
+    rep = Report("tenants status")
+    clients = load_registry(rep)
+    if clients is None:
+        return rep.emit(args.json, "ironworks tenants status")
+    state = bridge_state()
+    api = instance_api()
+    rows = [tenant_row(c, state, live=not args.offline, api=api)
+            for _, c in sorted(clients.items())]
+    rep.data["tenants"] = rows
+    for row in rows:
+        if row["auth"] is not None:
+            report_auth(rep, f"tenant.{row['slug']}.auth",
+                        f"{row['slug']}: member token accepted", row)
+        if not row["telegram_group_bound"]:
+            rep.fail(f"tenant.{row['slug']}.routing", CONFIG,
+                     f"{row['slug']}: routing is active",
+                     "no TELEGRAM_GROUP_ID — this tenant is configured but not reachable")
+    if not args.json:
+        print("== ironworks tenants status ==")
+        hdr = f"  {'SLUG':<14} {'SERVICE':<26} {'PERSONA':<18} {'ROUTING':<9} {'AUTH':<12} LAST TURN"
+        print(hdr)
+        print("  " + "-" * (len(hdr) - 2))
+        for row in rows:
+            print(f"  {row['slug']:<14} {row['service']:<26} {row['persona_sha']:<18} "
+                  f"{row['routing']:<9} {str(row['auth'] or 'not-checked'):<12} "
+                  f"{row['last_turn_at'] or 'never recorded'}")
+        print()
+    return rep.emit(args.json, "checks")
+
+
+def cmd_tenant_inspect(args):
+    rep = Report("tenant inspect")
+    clients = load_registry(rep)
+    if clients is None:
+        return rep.emit(args.json, "ironworks tenant inspect")
+    c = clients.get(args.slug)
+    if c is None:
+        rep.fail("tenant.exists", CONFIG, f"tenant {args.slug!r} is in the registry",
+                 "known: " + (", ".join(sorted(clients)) or "(none)"))
+        return rep.emit(args.json, "ironworks tenant inspect")
+    rep.ok("tenant.exists", CONFIG, f"tenant {args.slug!r} is in the registry")
+
+    state = bridge_state()
+    row = tenant_row(c, state, live=not args.offline, api=instance_api())
+    rep.data["tenant"] = row
+
+    # Guidance is already validated by load_clients (it would have refused otherwise); saying
+    # so explicitly is what makes the operator's question answerable in one place.
+    rep.ok("tenant.guidance", CONFIG,
+           f"guidance is present, slug-bound and bound to service {c.service}")
+    orphans = row["catalog_orphans"]
+    rep.verdict(not orphans, "tenant.catalog_consistent", CONFIG,
+                "every catalogued account resolves to a record",
+                f"{len(orphans)} catalogued account(s) 404 on context: {', '.join(orphans)} — "
+                "the seam has stopped re-asking for them until their catalog row changes; "
+                "reconcile the store or prune the catalog")
+    rep.verdict(bool(c.telegram_group_id), "tenant.routing", CONFIG,
+                "routing is active (a Telegram group is bound)",
+                "configured but unreachable: no TELEGRAM_GROUP_ID")
+    pin, _ = pin_file("MODEL_PIN")
+    rep.verdict(c.model == pin, "tenant.model", CONFIG, f"runs the pinned model ({pin})",
+                f"overridden to {c.model}")
+
+    if args.offline:
+        rep.skipped("tenant.auth", LIVE, "the member token authenticates", "--offline")
+        rep.skipped("tenant.records", LIVE, "the tenant's own records are readable", "--offline")
+    else:
+        report_auth(rep, "tenant.auth",
+                    "the seam's member token authenticates against the instance", row)
+        count, err = tenant_records(c)
+        if err:
+            rep.blocked("tenant.records", LIVE, "the tenant's own records are readable", err)
+        else:
+            rep.data["tenant"]["account_count"] = count
+            rep.ok("tenant.records", LIVE,
+                   f"the tenant's own records are readable ({count} account(s) in its book)")
+        check_containment(rep, {c.slug: c}, live=True)
+        check_sealed_members(rep, {c.slug: c}, live=True)
+
+    if not args.json:
+        print(f"== ironworks tenant inspect {c.slug} ==")
+        for k in ("name", "service", "persona_sha", "model", "routing", "thread_started",
+                  "accounts_supplied", "last_turn_at", "account_count"):
+            if k in row or k in rep.data["tenant"]:
+                print(f"  {k:<18} {rep.data['tenant'].get(k)}")
+        print()
+    return rep.emit(args.json, "checks")
+
+
+def cmd_tenant_reset_thread(args):
+    """Explicitly discard one tenant's incompatible conversation, never its delivery record."""
+    rep = Report("tenant reset-thread")
+    clients = load_registry(rep)
+    if clients is None:
+        return rep.emit(args.json, "ironworks tenant reset-thread")
+    c = clients.get(args.slug)
+    if c is None:
+        rep.fail("tenant.exists", CONFIG, f"tenant {args.slug!r} is in the registry",
+                 "known: " + (", ".join(sorted(clients)) or "(none)"))
+        return rep.emit(args.json, "ironworks tenant reset-thread")
+    rep.ok("tenant.exists", CONFIG, f"tenant {args.slug!r} is in the registry")
+    gid = str(c.telegram_group_id or "")
+    if not gid:
+        rep.fail("tenant.routing", CONFIG, "the tenant has a Telegram group to reset",
+                 "no TELEGRAM_GROUP_ID is configured")
+        return rep.emit(args.json, "ironworks tenant reset-thread")
+
+    try:
+        import bridge_state as bs
+        db, legacy = _bridge_paths()
+        if db.exists():
+            st = bs.BridgeState(db)
+        else:
+            st, _ = bs.migrate_from_json(legacy, db)
+    except Exception as e:
+        rep.fail("thread.state", CONFIG, "the bridge state store opens",
+                 f"{type(e).__name__}: {e}")
+        return rep.emit(args.json, "ironworks tenant reset-thread")
+
+    try:
+        row = st.thread_row(gid)
+        stored = bs.BridgeState.stored_identity(row) if row else None
+        intended = c.thread_identity
+        mismatches = st.identity_mismatches(row, c) if row else []
+        snap = st.progress_snapshot()
+        alive = _pid_alive(snap.get("pid"))
+        rep.data["thread_reset"] = {
+            "slug": c.slug, "gid": gid, "store": str(db),
+            "stored_identity": stored, "intended_identity": intended,
+            "mismatches": mismatches, "thread_present": bool(row),
+            "bridge_pid": snap.get("pid"), "bridge_running": alive,
+            "delivery_journal": "preserved"}
+
+        def emit_reset():
+            if not args.json:
+                info = rep.data["thread_reset"]
+                print(f"== ironworks tenant reset-thread {c.slug} ==")
+                print(f"  stored identity   {info.get('stored_identity')}")
+                print(f"  intended identity {info.get('intended_identity')}")
+                print(f"  mismatches        {info.get('mismatches') or 'none'}")
+                print("  delivery journal preserved")
+                print()
+            return rep.emit(args.json, "checks")
+
+        if alive is True:
+            rep.fail("bridge.stopped", CONFIG, "the bridge is stopped before thread reset",
+                     f"recorded pid {snap.get('pid')} is still running; stop it and wait for exit")
+            return emit_reset()
+        rep.ok("bridge.stopped", CONFIG, "the bridge is stopped before thread reset")
+
+        if args.confirm != c.slug:
+            command = (f"./deploy/ironworks tenant reset-thread {c.slug} "
+                       f"--confirm {c.slug}")
+            rep.fail("thread.confirmed", CONFIG,
+                     "the reset confirmation repeats the tenant slug",
+                     f"no state changed; run exactly: {command}")
+            return emit_reset()
+        rep.ok("thread.confirmed", CONFIG, "the reset confirmation repeats the tenant slug")
+
+        removed = st.reset_thread(gid)
+        rep.data["thread_reset"]["removed_rows"] = removed
+        rep.data["thread_reset"]["thread_present_after"] = bool(st.thread_row(gid))
+        rep.ok("thread.reset", CONFIG,
+               f"tenant {c.slug!r} conversation/context state reset; delivery journal preserved")
+    finally:
+        st.close()
+
+    return emit_reset()
+
+
+def cmd_bridge_status(args):
+    """Is the bridge making FORWARD PROGRESS? Not: is a process alive.
+
+    `systemctl is-active` reads green on a bridge wedged inside a turn, and the watchdog's
+    poll-error count reads zero for the same reason — a wedged loop is not polling, so it logs
+    no poll errors. This compares the heartbeat against progress and against the in-flight
+    deadline, which is the only combination that can tell "busy" from "stuck"."""
+    rep = Report("bridge status")
+    if args.offline:
+        # The contract `--offline` states is "LIVE checks report SKIPPED, not PASS", and it was
+        # honoured by `doctor` alone — `--offline bridge status` went on evaluating a LIVE-kind
+        # row, which is the shape the flag exists to make impossible. Nothing here is skipped
+        # for being slow; it is skipped because the flag says every LIVE verdict on this run is
+        # unmeasured, and a report may not contain both kinds of claim.
+        rep.skipped("bridge.progress", LIVE, "the bridge is making forward progress",
+                    "--offline requested")
+        return rep.emit(args.json, "ironworks bridge status")
+    db, snap, blocked_rows, err = _bridge_read(want_blocked=True)
+    if err:
+        rep.fail("bridge.import", CONFIG, "the bridge modules import", err)
+        return rep.emit(args.json, "ironworks bridge status")
+    if snap is None:
+        rep.blocked("bridge.state", LIVE, f"the bridge state store exists ({db})",
+                    "no store on this host — the bridge has never run here. This is BLOCKED, "
+                    "not healthy: nothing was measured.")
+        return rep.emit(args.json, "ironworks bridge status")
+    if snap.get("needs_migration"):
+        rep.blocked("bridge.state", LIVE, f"the bridge state store is readable ({db})",
+                    f"schema version {snap['needs_migration']}, and this command will not "
+                    "migrate it — a status check that writes is not a status check. Start the "
+                    "bridge to upgrade (it backs up first), then re-run.")
+        return rep.emit(args.json, "ironworks bridge status")
+
+    budget = _turn_budget()
+    alive = _pid_alive(snap.get("pid"))
+    ok, reasons = _bridge_health(snap, budget, alive)
+    rep.data["bridge"] = {**{k: v for k, v in snap.items() if k != "counts"},
+                          "counts": snap.get("counts", {}),
+                          "blocked_updates": blocked_rows,
+                          "turn_budget_seconds": budget}
+    rep.verdict(ok, "bridge.progress", LIVE, "the bridge is making forward progress",
+                "; ".join(reasons))
+    if not args.json:
+        print("== ironworks bridge status ==")
+        for k in ("started_at", "heartbeat_at", "last_poll_ok_at", "last_update_at",
+                  "last_outcome", "last_delivered_at", "inflight_update_id", "inflight_gid",
+                  "inflight_stage", "inflight_deadline_at", "cursor", "cursor_acked",
+                  "last_batch_size"):
+            print(f"  {k:<22} {snap.get(k)}")
+        print(f"  {'process':<22} "
+              + {True: f"pid {snap.get('pid')} RUNNING on this host",
+                 False: f"pid {snap.get('pid')} NOT RUNNING — the heartbeat above is a fossil",
+                 None: "no pid recorded (stopped cleanly, or a store written by an older bridge)"}[alive])
+        print(f"  {'counts':<22} {snap.get('counts')}")
+        if blocked_rows:
+            print("  updates needing reconciliation:")
+            for r in blocked_rows:
+                print(f"    update {r['update_id']} tenant {r['gid']} {r['state']} "
+                      f"({r['error_code']}) at {r['updated_at']}")
+        print()
+    return rep.emit(args.json, "checks")
+
+
+def cmd_bridge_redeliver(args):
+    """Explicitly resend a DELIVERY_RECONCILE answer while the bridge is stopped."""
+    rep = Report("bridge redeliver")
+    if args.confirm != str(args.update_id):
+        rep.fail("delivery.confirmed", CONFIG, "confirmation repeats the update id",
+                 f"no state changed; use --confirm {args.update_id}")
+        return rep.emit(args.json, "ironworks bridge redeliver")
+    # `--offline` means "skip every LIVE check (they report SKIPPED, not PASS)". This command's
+    # whole purpose is a live Telegram send into a client group, so honouring the flag means
+    # REFUSING, not proceeding quietly: `--offline bridge redeliver N --confirm N` used to build
+    # a real `_Telegram()` and post a message to a tenant. There is no offline half to run.
+    # After the confirmation check, not before: a missing --confirm is a usage mistake and
+    # deserves the message that names the fix, whichever flags accompany it.
+    if args.offline:
+        rep.skipped("delivery.redelivered", LIVE,
+                    "the original stored model result was redelivered",
+                    "--offline: this command sends a real message to a client group; nothing "
+                    "was sent and no state changed. Re-run without --offline.")
+        return rep.emit(args.json, "ironworks bridge redeliver")
+    try:
+        import bridge_core
+        import bridge_state
+        import context_ingress as ing
+        import telegram_bridge as tb
+        db = _bridge_paths()[0]
+        st = bridge_state.BridgeState(db)
+    except Exception as e:
+        rep.fail("delivery.state", CONFIG, "the delivery store opens", f"{type(e).__name__}: {e}")
+        return rep.emit(args.json, "ironworks bridge redeliver")
+    try:
+        snap = st.progress_snapshot()
+        if _pid_alive(snap.get("pid")) is True:
+            rep.fail("bridge.stopped", CONFIG, "the bridge is stopped before redelivery",
+                     f"recorded pid {snap.get('pid')} is still running")
+            return rep.emit(args.json, "ironworks bridge redeliver")
+        row = st.update_row(args.update_id)
+        if row is None or row["state"] not in (
+                bridge_state.DELIVERY_RETRY, bridge_state.DELIVERY_RECONCILE):
+            rep.fail("delivery.eligible", CONFIG,
+                     f"update {args.update_id} is DELIVERY_RETRY or DELIVERY_RECONCILE",
+                     "only a retained delivery result may be explicitly redelivered")
+            return rep.emit(args.json, "ironworks bridge redeliver")
+        groups = ing.resolve_account_scopes(tb.load_groups())
+        gid = str(row["gid"])
+        if gid not in groups:
+            rep.fail("delivery.routing", CONFIG, "the retained answer still has tenant routing",
+                     f"group {gid} is not in the current registry; restore its tenant entry")
+            return rep.emit(args.json, "ironworks bridge redeliver")
+        bridge = tb.TelegramBridge(
+            groups=groups, threads={}, telegram=tb._Telegram(), turns=tb._Turns(), state=st,
+            clock=tb._Clock(), log=lambda line: print(line, file=sys.stderr),
+            budget_seconds=ing.TURN_BUDGET_SECONDS)
+        outcome = bridge.redeliver_reconciled(args.update_id)
+        rep.data["delivery"] = {"update_id": args.update_id, "gid": gid,
+                                "response_id": row["response_id"], "outcome": outcome}
+        if outcome == bridge_core.OUT_REDELIVERED:
+            rep.ok("delivery.redelivered", LIVE,
+                   "the original stored model result was redelivered; no model turn ran")
+        else:
+            rep.fail("delivery.redelivered", LIVE,
+                     "the original stored model result was redelivered",
+                     "send failed; DELIVERY_RECONCILE and the response id were retained")
+    finally:
+        st.close()
+    return rep.emit(args.json, "ironworks bridge redeliver")
+
+
+def cmd_egress_status(args):
+    """The boundary's state, with the reasons, and the one command that would change it."""
+    rep = Report("egress status")
+    check_egress_containment(rep, live=not args.offline)
+    st = rep.data.get("egress", {})
+    if not args.json:
+        print("== ironworks egress status ==")
+        for k in ("container", "state", "gateway", "gateway_running", "networks",
+                  "routed_networks", "overlay_configured", "verified_at"):
+            print(f"  {k:<20} {st.get(k)}")
+        print()
+        print("  RUNNING     internal-only networks + a live gateway, but unproved")
+        print("  VERIFIED    RUNNING *and* probe-egress.sh passed against this image")
+        print("  FAILED      reachable but NOT contained — an active tenant is unprotected")
+        print("  BLOCKED     could not be evaluated; never a pass")
+        print()
+        if st.get("state") in ("RUNNING", "FAILED"):
+            print("  next:  ./deploy/egress/probe-egress.sh " + str(st.get("container")))
+            print("         (and read SECURITY.md and deploy/README.md before applying the overlay)")
+        print()
+    return rep.emit(args.json, "checks")
+
+
+def cmd_service_validate(args):
+    rep = Report("service validate")
+    check_services(rep)
+    if not args.json and rep.data.get("services"):
+        print("== ironworks service validate ==")
+        for name, d in sorted(rep.data["services"].items()):
+            caps = ", ".join(f"{k}={v}" for k, v in sorted(d["capabilities"].items()))
+            print(f"  {name}@{d['version']:<3} {d['audience']:<9} model={d['model_policy']:<5} {caps}")
+        print()
+    return rep.emit(args.json, "checks")
+
+
+def cmd_account_db_migration_status(args):
+    rep = Report("account-db migration-status")
+    if args.offline:
+        rep.skipped("account.ready", LIVE, "Account Store migration status", "--offline requested")
+        return rep.emit(args.json, "ironworks account-db migration-status")
+    base = account_base()
+    code, body = http(base + "/ready")
+    try:
+        doc = json.loads(body) if body else {}
+    except ValueError:
+        doc = {}
+    rep.data["account_db"] = doc
+    if code == 0:
+        rep.blocked("account.ready", LIVE, "Account Store migration status",
+                    f"no response from {base}/ready")
+    else:
+        rep.verdict(code == 200 and doc.get("schema_ready") is True,
+                    "account.ready", LIVE, "Account Store schema is current",
+                    "; ".join(doc.get("problems") or [f"HTTP {code}"]))
+    return rep.emit(args.json, "ironworks account-db migration-status")
+
+
+def cmd_test(args):
+    """Delegate to the quality gate. Under `--json`, report its VERDICT as an artifact.
+
+    `--json`'s contract is that stdout carries JSON and nothing else, and this printed
+    run-quality's human output straight through it — so `ironworks --json test | jq` was a
+    parse error. The gate's own text is the useful thing when a human runs it, so it keeps
+    going to stderr in that mode rather than being discarded."""
+    r = subprocess.run([sys.executable, str(ROOT / "deploy" / "run-quality.py")], cwd=ROOT,
+                       capture_output=args.json, text=True)
+    if not args.json:
+        return r.returncode
+    print(r.stdout or "", file=sys.stderr, end="")
+    print(r.stderr or "", file=sys.stderr, end="")
+    rep = Report("test")
+    tail = [ln for ln in (r.stdout or "").strip().splitlines() if ln.strip()][-1:] or [""]
+    rep.data["quality_gate"] = {"exit_code": r.returncode, "summary": tail[0][:200]}
+    if r.returncode == EXIT_BLOCKED:
+        rep.blocked("gate.quality", CONFIG, "the repository quality gate passes", tail[0][:200])
+    else:
+        rep.verdict(r.returncode == 0, "gate.quality", CONFIG,
+                    "the repository quality gate passes", tail[0][:200])
+    return rep.emit(True, "ironworks test")
+
+
+def bind_known_secrets(rep):
+    """Best-effort credential set for a report built OUTSIDE a command's own flow.
+
+    `Report`'s whole design is that redaction happens on one print path, which only works if the
+    secrets are BOUND: `scrub()` still applies the shape rules (header lines, query parameters,
+    bot-token URLs) with an empty set, but a bare opaque token — a tenant's IRONCLAW_TOKEN in a
+    registry error, the operator token in a probe's exception text — is masked only because
+    `load_registry` bound it. The top-level handler below constructs its own Report and so binds
+    nothing, which would print exactly what this console exists not to print.
+
+    Every step is independently guarded: this runs because something already failed, and the
+    registry may be the thing that failed. A partial secret set is worth more than none."""
+    tokens = [os.environ.get("TELEGRAM_BOT_TOKEN")]
+    clients = None
+    try:
+        import registry
+        tokens += [os.environ.get(k) for k in registry.OPERATOR_TOKEN_VARS]
+    except Exception:
+        pass
+    try:
+        import context_ingress as ing
+        clients = ing.load_clients()
+    except Exception:
+        clients = None
+    try:
+        import redact
+        rep.bind_secrets(redact.secrets_of(clients, *tokens))
+    except Exception:
+        pass
+
+
+def promotion_gate(checks, egress_state):
+    """(promotable, why_not) — the promotion decision, as a function of the rows and the boundary.
+
+    A SKIPPED gate disqualifies exactly as a FAIL does. `--offline-only` marks EVERY gate SKIPPED,
+    and the rule here was once "no FAIL rows", so the artifact certified promotion to an external
+    tenant having run not one test. That was worst precisely where it mattered: the serve host is
+    the only host where egress is VERIFIED, hence the only host where this verdict can come out
+    true at all, and hence the only host where the bug was reachable.
+
+    Extracted from `cmd_release_verify` so it can be driven directly. The test that covered this
+    invoked the CLI and asserted FAIL, which it got — from the egress clause, on a laptop where
+    egress is never VERIFIED. It was vacuous in exactly the state the defect lived in."""
+    rows = [c for c in checks if c["id"] != "release.promotable"]
+    if egress_state != "VERIFIED":
+        return False, (f"egress containment is {egress_state}, not VERIFIED — promotion to any "
+                       "external tenant is refused until the boundary is proved on the target "
+                       "host (SECURITY.md)")
+    # PARTITIONED BY KIND, NOT BY VERDICT. A CONFIG row is something this host CAN evaluate, so
+    # anything other than PASS — FAIL, SKIPPED (--offline-only), or BLOCKED (a gate whose
+    # interpreter or directory was missing, `cannot run: ...`) — means a guarantee this artifact
+    # claims was not obtained. A LIVE row is something this host CANNOT evaluate by
+    # construction; those are named rather than required, which is the whole design of the
+    # artifact. Keying on the verdict alone let a BLOCKED gate through, which is the same defect
+    # as the SKIPPED one in a different spelling.
+    unmet = [c for c in rows if c["kind"] == CONFIG and c["verdict"] != PASS]
+    gates_run = [c for c in rows if c["id"].startswith("gate.") and c["verdict"] == PASS]
+    if unmet:
+        named = sorted(c["id"] for c in unmet)
+        # Name the reason the reader is actually looking at. "Nothing ran" and "something broke"
+        # are different facts and were being reported with one sentence.
+        why = ("no gate was run (--offline-only marks them SKIPPED), and an unrun gate is not a "
+               "passing one" if all(c["verdict"] == SKIPPED for c in unmet)
+               else "an unrun or unevaluated check is not a passing one")
+        return False, (f"{len(named)} configuration check(s) did not pass "
+                       f"({', '.join(named[:4])}{', …' if len(named) > 4 else ''}) — {why}")
+    if not gates_run:
+        # A discovered gate list that found nothing must not read as "everything passed".
+        return False, ("no gate suite ran at all — the discovery globs matched nothing, so this "
+                       "artifact attests to no executed test")
+    return True, ""
+
+
+def cmd_release_verify(args):
+    """The readiness artifact: what ran, what failed, what was blocked, what was NOT attempted.
+
+    Deliberately does NOT run the live proof suite. Those need a provisioned instance and cost
+    model calls; conflating "I ran the offline gates" with "the release is proven" is exactly
+    the confusion the artifact exists to prevent. What this does is run every gate that can run
+    here, and NAME the ones that cannot, so a reader can tell the difference."""
+    rep = Report("release verify")
+    check_pins(rep)
+    check_services(rep)
+    clients = load_registry(rep)
+    check_model_agreement(rep, clients)
+    check_residual_authority(rep)
+    check_identity_duplicates(rep)
+    check_egress_containment(rep, live=not args.offline)
+
+    # Every suite is invoked as a plain script, never through pytest: the repo's tests are
+    # stdlib-only with self-discovering `__main__` runners (CONTRIBUTING § "Tests need no venv
+    # and no pytest"), and a readiness artifact that reports FAIL because the operator's
+    # interpreter has no pytest is reporting on the wrong thing. The seam suites import
+    # siblings by bare name, so they run from inside their own directory.
+    #
+    # THAT PREMISE IS LOAD-BEARING AND IS NOW ENFORCED, because it was silently false. A suite
+    # with no `__main__` block exits 0 having run nothing, and this artifact scores exit 0 as a
+    # pass — so on 2026-08-26 four gates here read `[x]` over 45 unexecuted crash-boundary tests
+    # (test_bridge_concurrency / _delivery / _operations / _recovery, split out of the delivery
+    # monolith without runners). An artifact whose whole purpose is letting a reader tell what
+    # RAN from what did not could not tell, about the highest-consequence block in the tree.
+    # `multi/seam/test_suite_contract.py` now asserts that every suite has a runner and that it
+    # DISCOVERS via globals() rather than a hand-maintained list. It is itself one of the gates
+    # discovered below, so this comment's assumption and its guard fail together or not at all.
+    # (`ironworks test` -> run-quality.py was never affected: it runs pytest, which collects by
+    # name and ran all 187 regardless. The script-invocation paths were the blind ones.)
+    # The suites in these directories are DISCOVERED, not enumerated. A readiness artifact
+    # whose gate list is hand-maintained computes `release.promotable` from whatever subset
+    # someone remembered to add, and the omission is invisible in the artifact — it reads as a
+    # clean run. Every directory named here is offline in its entirety, so "all of it" is a
+    # rule a new file cannot fall outside of. multi/verify is NOT one of them: it mixes offline
+    # suites with ones that need a provisioned instance, so its offline members are named
+    # individually below and the rest are declared unrun under `live.*`.
+    seam = ROOT / "multi" / "seam"
+    offline_dirs = ((seam, "seam", "seam suite"),
+                    (ROOT / "deploy" / "lib", "lib", "operator library"),
+                    (ROOT / "deploy" / "account-intel" / "data", "accountdb", "Account Store"))
+    gates = [
+        (f"gate.{tag}.{p.stem[5:]}", ["python3", p.name], f"{label}: {p.stem}", d)
+        for d, tag, label in offline_dirs for p in sorted(d.glob("test_*.py"))
+    ] + [
+        ("gate.routing", ["python3", "multi/verify/test_adversarial_routing.py"],
+         "bridge routing (offline)", ROOT),
+        ("gate.fixtures", ["python3", "multi/verify/test_fixtures_offline.py"],
+         "committed-fixture contract (offline)", ROOT),
+        ("gate.freshness", ["python3", "multi/verify/test_freshness_lifecycle.py", "--offline"],
+         "identity-bound freshness lifecycle (offline)", ROOT),
+        ("gate.graders", ["python3", "multi/eval/test_graders.py"], "eval graders self-test", ROOT),
+    ]
+    if args.offline_only:
+        for cid, _, title, _cwd in gates:
+            rep.skipped(cid, CONFIG, title, "--offline-only: gates not run")
+    else:
+        for cid, cmd, title, cwd in gates:
+            try:
+                r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=600)
+            except FileNotFoundError as e:
+                rep.blocked(cid, CONFIG, title, f"cannot run: {e}")
+                continue
+            except subprocess.TimeoutExpired:
+                rep.fail(cid, CONFIG, title, "timed out after 600s")
+                continue
+            tail = (r.stdout or r.stderr or "").strip().splitlines()[-1:] or [""]
+            rep.verdict(r.returncode == 0, cid, CONFIG, title,
+                        f"exit {r.returncode}: {tail[0][:200]}")
+
+    # The gates that CANNOT run from here, named rather than silently absent.
+    for cid, title, why in [
+        ("live.isolation", "two-client isolation + hostile cross-org (multi/verify)",
+         "needs a provisioned instance with proof clients and a model gateway key"),
+        ("live.egress", "egress-closed outcome probe (multi/verify/test_egress_closed.py)",
+         "needs a live confined member; run it after every pin bump per deploy/README.md"),
+        ("live.revocation", "session-revocation truth (multi/verify/test_session_revocation.py)",
+         "needs WEBUI_TOKEN and the instance; mints and deletes a throwaway member"),
+        ("live.freshness", "target-host freshness lifecycle",
+         "offline identity-bound lifecycle passed separately; live continuation needs a "
+         "provisioned tenant, model runtime, Account Service and Account database"),
+        ("live.eval", "answer quality (multi/eval/run_eval.py --runs 2)",
+         "needs the eval org provisioned and seeded; costs model calls"),
+        ("live.pin", "image provenance (deploy/verify-pin.sh <container>)",
+         "needs docker on the box that runs the container"),
+    ]:
+        rep.blocked(cid, LIVE, title, why)
+
+    # PROMOTION GATE. A release artifact that reports a passing test suite beside an
+    # unproved network boundary invites exactly the wrong reading. State it as a decision,
+    # not as one row among twenty.
+    eg = (rep.data.get("egress") or {}).get("state", "BLOCKED")
+    promotable, why_not = promotion_gate(rep.checks, eg)
+    # A waived TEST_RESIDUAL does not block — but it is named in the artifact either way, so a
+    # reader can see exactly what was waived and why rather than inferring it from a green row.
+    rep.data["waived_residual"] = sorted((rep.data.get("residual_authority") or {})
+                                         .get("waived", {}))
+    rep.verdict(promotable, "release.promotable", CONFIG,
+                "this release may be promoted to an external tenant", why_not)
+    rep.data["artifact_version"] = 2
+    rep.data["promotable"] = promotable
+    return rep.emit(args.json, "ironworks release verify")
+
+
+# ── entry ─────────────────────────────────────────────────────────────────────────────
+
+def main(argv):
+    ap = argparse.ArgumentParser(prog="ironworks", description=__doc__.split("\n")[0],
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--json", action="store_true", help="machine-readable report on stdout")
+    ap.add_argument("--offline", action="store_true",
+                    help="skip every LIVE check (they report SKIPPED, not PASS)")
+
+    # THE SAME TWO FLAGS, ACCEPTED AFTER THE SUBCOMMAND TOO. They were defined on the parent
+    # parser alone, so every form the documentation uses — `tenants status --json`
+    # (docs/INCIDENT_RESPONSE.md:109), `release verify --json` (deploy/UPGRADE.md:340),
+    # README.md:81, deploy/README.md:9, and `egress-control.sh`'s `exec … egress status "$@"` —
+    # was an argparse usage error printing nothing on stdout and exiting 2. That is the same
+    # code this console uses for EXIT_FAILED ("a guarantee is broken or a tenant is degraded"),
+    # so a script wrapping it read a PARSE ERROR as a degraded tenant, and an incident responder
+    # following the runbook got no output at all.
+    #
+    # `default=argparse.SUPPRESS` is load-bearing: without it a subparser writes its own False
+    # over a `--json` given BEFORE the subcommand, breaking the form that used to work.
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", default=argparse.SUPPRESS,
+                        help="machine-readable report on stdout")
+    common.add_argument("--offline", action="store_true", default=argparse.SUPPRESS,
+                        help="skip every LIVE check (they report SKIPPED, not PASS)")
+    sub = ap.add_subparsers(dest="cmd")
+
+    sub.add_parser("doctor", help="every check, in one screen", parents=[common])
+    sub.add_parser("test", help="run the same complete quality gate used by CI", parents=[common])
+
+    t = sub.add_parser("tenants", help="tenant-wide views")
+    tsub = t.add_subparsers(dest="sub")
+    tsub.add_parser("status", help="one line per tenant", parents=[common])
+
+    ti = sub.add_parser("tenant", help="one tenant")
+    tisub = ti.add_subparsers(dest="sub")
+    insp = tisub.add_parser("inspect", help="one tenant, in depth", parents=[common])
+    insp.add_argument("slug")
+    reset = tisub.add_parser("reset-thread", parents=[common],
+                             help="reset one conversation/context row; preserve delivery state")
+    reset.add_argument("slug")
+    reset.add_argument("--confirm", metavar="SLUG",
+                       help="repeat the tenant slug exactly; no interactive prompt")
+
+    br = sub.add_parser("bridge", help="the delivery bridge")
+    brsub = br.add_subparsers(dest="sub")
+    brsub.add_parser("status", parents=[common],
+                     help="forward-progress health (what the watchdog reads)")
+    redeliver = brsub.add_parser(
+        "redeliver", parents=[common],
+        help="explicitly resend one retained DELIVERY_RECONCILE answer")
+    redeliver.add_argument("update_id", type=int)
+    redeliver.add_argument("--confirm", metavar="UPDATE_ID")
+
+    eg = sub.add_parser("egress", help="the network egress boundary")
+    egsub = eg.add_subparsers(dest="sub")
+    egsub.add_parser("status", parents=[common],
+                     help="is the boundary configured, running, verified, or failing?")
+
+    adb = sub.add_parser("account-db", help="the organization-scoped Account Store")
+    adbsub = adb.add_subparsers(dest="sub")
+    adbsub.add_parser("migration-status", parents=[common],
+                      help="is the live schema at the committed version?")
+
+    sv = sub.add_parser("service", help="service definitions")
+    svsub = sv.add_subparsers(dest="sub")
+    svsub.add_parser("validate", parents=[common],
+                     help="validate the committed service definitions")
+
+    rl = sub.add_parser("release", help="release readiness")
+    rlsub = rl.add_subparsers(dest="sub")
+    rv = rlsub.add_parser("verify", parents=[common],
+                          help="run the gates that can run here; name the ones that cannot")
+    rv.add_argument("--offline-only", action="store_true",
+                    help="do not run the gate subprocesses; list them as SKIPPED")
+
+    args = ap.parse_args(argv)
+    if not getattr(args, "offline_only", None):
+        args.offline_only = False
+
+    route = {
+        ("doctor", None): cmd_doctor,
+        ("test", None): cmd_test,
+        ("tenants", "status"): cmd_tenants_status,
+        ("tenant", "inspect"): cmd_tenant_inspect,
+        ("tenant", "reset-thread"): cmd_tenant_reset_thread,
+        ("bridge", "status"): cmd_bridge_status,
+        ("bridge", "redeliver"): cmd_bridge_redeliver,
+        ("egress", "status"): cmd_egress_status,
+        ("account-db", "migration-status"): cmd_account_db_migration_status,
+        ("service", "validate"): cmd_service_validate,
+        ("release", "verify"): cmd_release_verify,
+    }
+    fn = route.get((args.cmd, getattr(args, "sub", None)))
+    if fn is None:
+        ap.print_help()
+        return EXIT_USAGE
+    try:
+        return fn(args)
+    except Exception as e:
+        # THE EXIT CODE IS PART OF THE OUTPUT CONTRACT: 0/2/3/64 and nothing else. An escaping
+        # exception exits 1 with a traceback on stderr and, under `--json`, an EMPTY stdout —
+        # so a wrapper's `json.loads` fails instead of reading a FAIL row. The reachable case is
+        # ordinary: `bridge redeliver` and `tenant reset-thread` open the delivery store in a
+        # `try/finally` that closes the handle and re-raises, and `sqlite3.OperationalError:
+        # database is locked` is exactly the state (a SIGKILLed bridge holding a stale lock) in
+        # which an operator reaches for those two commands.
+        rep = Report(f"{args.cmd} {getattr(args, 'sub', '') or ''}".strip())
+        bind_known_secrets(rep)
+        rep.fail("console.completed", CONFIG, "the command ran to completion",
+                 f"{type(e).__name__}: {e}")
+        return rep.emit(getattr(args, "json", False), "ironworks")
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

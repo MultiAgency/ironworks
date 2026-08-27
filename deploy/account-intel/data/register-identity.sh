@@ -14,30 +14,14 @@ set -euo pipefail
 ORG="${1:?usage: ORG_TOKEN=<token> register-identity.sh <org_id>}"
 TOKEN="${ORG_TOKEN:?set ORG_TOKEN=<token> in the environment (not on argv — it is a secret)}"
 ACCOUNT_BASE="${ACCOUNT_BASE:-http://127.0.0.1:8443}"
-IDENT_DIR="$HOME/.agency/account-identities"
+IDENT_DIR="${AGENCY_DIR:-$HOME/.agency}/account-identities"
 
 umask 077
-mkdir -p "$IDENT_DIR"
-FILE="$IDENT_DIR/identities.json" RT="$TOKEN" RO="$ORG" python3 - <<'PY'
-import json, os, sys, tempfile
-path = os.environ["FILE"]
-try:
-    d = json.load(open(path))
-except FileNotFoundError:
-    d = {}                       # first registration — a genuinely absent file starts empty
-except ValueError as e:
-    # A CORRUPT existing file is NOT an empty one: defaulting to {} here would rewrite the file
-    # with only the new token, silently REVOKING every other client's org token (hot-reloaded ->
-    # immediate 401 for all of them). Abort loudly and leave the file untouched.
-    sys.exit(f"!! identities file is corrupt ({path}): {e}. Refusing to rewrite — this would wipe "
-             "every other client's token. Fix the file by hand, then re-run.")
-d[os.environ["RT"]] = os.environ["RO"]
-fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path))
-os.fchmod(fd, 0o600)
-with os.fdopen(fd, "w") as f:
-    json.dump(d, f, indent=1)
-os.replace(tmp, path)
-PY
+# deploy/lib/identities.py is the one reader AND writer of this map. The corrupt-file refusal
+# that used to live here in a heredoc lives there now, where the two REMOVAL paths get it too —
+# they were the copies that did not have it. ORG_TOKEN stays in the environment, never argv.
+ORG_TOKEN="$TOKEN" ACCOUNT_IDENTITIES_FILE="$IDENT_DIR/identities.json" \
+  python3 "$(dirname "$0")/../../lib/identities.py" add "$ORG"
 
 for _ in $(seq 1 10); do
   # `|| echo 000`: a connection refusal (service down) makes curl exit non-zero, which under

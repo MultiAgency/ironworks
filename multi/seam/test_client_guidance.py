@@ -7,21 +7,37 @@ THAT client's own validated guidance — never MultiAgency's internal company kn
 never another client's guidance, and never silently absent.
 """
 import json, os, pathlib, tempfile, urllib.request
-
-os.environ.setdefault("IRONCLAW_API", "http://test.invalid")
-os.environ.setdefault("CATALOG_TTL_SECONDS", "0")
-import context_ingress as ing
-import persona as per
+# This suite drives the seam against a FAKE instance, so it configures one outright.
+# Not an import prop: `context_ingress` resolves IRONCLAW_API on use, so this is the
+# value under test. Assigned, not `setdefault`, so a configured box cannot leak a real
+# instance into a hermetic unit suite.
+os.environ["IRONCLAW_API"] = "http://test.invalid"
+try:
+    from . import account_service as asvc
+    from . import context_ingress as ing
+    from . import persona as per
+    from . import services as svc
+except ImportError:
+    import account_service as asvc
+    import context_ingress as ing
+    import persona as per
+    import services as svc
 
 # Markers of MultiAgency's INTERNAL composition that must never reach an external client.
-# Retired names (MultiAgencyHQ, Multiplex, "service catalog", "video kit") are kept
-# deliberately: they must still never surface, and an old copy in circulation would carry them.
-# The live ones below are what keep the control assertion honest — refresh those if the
-# internal copy changes again.
+# Retired names are kept deliberately — they must still never surface, and an old copy in
+# circulation would carry them. Two groups have now retired: the product names
+# (MultiAgencyHQ, Multiplex, "service catalog", "video kit", "What we provide") and the
+# sales-qualification copy that left with `account-intelligence@1` ("POTENTIAL MULTIAGENCY
+# FIT", "governing question" — the prospect-suitability question in the retired
+# company-knowledge skill). The live ones are what keep the control assertion honest;
+# refresh those from the current internal composition when it changes again — today
+# `agent/identity/RELATIONSHIP_INTELLIGENCE.md`, which carries the commercial-claims
+# guardrail the retired skill used to hold.
 INTERNAL_MARKERS = (
     "MultiAgencyHQ", "MultiAgency", "Multiplex", "service catalog",
     "What we provide", "ironclaw harness", "video kit",
     "What we sell today", "POTENTIAL MULTIAGENCY FIT", "governing question",
+    "What MultiAgency is", "stock ironclaw", "A human will give you a straight answer",
 )
 
 GUIDE_A = """<!-- client-guidance v1 slug: alpha -->
@@ -101,16 +117,19 @@ def test_no_internal_multiagency_guidance_for_external_clients():
         # Control: the internal composition must really carry internal markers, or the
         # leak check above is vacuous. Assert on the SET, not on two hardcoded phrases —
         # copy edits legitimately retire individual markers (a truth pass
-        # narrowed company-knowledge to one engagement, removing "service catalog",
-        # "What we provide", "video kit", "Multiplex"), and a stale literal here reds the
-        # build for a docs change while a silently-emptied composition would still pass.
+        # narrowed the internal copy to one engagement, removing "service catalog",
+        # "What we provide", "video kit", "Multiplex"; the account-intelligence -> relationship-
+        # intelligence replacement then retired the qualification copy), and a stale literal
+        # here reds the build for a docs change while a silently-emptied composition would
+        # still pass.
         internal = per.compose_persona()
         present = [m for m in INTERNAL_MARKERS if m in internal]
         assert len(present) >= 3, (
             "internal composition no longer carries enough internal markers — the leak "
             f"check above is near-vacuous. Present: {present}. "
             f"Absent: {[m for m in INTERNAL_MARKERS if m not in internal]}. "
-            "Refresh INTERNAL_MARKERS from the current company-knowledge copy.")
+            "Refresh INTERNAL_MARKERS from the current internal composition "
+            "(agent/identity/RELATIONSHIP_INTELLIGENCE.md).")
     print("  PASS MultiAgency's internal selling guidance cannot appear for an external client")
 
 
@@ -125,16 +144,42 @@ def test_missing_guidance_fails_closed():
     print("  PASS missing guidance fails closed (registry refuses to load)")
 
 
+def test_two_clients_cannot_share_one_account_token():
+    """A shared account credential is a shared DATA SCOPE, and the audience rule (D-091) rests on
+    org <-> audience being one-to-one.
+
+    The account token resolves to exactly one org server-side, so two registry entries carrying
+    the same one are served the SAME records — and a registry entry is a room, so that is two
+    rooms reading one dataset. Nothing else catches it: the Account Service's duplicate-org
+    warning fires on two DIFFERENT tokens mapping to one org and is blind to one token reused,
+    and the sibling guards here cover identity (IRONCLAW_TOKEN) and routing (TELEGRAM_GROUP_ID),
+    not scope. Before this guard the invariant held only because nobody had made the mistake."""
+    with tempfile.TemporaryDirectory() as tmp:
+        d = _mk_registry(tmp)
+        b = pathlib.Path(d) / "bravo.env"
+        b.write_text(b.read_text().replace("ACCOUNT_TOKEN=tok-bravo-acct",
+                                           "ACCOUNT_TOKEN=tok-alpha-acct"))
+        try:
+            ing.load_clients(d)
+        except ValueError as e:
+            assert "ACCOUNT_TOKEN" in str(e) and "alpha" in str(e), \
+                f"the refusal must name the credential and the client already holding it: {e}"
+            print("  PASS two clients cannot share one account token (one data scope, one room)")
+            return
+    raise AssertionError("two clients shared an ACCOUNT_TOKEN — two rooms would read one dataset")
+
+
 def test_cross_client_guidance_selection_rejected():
     with tempfile.TemporaryDirectory() as tmp:
-        # bravo's env explicitly points at ALPHA's guidance file -> slug-marker binding refuses
+        # Canonical tenants have one lifecycle-owned location. An override is refused before
+        # its target is read, so it cannot cross-wire another tenant's guidance.
         d = _mk_registry(tmp, b_guidance_override=str(pathlib.Path(tmp) / "alpha.guidance.md"))
         try:
             ing.load_clients(d)
             raise AssertionError("cross-wired guidance was accepted — must be rejected")
-        except per.GuidanceError as e:
-            assert "alpha" in str(e) and "bravo" in str(e)
-    print("  PASS a client cannot activate another client's guidance (slug binding)")
+        except ValueError as e:
+            assert "GUIDANCE_FILE" in str(e) and "bravo.guidance.md" in str(e), e
+    print("  PASS a canonical tenant cannot override its lifecycle-owned guidance path")
 
 
 def test_short_or_markerless_guidance_fails_closed():
@@ -161,7 +206,7 @@ def test_guidance_rides_in_instructions_only_and_no_secrets_in_body():
         clients = ing.load_clients(_mk_registry(tmp))
         cl = clients["alpha"]
         bodies = []
-        orig_svc, orig_open = ing._svc, urllib.request.urlopen
+        orig_svc, orig_open = asvc._svc, urllib.request.urlopen
 
         def fake_svc(path, client=None):
             return {"org": "alpha-org", "accounts": []}
@@ -177,15 +222,16 @@ def test_guidance_rides_in_instructions_only_and_no_secrets_in_body():
             return _Resp({"id": "r1", "status": "completed",
                           "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]})
 
-        ing._svc, urllib.request.urlopen = fake_svc, fake_open
+        asvc._svc, urllib.request.urlopen = fake_svc, fake_open
         try:
             t = ing.Thread(cl)
             ing.turn(t, "which sites should we survey next?", speaker="Sam")
         finally:
-            ing._svc, urllib.request.urlopen = orig_svc, orig_open
+            asvc._svc, urllib.request.urlopen = orig_svc, orig_open
         assert len(bodies) == 1
         b = bodies[0]
         assert set(b) <= {"model", "instructions", "input", "previous_response_id"}, sorted(b)
+        assert b["model"] == ing.MODEL, "a normal registry turn did not use MODEL_PIN"
         assert b["instructions"] == cl.persona and "Alpha Robotics" in b["instructions"]
         blob = json.dumps(b)
         for secret in ("tok-alpha-ic", "tok-alpha-acct", "tok-bravo-ic", "tok-bravo-acct"):
@@ -214,6 +260,65 @@ def test_client_persona_carries_the_safety_tail():
     print("  PASS client persona carries the Safety tail (and not the tool-dependent sections)")
 
 
+def test_composition_order_is_declared_parts_then_guidance_then_safety_last():
+    """CLAUDE.md requires composition ordering be preserved. NOTHING asserted it.
+
+    Everything below a part's frontmatter is supplied to the model verbatim as `instructions`,
+    so the ORDER is behaviour, not layout: moving the safety tail off the end puts the tenant's
+    own guidance after the rules that bound it, and putting a skill before the persona it
+    belongs to changes what the model reads as its role versus its method. Both edits leave
+    every other test in this file green — the two tail tests above check that "## Safety"
+    appears SOMEWHERE, and `test_our_contributions_use_neutral_vocabulary` splits on the same
+    separator but only categorises the segments it finds, never their positions.
+
+    Asserted over BOTH real service definitions, by position, against what each definition
+    declares — so a definition that legitimately reorders its own parts is followed, and only a
+    composer that disagrees with its definition fails."""
+    for name in ("account-analysis", "relationship-intelligence"):
+        defn = svc.load_service(name)
+        parts, tail = defn["persona_parts"], defn["safety_tail"]
+        # Each part as the COMPOSER reads it — `_read_part`, not a second reader here, or this
+        # test would pin its own idea of a part rather than what composition actually places.
+        body = {rel: per._read_part(per._ROOT, rel) for rel in list(parts) + [tail]}
+        # Precondition, or the split below would mis-segment and every assertion after it would
+        # be measuring the wrong thing while still passing.
+        for rel, text in body.items():
+            assert "\n\n---\n\n" not in text, f"{rel} contains the part separator itself"
+
+        with tempfile.TemporaryDirectory() as d:
+            g = pathlib.Path(d) / "alpha.guidance.md"
+            g.write_text(GUIDE_A.replace(
+                "<!-- client-guidance v1 slug: alpha -->",
+                f"<!-- client-guidance v1 slug: alpha service: {name} -->"))
+            composed = per.compose_service_persona(name, str(g), "alpha")
+
+        segments = composed.split("\n\n---\n\n")
+        assert len(segments) == len(parts) + 2, \
+            (f"{name}: {len(segments)} segments for {len(parts)} declared part(s) + guidance "
+             f"+ safety tail — a part was dropped, duplicated, or merged")
+
+        # 1. the service definition's parts, IN THE ORDER IT DECLARES THEM.
+        for i, rel in enumerate(parts):
+            assert segments[i] == body[rel], \
+                (f"{name}: segment {i} is not {rel} — persona parts are out of the order the "
+                 f"service definition declares (got {segments[i].splitlines()[0]!r})")
+
+        # 2. then the tenant's guidance, opening with the declared heading. One segment: the
+        #    heading and the guidance it labels must not be separable.
+        guidance = segments[len(parts)]
+        assert guidance.startswith(defn["guidance_heading"] + "\n\n"), \
+            f"{name}: the guidance segment does not open with its declared heading"
+        assert "Alpha Robotics" in guidance, f"{name}: tenant guidance is not in its own segment"
+
+        # 3. and the safety tail LAST, verbatim, with nothing after it.
+        assert segments[-1] == body[tail], \
+            f"{name}: the final segment is not {tail} verbatim — something follows the tail"
+        assert composed.rindex("## Safety") > composed.rindex(defn["guidance_heading"]), \
+            (f"{name}: safety precedes the tenant's guidance — the tail must be the last word, "
+             "so nothing a tenant writes can be read as qualifying it")
+    print("  PASS composition order: declared parts, then guidance, then the safety tail last")
+
+
 def test_internal_persona_carries_the_safety_tail_too():
     """Symmetry guard: the INTERNAL composition appends the same tail on its own line
     in persona.py. Without this, deleting that append would leave every test green — the
@@ -231,8 +336,8 @@ def test_both_compositions_define_the_empty_book_behavior():
     DEFINE them leaves that note pointing at nothing — and the day-1 pilot state is exactly
     the confabulate-or-stall-by-chance the branch exists to prevent.
 
-    This is not theoretical: ACCOUNT_INTELLIGENCE.md carried no such section while
-    test_ingress_fixes.test_empty_book_is_declared_to_the_model stayed green, because that
+    This is not theoretical: a composition once carried no such section while
+    test_turn.test_empty_book_is_declared_to_the_model stayed green, because that
     test proves the note is SENT and never that anything answers it. Both halves of the
     contract need a gate, so this asserts both compositions and the ingress phrase itself
     (read as text — importing context_ingress requires live env)."""
@@ -313,7 +418,7 @@ def test_our_contributions_use_neutral_vocabulary_but_partner_text_is_left_alone
 
 if __name__ == "__main__":
     # Discovered, not listed — a hand-maintained call list drifts (it did in
-    # test_ingress_fixes.py). globals() preserves definition order.
+    # test_turn.py). globals() preserves definition order.
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
             _fn()

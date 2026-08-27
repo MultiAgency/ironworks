@@ -62,7 +62,7 @@ KEEP="${CONFINE_KEEP:-$KEEP_DEFAULT}"
 # RE-RUNNING IS FREE. This used to POST a disable for every denied tool on every run, which cost
 # one request per tool per client even when the surface was already correct, and tripped the
 # API's rate limiter on a back-to-back re-run (observed: HTTP 429). That failed
-# closed and read like a confinement failure when nothing was wrong — and deploy/UPGRADE.md
+# closed and read like a confinement failure when nothing was wrong — and deploy/README.md
 # step 6a makes exactly that re-run MANDATORY after every pin bump, so the documented remedy
 # was to re-run into the same wall. Now only tools not ALREADY disabled are POSTed, so a re-run
 # against an unchanged surface sends zero writes. This is what a CONFINE_VERIFY_ONLY flag was
@@ -73,22 +73,29 @@ KEEP="${CONFINE_KEEP:-$KEEP_DEFAULT}"
 # confines them — a new tool is not already `disabled`, so it lands in `pending`.
 API="$API" TOKEN="$IRONCLAW_MEMBER_TOKEN" KEEP="$KEEP" \
 LIB_DIR="$(cd "$(dirname "$0")/../../deploy/lib" && pwd)" \
+SEAM_DIR="$(cd "$(dirname "$0")/../seam" && pwd)" \
 python3 - <<'PY'
 import json, os, sys, urllib.request, urllib.error
 
 sys.path.insert(0, os.environ["LIB_DIR"])
 from tool_surface import parse_catalog, egress_observed_off   # ONE fail-closed catalog reader
+# ...and the seam's User-Agent, for the same reason: this script talks to the same instance the
+# product does, so it must not be a third spelling of the header. It was one — the full string
+# minus the `AppleWebKit`/`KHTML` tokens — guarded by nothing. `responses` is the zero-import-
+# weight module that exists so the product and the tooling cannot diverge here; importing a
+# product module from operator tooling is the permitted direction (CLAUDE.md).
+sys.path.insert(0, os.environ["SEAM_DIR"])
+from responses import BROWSER_UA
 
 API = os.environ["API"]
 TOKEN = os.environ["TOKEN"]
 KEEP = set(os.environ["KEEP"].split())
-UA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) Chrome/125.0 Safari/537.36"
 
 def _req(method, path, body=None):
     data = json.dumps(body).encode() if body is not None else None
     r = urllib.request.Request(API + path, data=data, method=method,
                                headers={"Authorization": "Bearer " + TOKEN,
-                                        "User-Agent": UA, "content-type": "application/json"})
+                                        "User-Agent": BROWSER_UA, "content-type": "application/json"})
     with urllib.request.urlopen(r, timeout=20) as x:
         raw = x.read()
     return json.loads(raw) if raw else {}

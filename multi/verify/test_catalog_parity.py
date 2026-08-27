@@ -17,12 +17,9 @@
 #
 # Prereqs: MT instance on :3020, two provisioned clients (proof-a / proof-b, or any two). Run:
 #   IRONCLAW_API=http://127.0.0.1:3020 python3 test_catalog_parity.py
-import os, sys, json, pathlib
-
-os.environ.setdefault("IRONCLAW_API", "http://127.0.0.1:3020")
+import sys, json, pathlib
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from common import Checks, get  # noqa: E402
 
 CATALOG_ROUTES = ["/api/webchat/v2/settings/tools", "/api/webchat/v2/skills"]
@@ -66,10 +63,4 @@ else:
         stray = sorted(n for n in names if n in blob)
         check(f"{route}: no client-name marker in shared catalog", not stray, str(stray))
 
-ok = checks.ok if checks.ran else False
-print(f"\nscore: {checks.passed}/{checks.ran} run" + (f", {len(checks.blocked)} BLOCKED" if checks.blocked else "")
-      + (" — shared catalog is uniform and client-agnostic" if ok and checks.ran else ""))
-if checks.blocked and not checks.results:
-    print("ALL LEGS BLOCKED — no assertions ran; not a pass. Operator: run on the VM.")
-    sys.exit(2)
-sys.exit(0 if ok else 1)
+checks.finish("shared catalog is uniform and client-agnostic")

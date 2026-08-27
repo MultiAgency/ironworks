@@ -1,163 +1,228 @@
 #!/usr/bin/env python3
-# FRESHNESS LIFECYCLE — the full life of one account's `updated_at` through the REAL bridge.
-#
-# What this pins, end to end, on the production path:
-#
-#   pre-versioning state  -> the loader REFUSES it (never coerces silently)
-#   documented migration  -> {record_id: None}, ever_supplied preserved
-#   first turn after it   -> HEALS in exactly one fetch, recording the real version
-#   next turn             -> settles, no re-fetch
-#   a genuine edit        -> re-reads, unprompted, and records the new version
-#   next turn             -> settles again
-#
-# WHY THIS EXISTS. `_moved` (context_ingress.turn) once required `sent_v is not None`, so an
-# UNKNOWN supplied-version was read as "never re-fetch" rather than "re-fetch once". None is
-# written two ways, both routine: a turn served before the Account Service emitted `updated_at`,
-# and telegram_bridge's documented list->dict migration, which sets every id to None BY DESIGN.
-# Either one pinned an account to its first copy for the LIFE of the thread — and
-# bridge-threads.json persists, so no restart cleared it. That is the exact failure the
-# `updated_at` design replaced, reintroduced through a null-guard that looks defensive.
-#
-# A unit test covers the logic (test_ingress_fixes.py); it cannot cover the real loader + the real
-# migration + a real store. This does. Verified to FAIL against the pre-fix `_moved`
-# (turns 1 and 3 both fetch nothing and the version stays None) and pass after it.
-#
-# SAFETY. BRIDGE_STATE is redirected to a temp file and the redirect is ASSERTED before anything
-# runs — the operator's real ~/.agency/bridge-threads.json is never opened. Leg E writes to the
-# store (bumping `updated_at` only, content untouched) and restores the original value in a
-# finally: block; it is SKIPPED, not failed, when the DB is not reachable.
-#
-# NOTE the catalog is cached (CATALOG_TTL_SECONDS, default 60s), so this sets it to 0. In
-# production the re-read lands on the first turn AFTER the cache expires — up to 60s later, which
-# is a delay, not a miss.
-#
-# Prereqs: MT instance on :3020, the Account Service, and a registry client with a book
-# (default `eval` — never point this at a real client; leg E writes to its store). Run:
-#   IRONCLAW_API=http://127.0.0.1:3020 python3 test_freshness_lifecycle.py
-import os, sys, json, pathlib, tempfile, subprocess
+"""Freshness lifecycle on a current, authenticated, compatibility-bound bridge thread.
 
-os.environ.setdefault("IRONCLAW_API", "http://127.0.0.1:3020")
-os.environ.setdefault("TELEGRAM_BOT_TOKEN", "unused-by-this-probe")   # bridge reads it at import
-os.environ["CATALOG_TTL_SECONDS"] = "0"                               # must precede the import
+Legacy migration safety belongs to multi/seam/test_thread_compatibility.py. This proof starts
+after that boundary: production scope resolution establishes the organization, production
+thread persistence writes the complete compatibility identity, and `_load_threads` verifies it.
+
+Run offline (CI/release):
+  python3 multi/verify/test_freshness_lifecycle.py --offline
+
+Run the additional target-host legs:
+  IRONCLAW_API=http://127.0.0.1:3020 python3 multi/verify/test_freshness_lifecycle.py
+"""
+import argparse
+import os
+import pathlib
+import subprocess
+import sys
+import tempfile
+
+os.environ["CATALOG_TTL_SECONDS"] = "0"       # must precede context_ingress import
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-_state_fd, _state_path = tempfile.mkstemp(prefix="bridge-threads-probe-", suffix=".json")
-os.close(_state_fd)
-os.environ["BRIDGE_STATE"] = _state_path
+_tmp = tempfile.TemporaryDirectory(prefix="ironworks-freshness-")
+STATE_JSON = pathlib.Path(_tmp.name) / "bridge-threads.json"
+STATE_DB = STATE_JSON.with_suffix(".db")
+os.environ["BRIDGE_STATE"] = str(STATE_JSON)
+os.environ.pop("BRIDGE_STATE_DB", None)
 
 import context_ingress as ing          # noqa: E402
+import account_service as asvc          # noqa: E402
 import telegram_bridge as tb           # noqa: E402
+from common import Checks              # noqa: E402
 
-STATE = pathlib.Path(_state_path)
-# Fail closed rather than risk the operator's real state file: if BRIDGE_STATE did not take
-# effect (import order changed, env stripped), STOP — do not fall back to the default path.
-if tb.STATE_PATH != STATE:
-    sys.exit(f"refusing to run: STATE_PATH is {tb.STATE_PATH}, not the probe's temp file")
-
-SLUG = os.environ.get("VERIFY_CLIENT", "eval")
-DB_CONTAINER = os.environ.get("ACCOUNT_DB_CONTAINER", "multiagency-data-account-db-1")
-DB_NAME = os.environ.get("ACCOUNT_DB_NAME", "accounts")
-
-from common import Checks   # the tick-list; this file keeps its own verdict line
+parser = argparse.ArgumentParser()
+parser.add_argument("--offline", action="store_true",
+                    help="run deterministic freshness legs; report target-host legs BLOCKED")
+OFFLINE = parser.parse_args().offline
 
 checks = Checks()
-check = checks.check
-skip = checks.skip
+check, block = checks.check, checks.block
+state = None
 
 
-def sql(query):
-    """One-shot psql against the account store. Returns stripped stdout, or None if unreachable."""
-    p = subprocess.run(["docker", "exec", DB_CONTAINER, "psql", "-U", "postgres",
-                        "-d", DB_NAME, "-tAc", query], capture_output=True, text=True)
-    return p.stdout.strip() if p.returncode == 0 else None
+def fixture_client():
+    """Registry-shaped input: explicitly unverified until production scope resolution runs."""
+    return ing.ClientConfig(
+        slug="freshness-fixture", ironclaw_token="fixture-member",
+        account_token="fixture-account", telegram_group_id="-100900099",
+        account_base="http://fixture.invalid", organization_verified=False,
+        service="account-analysis", service_version=1,
+        persona="CURRENT FIXTURE INSTRUCTIONS\n\n## Safety\nRead only.")
+
+
+def block_live(reason):
+    for label in (
+            "live unknown version re-fetches", "live healed version is recorded",
+            "live healing settles", "live moved record re-fetches",
+            "live new version is recorded", "live edit settles"):
+        block(label, reason)
+
+
+def run_offline_freshness(st):
+    gid, aid, name, org = "-100900099", "FX-101", "Fixture Account", "fixture-org"
+    version = {"value": "v1"}
+    fetches, model_calls = [], []
+    saved = asvc._svc, ing._get_context, ing._post_ironclaw
+
+    def service(path, client=None):
+        if path == "/list_accounts":
+            row = {"account_id": aid, "name": name}
+            if version["value"] is not None:
+                row["updated_at"] = version["value"]
+            return {"org": org, "accounts": [row]}
+        raise AssertionError(f"unexpected Account Service path: {path}")
+
+    def context(account_id, client=None):
+        fetches.append(account_id)
+        return {"record_id": account_id,
+                "account": {"name": name, "updated_at": version["value"]},
+                "contacts": [], "activities": [], "missing": []}
+
+    def model(body, client=None, attempts=4):
+        model_calls.append(body)
+        return {"id": f"resp_{len(model_calls)}", "status": "completed", "output": [
+            {"type": "message", "content": [{"type": "output_text", "text": "ok"}]}]}
+
+    try:
+        asvc._svc, ing._get_context, ing._post_ironclaw = service, context, model
+        resolved = ing.resolve_account_scopes({gid: fixture_client()})
+        client = resolved[gid]
+        check("authenticated organization scope is established",
+              client.organization_verified and client.organization_id == org)
+
+        # `_save_threads` is the production identity constructor. No identity column is authored
+        # by this proof, and `_load_threads` remains the production compatibility gate.
+        tb._save_threads({gid: ing.Thread(client)}, state=st)
+        thread = tb._load_threads(resolved, state=st)[gid]
+        check("freshness fixture is compatibility-bound by production persistence",
+              st.stored_identity(st.thread_row(gid)) == client.thread_identity)
+
+        def turn(text):
+            fetches.clear()
+            ing.turn(thread, text)
+            return list(fetches)
+
+        got = turn(f"Tell me about {name}")
+        check("initial context is supplied", got == [aid] and thread.supplied == {aid: "v1"},
+              f"fetched={got} supplied={thread.supplied}")
+
+        got = turn(f"Anything else on {name}?")
+        check("unchanged context is not redundantly supplied", got == [], f"fetched={got}")
+
+        version["value"] = "v2"
+        got = turn(f"Anything else on {name}?")
+        check("changed context is re-fetched and re-supplied",
+              got == [aid] and thread.supplied == {aid: "v2"},
+              f"fetched={got} supplied={thread.supplied}")
+        got = turn(f"And again on {name}?")
+        check("changed context settles after re-supply", got == [], f"fetched={got}")
+
+        # None is a legitimate current freshness value: a store may not have emitted updated_at
+        # on an earlier turn. Persist and reload it through production code, then let v3 appear.
+        thread.supplied = {aid: None}
+        thread.ever_supplied = True
+        tb._save_threads({gid: thread}, state=st)
+        thread = tb._load_threads(resolved, state=st)[gid]
+        check("unknown freshness state survives a compatible restart",
+              thread.supplied == {aid: None} and thread.ever_supplied)
+        version["value"] = "v3"
+        got = turn(f"Anything else on {name}?")
+        check("unknown freshness heals when a newer version appears",
+              got == [aid] and thread.supplied == {aid: "v3"},
+              f"fetched={got} supplied={thread.supplied}")
+        got = turn(f"One more time on {name}?")
+        check("healed freshness does not create a fetch storm", got == [], f"fetched={got}")
+    finally:
+        asvc._svc, ing._get_context, ing._post_ironclaw = saved
+
+
+def run_live_freshness(st):
+    """The target-host continuation: real tenant, model runtime, Account Service and database."""
+    slug = os.environ.get("VERIFY_CLIENT", "eval")
+    try:
+        clients = ing.load_clients()
+        if slug not in clients:
+            raise RuntimeError(f"client {slug!r} is not provisioned")
+        unresolved = clients[slug]
+        gid = str(unresolved.telegram_group_id or "")
+        if not gid:
+            raise RuntimeError(f"client {slug!r} has no Telegram group")
+        resolved = ing.resolve_account_scopes({gid: unresolved})
+        client = resolved[gid]
+        catalog = ing._catalog(client)
+        account = (catalog.get("accounts") or [])[0]
+    except Exception as e:
+        block_live(f"target-host prerequisites unavailable ({type(e).__name__})")
+        return
+
+    aid, name, org = account["account_id"], account["name"], catalog["org"]
+    st.reset_thread(gid)
+    thread = ing.Thread(client)
+    thread.supplied, thread.ever_supplied = {aid: None}, True
+    tb._save_threads({gid: thread}, state=st)
+    thread = tb._load_threads(resolved, state=st)[gid]
+    fetches, saved_get = [], ing._get_context
+    ing._get_context = lambda account_id, c=None: (fetches.append(account_id)
+                                                    or saved_get(account_id, c))
+
+    def turn(text):
+        fetches.clear()
+        ing.turn(thread, text)
+        return list(fetches)
+
+    try:
+        try:
+            got = turn(f"update on {name}")
+            healed = thread.supplied.get(aid)
+            check("live unknown version re-fetches", got == [aid], f"fetched={got}")
+            check("live healed version is recorded", healed is not None, str(thread.supplied))
+            check("live healing settles", turn(f"again on {name}?") == [])
+        except Exception as e:
+            block_live(f"model/Account Service leg unavailable ({type(e).__name__})")
+            return
+
+        container = os.environ.get("ACCOUNT_DB_CONTAINER", "multiagency-data-account-db-1")
+        db_name = os.environ.get("ACCOUNT_DB_NAME", "accounts")
+
+        def sql(query):
+            p = subprocess.run(["docker", "exec", container, "psql", "-U", "postgres",
+                                "-d", db_name, "-tAc", query], capture_output=True, text=True)
+            return p.stdout.strip() if p.returncode == 0 else None
+
+        original = sql(f"SELECT updated_at FROM accounts WHERE org_id='{org}' AND account_id='{aid}';")
+        if original is None:
+            for label in ("live moved record re-fetches", "live new version is recorded",
+                          "live edit settles"):
+                block(label, f"Account database unavailable via {container}")
+            return
+        try:
+            sql(f"UPDATE accounts SET updated_at=now() WHERE org_id='{org}' AND account_id='{aid}';")
+            got = turn(f"anything new on {name}?")
+            check("live moved record re-fetches", got == [aid], f"fetched={got}")
+            check("live new version is recorded", thread.supplied.get(aid) not in (None, healed))
+            check("live edit settles", turn(f"again on {name}?") == [])
+        finally:
+            sql(f"UPDATE accounts SET updated_at='{original}' "
+                f"WHERE org_id='{org}' AND account_id='{aid}';")
+    finally:
+        ing._get_context = saved_get
 
 
 try:
-    clients = ing.load_clients()
-    if SLUG not in clients:
-        sys.exit(f"client {SLUG!r} not in the registry — provision it first (see multi/eval/README.md)")
-    client = clients[SLUG]
-    if not client.telegram_group_id:
-        sys.exit(f"client {SLUG!r} has no TELEGRAM_GROUP_ID — the bridge loader keys on it")
-    gid = str(client.telegram_group_id)
-
-    catalog = ing._catalog(client)
-    book = catalog.get("accounts") or []
-    if not book:
-        sys.exit(f"client {SLUG!r} has an empty book — seed it first (see multi/eval/README.md)")
-    acct, org = book[0], catalog["org"]
-    aid, aname = acct["account_id"], acct["name"]
-    print(f"client={SLUG} org={org} group={gid} account={aid} ({aname})\n")
-
-    groups = {gid: client}
-    fetches = []
-    _real_get = ing._get_context
-    ing._get_context = lambda a, c=None: (fetches.append(a) or _real_get(a, c))
-
-    def turn(msg):
-        fetches.clear()
-        ing.turn(thread, msg)
-        return list(fetches)
-
-    print("A. a pre-versioning state file is REFUSED, not coerced")
-    STATE.write_text(json.dumps({gid: {"prev": None, "supplied": [aid], "ever_supplied": True}}))
-    try:
-        tb._load_threads(groups)
-        check("loader refuses a pre-versioning 'supplied' list", False, "it was accepted")
-    except ValueError as e:
-        check("loader refuses a pre-versioning 'supplied' list", "Migrate once" in str(e),
-              "refusal must tell the operator how to fix it")
-
-    print("\nB. the documented migration (telegram_bridge.py) leaves version-unknown entries")
-    d = json.loads(STATE.read_text())
-    for st in d.values():
-        if isinstance(st.get("supplied"), list):
-            st["ever_supplied"] = st.get("ever_supplied", bool(st["supplied"]))
-            st["supplied"] = {a: None for a in st["supplied"]}
-    STATE.write_text(json.dumps(d))
-    thread = tb._load_threads(groups)[gid]
-    check("migrated state loads", thread.supplied == {aid: None}, str(thread.supplied))
-    check("ever_supplied survives the migration", thread.ever_supplied is True)
-
-    print("\nC. an unknown version re-reads ONCE, then settles")
-    got = turn(f"update on {aname}")
-    check("first turn after migration re-fetches", got == [aid], f"fetched {got}")
-    healed = thread.supplied.get(aid)
-    check("the real version is recorded", healed is not None, str(thread.supplied))
-    got = turn(f"anything new on {aname}?")
-    check("healing does not repeat (no per-turn storm)", got == [], f"fetched {got}")
-
-    print("\nD. a GENUINE edit re-reads, unprompted")
-    original = sql(f"SELECT updated_at FROM accounts WHERE org_id='{org}' AND account_id='{aid}';")
-    if original is None:
-        skip("a moved record is re-fetched", f"account store not reachable via docker exec {DB_CONTAINER}")
-        skip("the new version is recorded", "same")
-        skip("it settles again after the edit", "same")
+    if tb.state_json_path() != STATE_JSON or tb.state_db_path() != STATE_DB:
+        raise SystemExit("refusing to run: bridge state did not resolve to the proof directory")
+    state = tb.open_state()
+    run_offline_freshness(state)
+    if OFFLINE:
+        block_live("--offline: needs a provisioned target host")
     else:
-        try:
-            sql(f"UPDATE accounts SET updated_at = now() WHERE org_id='{org}' AND account_id='{aid}';")
-            got = turn(f"anything new on {aname}?")
-            check("a moved record is re-fetched, with no prompting", got == [aid], f"fetched {got}")
-            check("the new version is recorded", thread.supplied.get(aid) not in (None, healed),
-                  str(thread.supplied))
-            got = turn(f"and again on {aname}?")
-            check("it settles again after the edit", got == [], f"fetched {got}")
-        finally:
-            # restore even if a leg raised: the book must be left exactly as it was found
-            sql(f"UPDATE accounts SET updated_at = '{original}' "
-                f"WHERE org_id='{org}' AND account_id='{aid}';")
-            back = sql(f"SELECT updated_at FROM accounts WHERE org_id='{org}' AND account_id='{aid}';")
-            print(f"  restored updated_at -> {back}"
-                  + ("" if back == original else f"  !! EXPECTED {original} — RESTORE FAILED"))
+        run_live_freshness(state)
 finally:
-    STATE.unlink(missing_ok=True)
+    if state is not None:
+        state.close()
+    _tmp.cleanup()
 
-ok = checks.ok if checks.ran else False
-print(f"\nscore: {checks.passed}/{checks.ran}" + (f", {len(checks.blocked)} BLOCKED" if checks.blocked else "")
-      + (" — an unknown version heals once and a real edit is never missed" if ok and checks.ran else ""))
-if checks.blocked and not checks.results:
-    print("ALL LEGS BLOCKED — no assertions ran; not a pass.")
-    sys.exit(2)
-sys.exit(0 if ok else 1)
+checks.finish("identity-bound freshness advances exactly when account versions advance")

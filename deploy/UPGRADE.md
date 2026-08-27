@@ -5,14 +5,14 @@ the full 40-char commit SHA, then a `#` comment naming it. That file is the vers
 record; scripts and operators consume it with `cut -d' ' -f1 IRONCLAW_PIN`. Bumping it is
 this procedure, start to finish. Nothing else changes what the fleet runs.
 
-## The current pin
+The pin of record is whatever `IRONCLAW_PIN` currently holds; this file does not restate it.
+**Prefer a release tag over a bare main SHA** — upgrade-boot fixes ship on release branches
+only, and pinning to main silently forgoes them, which is invisible from the SHA and shows up
+later as a boot failure.
 
-`ironclaw-v1.3.0` (`70795c16e`) — a release **tag**, not a bare main SHA, because
-upgrade-boot fixes ship on release branches only. How this pin was arrived at, and what
-choosing it cost, is in **Pin history** at the foot of this file. You do not need that to
-run the procedure; you need it when you are deciding the next pin.
+## Image properties the steps below assume
 
-Two properties of this image that the steps below assume:
+Re-check both if the base image changes:
 
 - **`USER root` with a gosu entrypoint.** A bare `cap_drop: [ALL]` fails boot, and step 5's
   recreate is where you find out. `multi/instance/docker-compose.yml` and
@@ -52,24 +52,67 @@ handle those in-binary; **downgrades** can hit stored state the older binary can
 deserialize — `migrate-image.sh` detects the `unknown variant` failure and prints the
 surgery recipe.
 
-**For the `b6c33d33d` ↔ `8483596bf` pair specifically, that risk was MEASURED, not
-assumed (on clones — live volumes never touched):** all four combinations
-boot healthy, with zero `unknown variant` / `activation_state` log hits.
+**Measure that risk for your own pair; never infer it from a changelog.** The method, which is
+what carries across bumps:
 
-| profile | binary | state written by | result |
-|---|---|---|---|
-| `hosted-single-tenant-volume` | main `b6c33d33d` | rc.2 | healthy |
-| `hosted-single-tenant-volume` | rc.2 `8483596bf` | main | healthy |
-| `production` (MT + Postgres) | main `b6c33d33d` | rc.2 | healthy, served real users |
-| `production` (MT + Postgres) | rc.2 `8483596bf` | main-touched | healthy, 52 tool entries |
+1. Clone the volumes. Never probe a live one.
+2. Boot each binary against state written by the other — all four combinations of
+   (old binary, new binary) × (old state, new state), on both the single-tenant volume profile
+   and the multi-tenant Postgres profile.
+3. Read the logs for `unknown variant` and `activation_state` hits. Zero on all four is the
+   pass.
+4. **Confirm non-vacuity before believing a pass.** A clone carrying no extension-install rows
+   proves nothing about extension state; check the row counts you are relying on.
 
-Non-vacuity was checked both times: the volume clones carried 4 extension-install rows
-each, and the MT clone carried 3,955 `root_filesystem_entries` and served real sealed
-member accounts over the admin API. **Untested and still unknown:** a volume holding a
-*telegram* extension install (both probe volumes had none) — that is the exact class
-`migrate-image.sh`'s surgery recipe exists for, so keep using it for fleet agents.
-Re-measure with this method when either side of the pair changes; do not infer
-compatibility from a changelog.
+One class stays unknown under this method: a volume holding a *telegram* extension install,
+which probe volumes generally lack. That is precisely the class `migrate-image.sh`'s surgery
+recipe exists for, so keep using it for fleet agents rather than trusting a clean four-way
+result to cover it.
+
+**A bundled extension's manifest changing is a different class, and it migrates in-binary.**
+The four-way probe is about DESERIALIZATION — whether the new binary can read the old row. It
+says nothing about a delta that leaves the row's shape alone and changes what the binary
+ships. Read for that separately: different tell, different fix.
+
+The install row is short. `crates/extensions/ironclaw_extension_registry/src/installations.rs`,
+`ExtensionInstallation`: `installation_id`, `extension_id`, `manifest_ref { extension_id,
+manifest_hash }`, `incarnation_id`, `credential_bindings`, `updated_at`, `owner`. Not the
+manifest body, not the activation-credential requirements, not the channel-connection
+strategy — those are computed from the package at runtime. So a delta that only edits a
+package's `manifest.toml`, or changes requirements the binary derives, cannot produce an
+`unknown variant` on the install row. It produces a manifest-hash mismatch, and that has a
+designed path.
+
+Per stored installation at boot, in
+`crates/extensions/ironclaw_extension_host/src/lifecycle_restore.rs`:
+`validate_restored_manifest_hash` compares the stored hash against the manifest the new binary
+bundles; on mismatch `migrate_host_bundled_manifest_hash` warns `bundled extension manifest
+hash changed; migrating stored installation to new manifest hash` and upserts.
+`prepare_manifest_migration` carries `credential_bindings` and `owner` across, so a fleet
+agent's bot-token binding survives and nothing needs reconfiguring per agent. It mints a fresh
+`incarnation_id`, which nothing in the channel identity or pairing path reads. Rollback runs
+the same path in reverse. Re-read those three functions at your own pair — they are upstream
+code and can move exactly like the persona surface can.
+
+Two conditions make it a BOOT FAILURE instead, both returning the hash error up through the
+restore loop: no stored manifest row for the extension, and a stored manifest whose source is
+not `HostBundled`. Neither is reachable for an extension `provision-agent.sh` installed, which
+is why they are worth naming — boot dying on a hash mismatch means the volume is not the shape
+this path assumes.
+
+**When the four-way probe IS the answer.** That row's deserializer is hand-written with
+`deny_unknown_fields`, so a delta touching `ironclaw_extension_registry`, `ironclaw_host_api`
+or `ironclaw_extension_contracts` can move the row shape under you. Check those three crates in
+the compare first: zero files there means the shape did not move and the risk is the migration
+path above; files there means probe it.
+
+One thing neither the reading nor the four-way probe settles. A manifest that changes a
+channel's `[channel.connection] strategy` changes how users CONNECT, and existing bindings were
+minted under a ceremony the new manifest no longer declares; whether they still count as
+connected is a live question. One throwaway container on a CLONED volume answers it, and that
+is a far smaller run than the four-way matrix. Read this way for #7766 (1.3.0 -> 1.3.1-rc.1),
+where telegram returns from `device_link` to `web_generated_code` — the reading found no shape
+change; the binding question stayed open.
 
 ## Single-writer rule
 
@@ -107,6 +150,25 @@ governor as a singleton — never a second MT container against the same DB or v
    it — after each container comes up in step 5, assert it mechanically:
    `./deploy/verify-pin.sh <container>` compares the running image's `ironclaw.rev` label to
    `IRONCLAW_PIN` and exits non-zero on a MISMATCH or an UNLABELED image (unknown provenance).
+4b. **Probe a clone with the image you just built — before step 5 touches anything live.**
+   The image exists now, so this costs minutes, and it measures YOUR pair instead of inheriting
+   a result from a neighbouring rev. Clone the volume of an agent that actually CARRIES the
+   extension install in question — the non-vacuity rule above is the whole point, a clone with
+   no install rows proves nothing — run the new image against the CLONE on an unused port under
+   the single-writer rule, and read what the new binary does with state the old one wrote.
+
+   Ordering is the load-bearing part. `migrate-image.sh` recovers a non-deserializing install
+   per agent, but it finds out during the maintenance window, one agent at a time. The clone
+   answers the same question before any client is unserved, which is the difference between a
+   rolling restart and a surprise.
+
+   **An upstream prebuilt image is not a substitute.** `nearaidev/ironclaw:sha-<7>` on Docker
+   Hub is published per MAIN-branch SHA, so a pin on a RELEASE branch has none — measured:
+   `sha-ba6f0d3` (1.3.1-rc.1) 404s while main SHAs from the same week resolve. A main image
+   carrying the same PR is a different pair; treat it as an early indicator and never as the
+   measurement. It also ships no `ironclaw.rev` label, so it must never be tagged
+   `ironclaw:main` — `verify-pin.sh` would reject it, which is the label doing its job.
+
 5. **Restart, in order, under the single-writer rule:**
    1. **Fleet agents** (libSQL on per-agent volumes) — one at a time:
       `./deploy/migrate-image.sh <container> ironclaw:<9-char rev>`. It serializes
@@ -138,8 +200,9 @@ governor as a singleton — never a second MT container against the same DB or v
       cheapest possible assertion, which is the one that would have caught it:
 
           # from /opt/ironworks/multi/seam, with the client env sourced
-          python3 -c "import context_ingress as ing; c=ing.load_clients()['<slug>']; \
-            print(sorted(ing._svc('/list_accounts', c)['accounts'][0]))"
+          python3 -c "import account_service as asvc, registry as reg; \
+            c=asvc.resolve_account_scopes(reg.load_clients())['<slug>']; \
+            print(sorted(asvc._catalog(c)['accounts'][0]))"
           # -> must include updated_at
 
       General rule for this service: after ANY change under `deploy/account-intel/data/`,
@@ -148,6 +211,28 @@ governor as a singleton — never a second MT container against the same DB or v
    3. **Bridge** — `sudo systemctl restart bridge` after the MT instance answers
       `/api/health`. Expect one watchdog blip + recovery notice in the team chat — that
       is the alerting path working, not a failure.
+
+      **The bridge's state is one transactional store** (`~/.agency/bridge-threads.db`), holding
+      each group's conversation pointer and the per-update delivery journal together so a crash
+      cannot leave them disagreeing. A restart never re-runs a completed turn; acknowledged,
+      retryable, and reconciliation-required delivery outcomes are in `docs/BRIDGE_DELIVERY.md`.
+
+      **Schema v1 -> v2 adds conversation compatibility identity.** Opening a v1 store first
+      creates a mode-`0600` SQLite backup beside it (`bridge-threads.db.v1.bak-<UTC timestamp>`),
+      then additively records service, version, full composed-instructions SHA-256, model, and a
+      `FACT_FIELDS` policy SHA-256, plus the authenticated Account Service organization id and
+      normalized Account Service base URL. It does not rewrite `prev`, supplied-context state,
+      or the delivery journal. Active v1 rows have no identity that can be recovered honestly, so the
+      bridge then refuses startup and prints the exact per-tenant reset command. With the bridge
+      stopped, inspect and confirm each reset:
+
+          ./deploy/ironworks tenant reset-thread <slug>
+          ./deploy/ironworks tenant reset-thread <slug> --confirm <slug>
+
+      The reset preserves update rows and Telegram cursors. Do not start old code on schema v2;
+      rollback requires restoring the recorded v1 backup. There is no reverse migration.
+      After the restart, confirm forward progress with `./deploy/ironworks bridge status`
+      (exit 0 healthy, 2 unhealthy, 3 could-not-evaluate — the last is not a pass).
 
       **A restart onto a newer seam can require a one-time state migration, and the bridge
       will NOT start until it is done.** This is by design: `_load_threads` REFUSES a
@@ -169,6 +254,26 @@ governor as a singleton — never a second MT container against the same DB or v
       prevent. Verify with `systemctl is-active bridge` -> `active`, then confirm each group
       kept its `prev` and `ever_supplied`.
 6. **Proofs — all must go green:**
+   - **The console first, because it is one command and it names what is broken:**
+     `./deploy/ironworks doctor` (exit 0 clear · 2 FAILED · 3 BLOCKED · 64 usage). It checks the
+     pins, the service definitions, the registry, every tenant's live confinement, the
+     residual-authority ledger, and whether a session-revocation route has appeared upstream
+     (which would be good news and a docs bug). It is not a replacement for the proofs below —
+     it is the thing that tells you which of them to read first.
+   - **Session revocation — re-measure it, do not inherit it:**
+     `WEBUI_TOKEN=... python3 multi/verify/test_session_revocation.py`. It mints a throwaway
+     member, probes with a negative control, deletes it, and reports whether a deleted member's
+     token still authenticates. The answer at this pin is **RESIDUAL AUTHORITY** (exit 3), and
+     `deprovision.sh`'s exit contract and `docs/IRONCLAW_RUNTIME_CONSTRAINTS.md` both depend on it
+     staying the answer. A different result is a documentation change, not a test failure.
+   - **Egress containment (network layer) — `./deploy/egress/egress-control.sh verify`.**
+     Distinct from the tool-surface probe below and neither implies the other: this one asks
+     what the CONTAINER can reach, which survives a tool being re-enabled or a taxonomy rename.
+     **A pin bump invalidates the verification stamp automatically** — it is bound to the image
+     id — so `./deploy/ironworks egress status` drops from VERIFIED to RUNNING until you re-run
+     it. That is deliberate: a new rev can change the HTTP client and the tool taxonomy, and an
+     inherited VERIFIED is the most dangerous kind of stale. On a host where the boundary is
+     not applied this still FAILS by design; record the result rather than skipping it.
    - **Pin provenance:** `./deploy/verify-pin.sh <MT container> <each fleet container you
      rebuilt>` — asserts the running image's `ironclaw.rev` label equals `IRONCLAW_PIN`.
      The MT container is `multiclaw` on the laptop (the name `multi/instance/docker-compose.yml`
@@ -181,6 +286,14 @@ governor as a singleton — never a second MT container against the same DB or v
      `test_adversarial_cross_org.py` (5/5), `verify_live_isolation.py`,
      `test_adversarial_routing.py`, `test_injection.py`, `test_injection2.py`,
      `test_instr_live.py`, `test_client_guidance_live.py`, `test_product_loop.py`.
+   - `multi/verify/test_member_admin_negative.py` — **now load-bearing for BRIDGE
+     STARTUP**, not only for the confinement story. The bridge refuses to serve a tenant
+     whose token is not a sealed member, and decides that by probing
+     `GET /api/webchat/v2/admin/users` and reading 401/403 as "member"
+     (`context_ingress.assert_no_member_is_the_operator`). That expectation is THIS
+     proof's, measured live. If a rev changes the denial code — 404, say — every bridge
+     refuses to start, fail-closed, and no other check would have warned. Run it on the
+     bump, not after the first outage.
    - **Answer quality — `multi/eval/run_eval.py --runs 2`** against the eval org. Everything
      above proves the plumbing still holds; this is the only check that the analyst is still
      *good*. A rev bump changes the model's behaviour, not just the harness, and the failure
@@ -224,6 +337,11 @@ governor as a singleton — never a second MT container against the same DB or v
    build tag, and the proof results (including the confine-existing re-run + egress-closed
    check). No other file is the system of record.
 
+   `./deploy/ironworks release verify --json` produces the machine-readable half: every gate it
+   could run here, with its result, and — named explicitly rather than omitted — every gate it
+   could not, with the reason. Attach it to the bump commit. An artifact whose blocked items
+   are invisible is a green artifact, which is the failure this command exists to prevent.
+
 > **The bump is not complete until step 6 is green — the egress items especially.**
 > Treat a bump with unverified confinement as an *unfinished* bump, not a finished one with
 > a loose end: between the build and a passing `test_egress_closed.py`, every member on the
@@ -237,63 +355,3 @@ governor as a singleton — never a second MT container against the same DB or v
 Retag `ironclaw:main` to the previous rev-named tag and repeat step 5 in the same order.
 Expect `migrate-image.sh`'s unknown-variant surgery path on any agent whose extension
 state was written by the newer binary.
-
-## Pin history
-
-The record of how each pin was chosen and what the bump actually cost. It is here, at the
-end, rather than above the procedure: every entry is true of one pair of revs and goes stale
-the moment the pin moves, whereas the steps above are true of every bump. Read this when you
-are choosing the next pin, not when you are running one.
-
-### `70795c16e` — `ironclaw-v1.3.0`
-
-The FINAL release, one commit past `1.3.0-rc.2` (`chore(release): promote 1.3.0-rc.2 to
-1.3.0`, #7754). Two different pairs are in play here and conflating them is how this gets
-read wrong:
-
-- **`rc.2 → v1.3.0` is a fast-forward** — one release-promotion commit, no code change. So
-  everything measured for rc.2 carried over verbatim: the same `USER root` + gosu entrypoint,
-  the same opt-in sshd, and the persona-surface gate passing (re-verified at this rev). The
-  target moved from `8483596bf` to `70795c16e` *mid-flight*; the carry-over was confirmed,
-  not assumed.
-- **`main b6c33d33d → v1.3.0` is a real switch**, not a catch-up. It gains upgrade-boot fix
-  #7721 (`505cf0a15`), which exists only on the release branch, and gives up 15 main commits
-  — notably a libSQL write-lane starvation fix and native structured-output finalization.
-  `git cherry 70795c16 b6c33d33d` confirmed none of the 15 was forward-ported. Main and the
-  release branch diverged at `18ab836f2`. Do not "catch the pin up to main" without redoing
-  step 2: the fleet was already running `1.3.0-rc.2` images, so rebuilding the older main pin
-  would have *removed* #7721 from the agents — the exact regression step 1 warns about.
-
-**Tool surface:** v1.3.0 widened nothing — still 50 tools, so the confinement allowlist
-needed no change. Re-check this every bump; a new rev can widen what the allowlist was
-written against.
-
-**`pairing/mint` returns 404 for telegram on this rev.** v1.3.0 is a device-link build; rc.2
-was a deep-link mint build. The generic pairing routes
-(`.../{extension_id}/pairing/{mint,status,unpair}`) still exist — telegram simply registers no
-pairing service now (it declares `method="device_link"`), so they 404 for
-`extension_id=telegram` specifically. That is registry-driven and per-extension, not a removed
-route. `migrate-image.sh` treats both builds as healthy and existing pairings survive in the
-volume, but any NEW telegram personal-connection flow is device-link.
-
-**How the bump actually ran, on each box.** Both follow the steps above; recorded here because
-the container names and the rollback-tag discipline are easy to get wrong.
-
-- *Serve VM:* built on the box with `--label ironclaw.rev`, preserving the outgoing image
-  under its own rev tag (`ironclaw:b6c33d33d`, so rollback is a retag rather than a rebuild),
-  retagged `ironclaw:main`, recreated `multi-ironclaw-1` (project `multi`) and
-  `secretary-ironclaw-1` (project `secretary`), restarted the bridge, re-applied member
-  confinement against the new surface, and finished by asserting `verify-pin.sh` exits 0 on
-  both containers.
-- *Laptop fleet:* rebuilt from a clean checkout at the pin **with** `--label ironclaw.rev` —
-  an earlier laptop build of the same rev carried no label at all and would have migrated
-  containers that still failed `verify-pin.sh`. Then `migrate-image.sh` per single-tenant
-  container, compose recreate for the MT instance, `verify-pin.sh` across every container,
-  and a `doctor.sh` fleet sweep. Outgoing images — base and derived — kept as rollback tags.
-
-**A proof that reads differently per box, and is not a regression.**
-`test_client_guidance_live` returns 10/13 on the VM and 13/13 on the laptop. All three
-failures are marker checks: the VM's live proof-client guidance files contain neither
-`Alpine` nor `Harbor`, while the committed fixtures carry 5 and 4 of those markers. Guidance
-is a file on disk that a binary swap cannot touch — the VM's proof clients were simply
-provisioned outside the fixture kit. Align them before reading that proof as a gate there.

@@ -1,8 +1,9 @@
 # MultiAgency Account Service image — deps only; code + fixtures are mounted at /app.
 # Pinned for reproducibility: an unpinned `pip install` rebuilds a different image over
 # time. Versions match the verified-running stack (flask/psycopg) plus a current stable gunicorn.
-FROM python:3.12-slim
-RUN pip install --no-cache-dir flask==3.1.3 "psycopg[binary,pool]==3.3.4" gunicorn==23.0.0
+FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
+COPY requirements.lock /tmp/account-service-requirements.lock
+RUN pip install --no-cache-dir --require-hashes -r /tmp/account-service-requirements.lock
 WORKDIR /app
 EXPOSE 8443
 # gunicorn as the prod entry: worker timeouts + request-line/header limits that

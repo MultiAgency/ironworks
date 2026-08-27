@@ -16,18 +16,20 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 . ../../lib/fleet.sh    # curl_header (org token off argv) + fleet_json/fleet_require_container
+. ./smoke.sh            # smoke_matches/smoke_code — the checks below must be able to FAIL
 SLUG="${1:?usage: seed-real.sh <slug>  (real data under ~/.agency/account-data/<slug>/)}"
 # Validate before $SLUG reaches a path or an in-container `sh -c "rm -rf /tmp/real-$SLUG"`:
 # an unconstrained slug allows `../` traversal and shell-metacharacter injection into the
 # container. provision.sh guards its own slug; seed-real.sh is documented for standalone use too.
 case "$SLUG" in *[!a-z0-9-]*|'') echo "!! slug must be lowercase [a-z0-9-]: $SLUG" >&2; exit 1;; esac
-DATA_DIR="$HOME/.agency/account-data/$SLUG"
-CFG="$HOME/.agency/account-data/$SLUG.env"
-CONT="${ACCOUNT_SERVICE_CONTAINER:-multiagency-data-account-service-1}"
+DATA_DIR="$FLEET_AGENCY_DIR/account-data/$SLUG"
+CFG="$FLEET_AGENCY_DIR/account-data/$SLUG.env"
+CONT="$(fleet_account_service_container)"   # the same resolver provision.sh uses; this line and
+                                            # its twin there used to be byte-identical literals
 
-[ -d "$DATA_DIR" ] || { echo "!! no data dir: $DATA_DIR (put real *.json there, OUTSIDE the repo)"; exit 1; }
-ls "$DATA_DIR"/*.json >/dev/null 2>&1 || { echo "!! no *.json in $DATA_DIR"; exit 1; }
-[ -f "$CFG" ] || { echo "!! no config: $CFG  (set REAL_ORG_ID, REAL_ORG_NAME, REAL_ACCOUNT_TOKEN)"; exit 1; }
+[ -d "$DATA_DIR" ] || { echo "!! no data dir: $DATA_DIR (put real *.json there, OUTSIDE the repo)" >&2; exit 1; }
+ls "$DATA_DIR"/*.json >/dev/null 2>&1 || { echo "!! no *.json in $DATA_DIR" >&2; exit 1; }
+[ -f "$CFG" ] || { echo "!! no config: $CFG  (set REAL_ORG_ID, REAL_ORG_NAME, REAL_ACCOUNT_TOKEN)" >&2; exit 1; }
 # plain source (no set -a): REAL_* stay shell variables; the seeder gets its inputs
 # explicitly via `docker compose exec -e` below, never by wholesale env inheritance
 . "$CFG"
@@ -47,14 +49,19 @@ docker compose exec -T \
   account-service python /app/deploy/account-intel/data/seed_real.py
 docker exec "$CONT" sh -c "rm -rf /tmp/real-$SLUG"   # do not leave customer data in the container fs
 
-echo "== 3. smoke: real token sees its org; the demo token does NOT (isolation) =="
-BASE=http://127.0.0.1:8443
+# GO-LIVE IS THE POINT OF NO RETURN for this data, so these two abort the run on mismatch under
+# the `set -euo pipefail` above rather than printing a number: if the real token cannot read its
+# own org, or the store is not fail-closed to an unknown one, the operator must not be told the
+# org is "seeded and org-scoped" and pointed at the bridge.
+#
+# The own-org count is asserted as ">= 1" rather than an exact number — the query is the first
+# word of the first account's name, and how many of THIS operator's accounts share it is not
+# knowable here (the dev fixtures can pin an exact count; real client data cannot).
+echo "== 3. smoke: real token sees its org; an unknown token does NOT (isolation) =="
 first="$(find "$DATA_DIR" -maxdepth 1 -name '*.json' | sort | head -1)"
 qname="$(python3 -c "import json,sys;print(json.load(open(sys.argv[1]))['account']['name'].split()[0])" "$first")"
-echo -n "   real token finds '$qname' (own org): "
-curl_header "X-Service-Token: $REAL_ACCOUNT_TOKEN" -s "$BASE/find_account?query=$qname" | fleet_json "d.get('match_count', d.get('error'))"
-echo -n "   unknown token -> 401 (fail closed): "
-curl -s -o /dev/null -w '%{http_code}\n' -H "X-Service-Token: not-a-real-token" "$BASE/find_account?query=$qname" # gitleaks:allow — literal placeholder, a negative test (401), not a secret
+smoke_matches "real token finds '$qname' (own org)" '>=1' "X-Service-Token: $REAL_ACCOUNT_TOKEN" "$qname"
+smoke_code "unknown token /find_account" 401 "X-Service-Token: not-a-real-token" "/find_account?query=$qname" # gitleaks:allow — literal placeholder, a negative test (401), not a secret
 
 echo
 echo "DONE. Real org '$REAL_ORG_ID' is seeded and org-scoped. Its token lives in"

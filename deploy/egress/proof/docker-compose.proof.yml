@@ -1,0 +1,119 @@
+# DISPOSABLE proof stack for the egress boundary. Not a deployment.
+#
+# It stands up the exact pinned IronClaw image in the exact topology the production overlay
+# proposes, with disposable identities, a disposable database, disposable networks and a
+# disposable port — so the one thing that has never been established can be established:
+# whether the pinned runtime can actually reach its model provider through a default-deny
+# network boundary.
+#
+#   ./deploy/egress/proof/run-proof.sh          bring it up, prove it, tear it down
+#
+# It shares NOTHING with the live stack: different project name, container names, volumes,
+# port, and freshly minted secrets. The only value it borrows from the operator is the model
+# provider API key, because a real model turn is the entire point and that key cannot be
+# minted here.
+name: egressproof
+
+services:
+  db:
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
+    environment:
+      POSTGRES_PASSWORD: ${PROOF_PGPW:?minted by run-proof.sh}
+      POSTGRES_DB: ironclaw
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ironclaw"]
+      interval: 3s
+      timeout: 3s
+      retries: 25
+    networks: [inner]
+    tmpfs: [/var/lib/postgresql/data]      # disposable: the database dies with the stack
+    mem_limit: 1g
+    security_opt: [no-new-privileges:true]
+
+  # The ONLY way out. CONNECT-only, allowlisted, and it logs every decision — which is also
+  # how this proof answers "what destinations does the runtime actually ask for?" without
+  # having to guess from a source grep.
+  gw:
+    image: python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
+    command: ["python3", "/connect-proxy.py"]
+    environment:
+      EGRESS_ALLOW: ${PROOF_EGRESS_ALLOW:-cloud-api.near.ai:443}
+      EGRESS_PORT: "3128"
+    volumes:
+      - ../connect-proxy.py:/connect-proxy.py:ro
+    networks: [inner, edge]
+    mem_limit: 256m
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+  # The runtime under test. `inner` ONLY — no second network, so no default route.
+  ic:
+    image: ${PROOF_IMAGE:-ironclaw:main}
+    depends_on:
+      db: { condition: service_healthy }
+    environment:
+      IRONCLAW_REBORN_PROFILE: production
+      IRONCLAW_REBORN_POSTGRES_URL: postgres://postgres:${PROOF_PGPW:?}@db:5432/ironclaw
+      DATABASE_SSLMODE: disable
+      IRONCLAW_REBORN_ALLOW_REMOTE_POSTGRES_CLEAR_TEXT: "true"
+      IRONCLAW_REBORN_SECRET_MASTER_KEY: ${PROOF_MASTER_KEY:?}
+      IRONCLAW_REBORN_WEBUI_TOKEN: ${PROOF_WEBUI_TOKEN:?}
+      # Must match the image's baked `[identity].default_owner`, or the runtime refuses to
+      # start — the same value production sets via WEBUI_USER.
+      IRONCLAW_REBORN_WEBUI_USER_ID: ${PROOF_WEBUI_USER:-reborn-cli}
+      NEARAI_API_KEY: ${NEARAI_API_KEY:?}
+      NEARAI_BASE_URL: https://cloud-api.near.ai
+      IRONCLAW_REBORN_SERVE_HOST: "0.0.0.0"
+      IRONCLAW_REBORN_LOG: info
+      IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON: "true"
+      # The boundary's cooperation half. Both spellings: reqwest reads the lowercase form and
+      # assorted tooling reads the uppercase. NO exception list — an empty no_proxy is the one
+      # setting that cannot be misread, and it is where this boundary would otherwise be
+      # quietly widened later.
+      HTTPS_PROXY: http://gw:3128
+      https_proxy: http://gw:3128
+      HTTP_PROXY: http://gw:3128
+      http_proxy: http://gw:3128
+      NO_PROXY: ""
+      no_proxy: ""
+    networks: [inner]
+    # THE DOCKER HOST, NAMEABLE. Two forbidden destinations name `host.docker.internal` — the
+    # private Account Service and its database, the two that hold client data — and on Linux
+    # that name does not resolve inside a container at all, so the attempt died at DNS and was
+    # scored as "blocked": a passing leg that never opened a socket. The production overlay
+    # carries the identical entry on its `ironclaw` service, which is what makes
+    # forbidden-destinations.json ONE list rather than two probes asking different questions.
+    # It cannot be a probe flag: `probe-egress.sh` joins the runtime's namespace with
+    # `--network container:`, and docker refuses `--add-host` alongside that mode.
+    #
+    # This grants no route. `inner` is `internal: true`, so the boundary is unchanged; it makes
+    # the leg able to FAIL for the reason it claims to be testing rather than for a missing
+    # hosts entry.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes: [ic-data:/data]
+    mem_limit: 4g
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETUID, SETGID]
+
+  # An internal-only network cannot publish a port (measured, with a control), so the port
+  # lives on a relay that sits on both networks and forwards TCP without parsing it.
+  ing:
+    image: nginx:1.27-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+    depends_on: [ic]
+    volumes:
+      - ./proof.nginx.conf:/etc/nginx/nginx.conf:ro
+    ports: ["127.0.0.1:${PROOF_PORT:-3999}:3000"]
+    networks: [inner, edge]
+    mem_limit: 128m
+    security_opt: [no-new-privileges:true]
+
+volumes:
+  ic-data:
+
+networks:
+  inner:
+    internal: true       # the entire boundary is this line, plus nothing else joining `edge`
+  edge: {}

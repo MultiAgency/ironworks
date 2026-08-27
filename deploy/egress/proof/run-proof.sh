@@ -1,0 +1,127 @@
+#!/usr/bin/env bash
+# run-proof.sh — the disposable exact-path proof for network-level egress containment.
+#
+# THE QUESTION. The per-bearer tool disable is not a network boundary, and the container it
+# protects can currently reach the whole internet (measured). The proposed boundary — the
+# runtime on an `internal: true` network with one allowlisting CONNECT gateway — passed a
+# mechanism prototype 8/8, but that prototype never ran IronClaw. So one thing has never been
+# established: does the PINNED RUNTIME actually reach its model provider through it?
+#
+# This answers that with the real image, a real model turn, and a real allowlist, in a stack
+# that shares nothing with the live one. Then it attacks the boundary.
+#
+#   ./deploy/egress/proof/run-proof.sh              full proof, then tear down
+#   ./deploy/egress/proof/run-proof.sh --service-path  also drive the WHOLE IronWorks path
+#   ./deploy/egress/proof/run-proof.sh --keep       leave it up for manual poking
+#   ./deploy/egress/proof/run-proof.sh --down       tear down a kept stack
+#
+# It NEVER touches the live stack: distinct compose project, containers, volumes, port and
+# freshly minted secrets. It refuses to run if its port or project name collide.
+set -euo pipefail
+cd "$(dirname "$0")"
+HERE="$(pwd)"
+REPO="$(cd ../../.. && pwd)"
+# fleet_ironclaw_pin owns the pin parse; this script tagged its image from a hand-rolled
+# `cut -d' '` that is not the parse rule the rest of the fleet uses.
+. "$REPO/deploy/lib/fleet.sh"
+PROJECT=egressproof
+PORT="${PROOF_PORT:-3999}"
+COMPOSE=(docker compose -f "$HERE/docker-compose.proof.yml")
+
+teardown() {
+  echo "== tearing down the disposable stack =="
+  "${COMPOSE[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+}
+
+if [ "${1:-}" = "--down" ]; then teardown; exit 0; fi
+# Every flag, not just $1 — `--keep --service-path` silently dropped the second one, and an
+# unknown flag was ignored rather than refused. Same shape as probe-egress.sh next door.
+KEEP=0 SERVICE_PATH=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --keep) KEEP=1 ;;
+    --service-path) SERVICE_PATH=1 ;;
+    *) echo "!! unknown argument: $1 (usage: $0 [--keep] [--service-path] | --down)" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+# ── guardrails: this must never be able to disturb the live environment ────────────────
+if docker ps --format '{{.Names}}' | grep -q "^${PROJECT}-"; then
+  echo "!! a previous proof stack is still up — run: $0 --down" >&2; exit 1
+fi
+if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "!! port $PORT is in use; set PROOF_PORT to something free" >&2; exit 1
+fi
+
+# ── disposable identities; the provider key is the one thing we cannot mint ────────────
+NEARAI_API_KEY="${NEARAI_API_KEY:-$(sed -n 's/^NEARAI_API_KEY=//p' "$REPO/multi/instance/.env" | tr -d '"'"'"'')}"
+[ -n "$NEARAI_API_KEY" ] || { echo "!! NEARAI_API_KEY not set and not readable from multi/instance/.env" >&2; exit 1; }
+export NEARAI_API_KEY
+PROOF_PGPW="$(openssl rand -hex 24)"
+PROOF_MASTER_KEY="$(openssl rand -hex 32)"
+PROOF_WEBUI_TOKEN="$(openssl rand -hex 32)"
+PIN_SHORT="$(fleet_ironclaw_pin | cut -c1-9)"
+PROOF_IMAGE="${PROOF_IMAGE:-ironclaw:$PIN_SHORT}"
+export PROOF_PGPW PROOF_MASTER_KEY PROOF_WEBUI_TOKEN PROOF_IMAGE
+export PROOF_PORT="$PORT"
+API="http://127.0.0.1:$PORT"
+
+# shellcheck disable=SC2154  # `rc` is set by the trap body itself, at fire time
+trap 'rc=$?; [ "$KEEP" -eq 1 ] || teardown; exit $rc' EXIT
+
+echo "== disposable egress proof =="
+echo "   image   : $PROOF_IMAGE   (IRONCLAW_PIN $PIN_SHORT)"
+echo "   api     : $API"
+echo "   allow   : ${PROOF_EGRESS_ALLOW:-cloud-api.near.ai:443}"
+echo
+
+"${COMPOSE[@]}" up -d --wait --wait-timeout 180 db gw ing >/dev/null
+"${COMPOSE[@]}" up -d ic >/dev/null
+echo "   waiting for the contained runtime to answer..."
+ready=0
+for _ in $(seq 1 60); do
+  if curl -sf -m 3 "$API/api/health" >/dev/null 2>&1; then ready=1; break; fi
+  sleep 3
+done
+if [ "$ready" -ne 1 ]; then
+  echo "!! the contained runtime never became healthy — this is a RESULT, not a script failure." >&2
+  echo "   IronClaw logs (last 40):" >&2
+  "${COMPOSE[@]}" logs --tail=40 ic >&2 || true
+  echo "   gateway decisions:" >&2
+  "${COMPOSE[@]}" logs --tail=40 gw >&2 || true
+  exit 1
+fi
+echo "   healthy."
+echo
+
+# ── the proof itself, in python so every leg shares one vocabulary ─────────────────────
+# `|| rc=$?` rather than a bare call: under `set -e` a failing proof_checks.py aborted the script
+# here, which skipped the gateway decision log below — the one output that says WHICH destination
+# the runtime asked for, i.e. the diagnostic you want on precisely the run that failed. The
+# capture also makes the `[ "$rc" -eq 0 ]` guard and the final `exit $rc` mean something; before
+# this, both could only ever see 0 and the script's failure came entirely from the EXIT trap.
+rc=0
+PROOF_API="$API" PROOF_PROJECT="$PROJECT" PROOF_COMPOSE="$HERE/docker-compose.proof.yml" \
+PROOF_OPERATOR="$PROOF_WEBUI_TOKEN" REPO="$REPO" \
+  python3 "$HERE/proof_checks.py" || rc=$?
+
+# Step 8: the whole product path, not just the runtime. Only worth running once the raw model
+# proof passes — a service-path failure under a broken boundary would say nothing.
+if [ "$SERVICE_PATH" -eq 1 ] && [ "$rc" -eq 0 ]; then
+  echo
+  echo "== SERVICE PATH: bridge -> seam -> IronClaw -> gateway -> provider =="
+  PROOF_API="$API" PROOF_OPERATOR="$PROOF_WEBUI_TOKEN" REPO="$REPO" \
+    python3 "$HERE/service_path_checks.py" || rc=$?
+fi
+
+echo
+echo "== gateway decision log (every destination the runtime actually asked for) =="
+"${COMPOSE[@]}" logs gw 2>/dev/null | sed 's/^[^|]*| //' | sort | uniq -c | sort -rn | head -30
+
+if [ "$KEEP" -eq 1 ]; then
+  echo
+  echo "stack left UP (--keep). Tear down with: $0 --down"
+  trap - EXIT
+fi
+exit $rc

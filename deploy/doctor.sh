@@ -25,9 +25,9 @@ LIB_DIR="$(cd "$(dirname "$0")" && pwd)/lib"
 . "$LIB_DIR/curl-private.sh"   # curl_bearer/curl_header/curl_tg: tokens off argv
 # shellcheck disable=SC1091  # resolved from the script's own dir at runtime
 . "$LIB_DIR/fleet.sh"
-SECRETS_DIR="${MULTRON_SECRETS_DIR:-$HOME/.agency/agents}"
+SECRETS_DIR="${MULTRON_SECRETS_DIR:-$FLEET_AGENCY_DIR/agents}"
 CF_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config.yml}"
-TOKEN_DIR="${MULTRON_TOKEN_DIR:-$HOME/.agency}"
+TOKEN_DIR="${MULTRON_TOKEN_DIR:-$FLEET_AGENCY_DIR}"
 
 DEEP=0; TARGET=""
 for a in "$@"; do case "$a" in --deep) DEEP=1 ;; -*) ;; *) TARGET="$a" ;; esac; done
@@ -127,26 +127,69 @@ check_agent() {
     skip "bot token + webhook-registration checks" "no $tf"
   fi
 
-  # 8) deep: assert the pinned Telegram auth model (device-link build, not deep-link).
-  # On v1.3.0 Telegram declares method="device_link" and registers NO pairing service, so
-  # pairing/mint 404s for extension_id=telegram (the generic route still exists — registry-
-  # driven, per-extension; #7464). That 404 is BY DESIGN (see UPGRADE.md, migrate-image.sh).
-  # The old round-trip (create -> mint deep link -> simulate /start -> connected?) drove a
-  # ceremony telegram no longer registers and is retired with intake/provision-user.sh. We
-  # assert instead that the running binary IS the device-link build — a 200 here means it is
-  # an OLD deep-link build, not the pin. Pure admin-API call: no webhook surface/secret needed.
+  # 8) deep: assert the running image's Telegram auth model AGREES WITH THE PIN.
+  # The expected model is DERIVED from the pinned source; it is never hard-coded here.
+  # This check used to assert one specific model ("device-link build, not deep-link", #7464).
+  # That pinned an upstream MOMENT, not an invariant, and upstream reversed it: #7766 returns
+  # `[channel.connection]` to `web_generated_code`, so the hard-coded form goes red on a
+  # healthy fleet the day the pin moves. Agreement is the property worth checking, and it
+  # survives the next flip too.
+  #
+  # `pairing/mint` is registry-driven and PER-EXTENSION, so whether telegram registers a
+  # pairing service is observable over the admin API alone — no webhook surface, no secret,
+  # no bot token:
+  #   web_generated_code -> telegram registers a deep-link pairing service -> mint 200
+  #   device_link        -> telegram registers NO pairing service          -> mint 404
+  #     (the generic route still exists — the 404 is per-extension and BY DESIGN; #7464,
+  #      UPGRADE.md, and migrate-image.sh's pairing note, which already calls both healthy)
+  # Image PROVENANCE is verify-pin.sh's job (the `ironclaw.rev` label). This is the runtime
+  # behaviour that a label cannot assert: what the binary actually registers.
+  #
+  # Verdicts, deliberately distinct: cannot-derive is a SKIP (nothing was measured, and
+  # doctor.sh must not report a green it did not earn), while a strategy value this mapping
+  # does not cover is a FAIL — the source is readable and says something doctor.sh no longer
+  # understands, which is a defect HERE, fixed in the case below.
   if [ "$DEEP" = 1 ]; then
-    local cu ut uid mint
-    cu=$(curl_bearer "$TOK" -s -X POST -H 'content-type: application/json' -d '{"display_name":"doctor-authmodel-probe","role":"member"}' "$API/api/webchat/v2/admin/users")
-    ut=$(printf '%s' "$cu" | fleet_json "d['api_token']" 2>/dev/null); uid=$(printf '%s' "$cu" | fleet_json "d['user']['user_id']" 2>/dev/null)
-    if [ -z "$ut" ]; then fail "telegram auth model (setup)" "could not create probe user"; else
-      mint=$(curl_bearer "$ut" -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "$API/api/webchat/v2/extensions/telegram/pairing/mint")
-      case "$mint" in
-        404) pass "telegram auth model (device-link build; deep-link mint absent, as pinned)";;
-        200) fail "telegram auth model (mint 200)" "running binary is a deep-link build, not the pinned device-link rev (#7464)";;
-        *)   fail "telegram auth model (mint HTTP $mint)" "unexpected — check docker logs $container";;
+    local src rev tg_manifest manifest strategy want cu ut uid mint
+    src="${IRONCLAW_SRC:-/opt/ironclaw-src}"       # same default as migrate-image.sh
+    tg_manifest="crates/extensions/packages/telegram/manifest.toml"
+    rev="$(fleet_ironclaw_pin 2>/dev/null)"
+    strategy=""; want=""
+    if [ -z "$rev" ]; then
+      skip "telegram auth model" "no readable IRONCLAW_PIN — cannot derive the expected model"
+    elif ! git -C "$src" rev-parse -q --verify "$rev^{commit}" >/dev/null 2>&1; then
+      skip "telegram auth model" "pin ${rev:0:9} not in $src — git fetch there, or set IRONCLAW_SRC"
+    elif ! manifest="$(git -C "$src" show "$rev:$tg_manifest" 2>/dev/null)"; then
+      skip "telegram auth model" "$tg_manifest absent at ${rev:0:9} — the manifest moved upstream; re-derive the path"
+    else
+      # Scoped to the [channel.connection] table: a `strategy` key under any other table
+      # (delivery, ingress) is a different setting and must not be read as this one.
+      strategy="$(printf '%s\n' "$manifest" | awk '
+        /^\[/ { in_sec = ($0 == "[channel.connection]"); next }
+        in_sec && /^[[:space:]]*strategy[[:space:]]*=/ {
+          sub(/^[^=]*=[[:space:]]*/, ""); gsub(/"/, ""); print; exit
+        }')"
+      case "$strategy" in
+        web_generated_code) want=200 ;;
+        device_link)        want=404 ;;
       esac
-      curl_bearer "$TOK" -s -o /dev/null -X DELETE "$API/api/webchat/v2/admin/users/$uid"   # cleanup probe user
+      if [ -z "$strategy" ]; then
+        skip "telegram auth model" "no [channel.connection] strategy at ${rev:0:9} — the key moved; re-derive it"
+      elif [ -z "$want" ]; then
+        fail "telegram auth model (strategy '$strategy')" "pin ${rev:0:9} declares a model this check does not know — measure its pairing/mint behaviour and extend the case in doctor.sh"
+      else
+        cu=$(curl_bearer "$TOK" -s -X POST -H 'content-type: application/json' -d '{"display_name":"doctor-authmodel-probe","role":"member"}' "$API/api/webchat/v2/admin/users")
+        ut=$(printf '%s' "$cu" | fleet_json "d['api_token']" 2>/dev/null); uid=$(printf '%s' "$cu" | fleet_json "d['user']['user_id']" 2>/dev/null)
+        if [ -z "$ut" ]; then fail "telegram auth model (setup)" "could not create probe user"; else
+          mint=$(curl_bearer "$ut" -s -o /dev/null -w '%{http_code}' -X POST -H 'content-type: application/json' -d '{}' "$API/api/webchat/v2/extensions/telegram/pairing/mint")
+          case "$mint" in
+            "$want") pass "telegram auth model ($strategy; mint $mint, as pin ${rev:0:9} declares)";;
+            200|404) fail "telegram auth model (mint $mint)" "pin ${rev:0:9} declares $strategy, which mints $want — the running image is a DIFFERENT auth model than the pin; check ./deploy/verify-pin.sh $container";;
+            *)       fail "telegram auth model (mint HTTP $mint)" "unexpected — check docker logs $container";;
+          esac
+          curl_bearer "$TOK" -s -o /dev/null -X DELETE "$API/api/webchat/v2/admin/users/$uid"   # cleanup probe user
+        fi
+      fi
     fi
   fi
 

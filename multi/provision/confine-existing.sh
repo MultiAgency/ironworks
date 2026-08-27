@@ -18,7 +18,7 @@ set -euo pipefail
 . "$(dirname "$0")/../../deploy/lib/fleet.sh"   # fleet_env_get: ONE env-file quoting rule
 cd "$(dirname "$0")"
 API="${IRONCLAW_API:?set IRONCLAW_API (the multi-tenant instance base URL)}"
-CLIENTS_DIR="${CLIENTS_DIR:-$HOME/.agency/clients}"
+CLIENTS_DIR="${CLIENTS_DIR:-$FLEET_AGENCY_DIR/clients}"
 [ -d "$CLIENTS_DIR" ] || { echo "!! no client registry at $CLIENTS_DIR" >&2; exit 1; }
 
 shopt -s nullglob

@@ -24,11 +24,8 @@
 # Prereqs: MT instance on :3020, one provisioned client. Run:
 #   IRONCLAW_API=http://127.0.0.1:3020 python3 test_tenant_shared_mount_probe.py
 import os, pathlib, sys, json, subprocess
-
-os.environ.setdefault("IRONCLAW_API", "http://127.0.0.1:3020")
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from common import post, model_pin, Checks  # noqa: E402
 
 
@@ -139,10 +136,4 @@ else:
     check("sensitive tenant-shared families (pairing/identity) unchanged across the hostile turn",
           count_before == count_after, f"before={count_before} after={count_after}")
 
-ok = checks.ok if checks.ran else False
-print(f"\nscore: {checks.passed}/{checks.ran} run" + (f", {len(checks.blocked)} BLOCKED" if checks.blocked else "")
-      + (" — tenant-shared mounts unreachable from a member turn" if ok and checks.ran else ""))
-if checks.blocked and not checks.results:
-    print("ALL BEHAVIORAL LEGS BLOCKED — no assertions ran; not a pass. Operator: run on the VM.")
-    sys.exit(2)
-sys.exit(0 if ok else 1)
+checks.finish("tenant-shared mounts unreachable from a member turn")

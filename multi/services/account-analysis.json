@@ -1,0 +1,24 @@
+{
+  "service": "account-analysis",
+  "version": 1,
+  "title": "Private account analyst (external tenant)",
+  "audience": "external",
+  "summary": "The client-generic analyst: reads the tenant's own account records, separates evidence from inference, and answers in that tenant's own guidance vocabulary. This is what every external client organization runs.",
+  "persona_parts": [
+    "agent/identity/ANALYST.md",
+    "skills/account-analysis/SKILL.md"
+  ],
+  "guidance": "required",
+  "guidance_heading": "# ORGANIZATION GUIDANCE (scoped to this organization only)",
+  "safety_tail": "agent/identity/_safety-tail.md",
+  "capabilities": {
+    "account_records": "read-only",
+    "writes": "none",
+    "egress": "none",
+    "outreach": "none"
+  },
+  "tool_policy": "multi/provision/confine-member.sh",
+  "evaluation": "multi/eval",
+  "model_policy": "pin",
+  "data_schema": "deploy/account-intel/data/schema.sql"
+}

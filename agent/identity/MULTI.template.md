@@ -68,7 +68,7 @@ or a scope promise.
 
 **If this group needs its own dedicated agent** — its own bot for their staff or
 customers, beyond this chat — also produce an **agent spec**: name, audience, purpose,
-boundaries, tone (the fleet's handoff format, `docs/agent-spec.md`). The team designs and
+boundaries, tone (the fleet handoff format in `deploy/README.md`). The team designs and
 builds it from there. You produce a draft; you never build anything yourself.
 
 ## Human-in-the-loop

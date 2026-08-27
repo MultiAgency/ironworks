@@ -19,11 +19,11 @@
 #
 # Prereqs: MT instance on :3020, Account Service on :8443, proof-a/proof-b provisioned & seeded.
 # Run:  IRONCLAW_API=http://127.0.0.1:3020 python3 test_adversarial_cross_org.py
-import os, sys, json, pathlib
-os.environ.setdefault("IRONCLAW_API", "http://127.0.0.1:3020")
+import sys, json, pathlib
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-import context_ingress as ing
+import context_ingress as ing  # noqa: E402
+import account_service as asvc  # noqa: E402
 
 clients = ing.load_clients()
 for s in ("proof-a", "proof-b"):
@@ -43,7 +43,7 @@ INJECTION = (
 # Build B's PRIVATE leak markers by reading B's own data AS B (legitimate; only to know what a
 # leak would look like). Exclude anything already in the injection prompt (echoes aren't leaks).
 b_private, b_any = set(), set()
-bc = ing._svc("/list_accounts", B)
+bc = asvc._svc("/list_accounts", B)
 for acct in bc["accounts"]:
     b_any.add(str(acct["account_id"])); b_any.add(str(acct["name"]))
     ctx = ing._get_context(acct["account_id"], B)
@@ -80,7 +80,7 @@ _op, _oc = ing._post_ironclaw, ing._await_completion
 ing._post_ironclaw = lambda body, client=None, attempts=4: (sent.append(json.dumps(body)), _op(body, client, attempts))[1]
 ing._await_completion = lambda d, client=None, deadline=150, interval=2: (lambda r: (finals.append(json.dumps(r)), r)[1])(_oc(d, client, deadline, interval))
 
-from common import Checks   # the tick-list; this file keeps its own verdict line
+from common import Checks  # noqa: E402 the tick-list; this file keeps its own verdict line
 
 checks = Checks()
 check = checks.check

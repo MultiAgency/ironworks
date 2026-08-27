@@ -28,11 +28,8 @@
 # client registry. Run:
 #   IRONCLAW_API=http://127.0.0.1:3020 python3 test_egress_closed.py
 import json, os, pathlib, sys, time, urllib.error, urllib.request
-
-os.environ.setdefault("IRONCLAW_API", "http://127.0.0.1:3020")
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import context_ingress as ing  # noqa: E402
 from common import DEFAULT_API, post, text_of, get  # noqa: E402
 

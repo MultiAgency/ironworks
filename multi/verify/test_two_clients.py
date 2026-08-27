@@ -13,12 +13,10 @@
 #     ../provision/provision.sh proof-a "Proof Client A" -100900011   (data: northwind.json)
 #     ../provision/provision.sh proof-b "Proof Client B" -100900012   (data: vireo.json)
 # Run:  IRONCLAW_API=http://127.0.0.1:3020 python3 test_two_clients.py
-import os, sys, json, pathlib
-
-os.environ.setdefault("IRONCLAW_API", "http://127.0.0.1:3020")
+import sys, json, pathlib
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-import context_ingress as ing
+import context_ingress as ing  # noqa: E402
 
 clients = ing.load_clients()
 missing = [s for s in ("proof-a", "proof-b") if s not in clients]
@@ -35,7 +33,7 @@ def _recording_post(body, client=None, attempts=4):
 ing._post_ironclaw = _recording_post
 
 TELLS = ("FACT", "UNKNOWN", "INFERENCE")   # the persona's evidence-discipline tags
-from common import Checks   # the tick-list; this file keeps its own verdict line
+from common import Checks  # noqa: E402 the tick-list; this file keeps its own verdict line
 
 checks = Checks()
 check = checks.check

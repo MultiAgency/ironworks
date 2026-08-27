@@ -61,7 +61,9 @@ from common import DEFAULT_API, get
 OP = os.environ.get("WEBUI_TOKEN")
 if not OP:
     sys.exit("!! reconciliation: WEBUI_TOKEN (operator) is required — refusing to guess")
-CLIENTS_DIR = pathlib.Path(os.environ.get("CLIENTS_DIR") or os.path.expanduser("~/.agency/clients"))
+CLIENTS_DIR = pathlib.Path(os.environ.get("CLIENTS_DIR")
+                           or pathlib.Path(os.environ.get("AGENCY_DIR")
+                                           or pathlib.Path.home() / ".agency") / "clients")
 
 
 

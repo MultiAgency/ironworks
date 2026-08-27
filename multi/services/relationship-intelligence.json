@@ -1,0 +1,24 @@
+{
+  "service": "relationship-intelligence",
+  "version": 1,
+  "title": "Relationship intelligence (MultiAgency's own record)",
+  "audience": "internal",
+  "summary": "The composition MultiAgency runs on its OWN relationship record: what is committed, what is outstanding, what changed, what is contradictory or stale, and what needs a person. It derives current state from dated activities rather than reading a stored verdict, and gets no privileges over any other service.",
+  "persona_parts": [
+    "agent/identity/RELATIONSHIP_INTELLIGENCE.md",
+    "skills/relationship-record/SKILL.md"
+  ],
+  "guidance": "required",
+  "guidance_heading": "# ORGANIZATION GUIDANCE (scoped to this organization only)",
+  "safety_tail": "agent/identity/_safety-tail.md",
+  "capabilities": {
+    "account_records": "read-only",
+    "writes": "none",
+    "egress": "none",
+    "outreach": "none"
+  },
+  "tool_policy": "multi/provision/confine-member.sh",
+  "evaluation": null,
+  "model_policy": "pin",
+  "data_schema": "deploy/account-intel/data/schema.sql"
+}

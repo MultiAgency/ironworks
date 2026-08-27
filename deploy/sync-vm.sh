@@ -41,8 +41,22 @@ if command -v sha256sum >/dev/null 2>&1; then SHA=(sha256sum); else SHA=(shasum 
 tmp="$(mktemp -d)"
 # One TCP+auth handshake for the whole run instead of six or seven to the same host. The master
 # is closed explicitly before $tmp goes away, so no socket outlives the script.
-SSH_OPTS+=(-o ControlMaster=auto -o ControlPath="$tmp/cm-%C" -o ControlPersist=30)
-trap 'ssh "${SSH_OPTS[@]}" -O exit "$VM_HOST" >/dev/null 2>&1 || true; rm -rf "$tmp"' EXIT
+# The control socket must live somewhere SHORT. A unix socket path is capped at ~104 bytes,
+# and macOS `mktemp -d` returns a ~50-character path under /var/folders/... — adding
+# "/cm-%C" (a 64-char hash) blows the limit and every ssh in this script dies with
+# "ControlPath too long", which reads as an unreachable host rather than a local defect.
+# `~/.ssh/cm-*` is short, private (0700), and swept by the same trap as $tmp.
+CM_DIR="${SSH_CONTROL_DIR:-$HOME/.ssh}"
+mkdir -p "$CM_DIR" && chmod 700 "$CM_DIR"
+CM_PATH="$CM_DIR/cm-ironworks-$$"
+SSH_OPTS+=(-o ControlMaster=auto -o ControlPath="$CM_PATH" -o ControlPersist=30)
+# `[ -n "$tmp" ]` before the rm: correct without it TODAY only because $tmp is assigned above
+# this line and never reassigned. `rm -rf ""` deletes the CWD's contents on some rm builds and
+# nothing on others, and the difference between those two outcomes should not be a line ordering
+# nobody is watching. The socket rm is last and unconditional so the trap's status is its own.
+trap 'ssh "${SSH_OPTS[@]}" -O exit "$VM_HOST" >/dev/null 2>&1 || true
+      [ -n "${tmp:-}" ] && rm -rf "$tmp"
+      rm -f "$CM_PATH"' EXIT
 git ls-files -z > "$tmp/paths.z"
 tr '\0' '\n' < "$tmp/paths.z" > "$tmp/paths.txt"
 # Belt-and-braces on the manifest property: git ls-files already omits gitignored files,
@@ -92,22 +106,53 @@ echo "   identical $n_same · differs $n_diff · missing $n_miss"
 [ "$n_miss" -gt 0 ] && sed 's/^/   MISSING  /' "$tmp/missing.txt"
 [ "$n_diff" -gt 0 ] && sed 's/^/   DIFFERS  /' "$tmp/differs.txt"
 
+# vm_ssh_advisory <what> <remote-script> — run an ADVISORY remote check without letting it
+# abort the sync, and WITHOUT letting "we could not ask" look like "we asked and it is fine".
+#
+# The two checks this wraps are the entire reason the script exists ("your bridge is running
+# pre-change code"), and both used to end in `2>/dev/null || true` / `|| echo "(unavailable)"`.
+# A dropped SSH session therefore printed nothing at all, or printed the same line as a host
+# that answered — so the operator read silence as a clean bill of health. Three states, three
+# distinguishable outputs: the remote script owns healthy vs. not, and this owns could-not-ask.
+#
+# Non-fatal on purpose: a flaky probe must not abort a sync that has otherwise succeeded.
+vm_ssh_advisory() {
+  local _what="$1" _script="$2" _rc=0
+  # shellcheck disable=SC2029  # the remote script is composed client-side on purpose
+  ssh "${SSH_OPTS[@]}" "$VM_HOST" "$_script" 2>"$tmp/ssh-err" || _rc=$?
+  [ "$_rc" -eq 0 ] && return 0
+  echo "   COULD NOT ASK  $_what (ssh exit $_rc) — this is NOT a clean bill of health;" >&2
+  echo "                  nothing was measured. $(tr '\n' ' ' < "$tmp/ssh-err" | cut -c1-200)" >&2
+  return 0
+}
+
 # SYNCED IS NOT LIVE, and this check runs even when everything matches — because a matching
 # file is EXACTLY when a stale process hides. The hash compare cannot see that the bridge
 # loaded multi/seam/*.py at boot and still runs that code in memory.
-ssh "${SSH_OPTS[@]}" "$VM_HOST" '
-  started="$(systemctl show -p ActiveEnterTimestamp --value bridge 2>/dev/null)"
-  newest="$(ls -t /opt/ironworks/multi/seam/*.py 2>/dev/null | head -1)"
-  if [ -n "$started" ] && [ -n "$newest" ]; then
+#
+# Every branch below says something. The original fell through in silence whenever `started` or
+# `newest` was empty, and — worse — reported "not stale" when `date -d` failed to parse the
+# timestamp, which is a measurement that did not happen dressed as a pass.
+# shellcheck disable=SC2016  # only $VM_PATH is meant to expand here; the rest reaches the VM as-is
+vm_ssh_advisory "whether the bridge is running pre-change seam code" '
+  started="$(systemctl show -p ActiveEnterTimestamp --value bridge 2>/dev/null || true)"
+  newest="$(ls -t '"'$VM_PATH'"'/multi/seam/*.py 2>/dev/null | head -1 || true)"
+  if [ -z "$started" ]; then
+    echo "   bridge staleness UNKNOWN: systemd reports no start time for unit \"bridge\""
+  elif [ -z "$newest" ]; then
+    echo "   bridge staleness UNKNOWN: no seam sources found to compare against"
+  else
     s_e=$(date -d "$started" +%s 2>/dev/null || echo 0)
     n_e=$(stat -c %Y "$newest" 2>/dev/null || echo 0)
-    if [ "$s_e" -gt 0 ] && [ "$n_e" -gt "$s_e" ]; then
+    if [ "$s_e" -eq 0 ] || [ "$n_e" -eq 0 ]; then
+      echo "   bridge staleness UNKNOWN: could not read a timestamp (started=$started)"
+    elif [ "$n_e" -gt "$s_e" ]; then
       echo "   STALE PROCESS: bridge started $started but $(basename "$newest") is newer"
       echo "                  -> it is running seam code from before that file landed; restart it"
     else
       echo "   bridge process is newer than the seam files (not stale)"
     fi
-  fi' 2>/dev/null || true
+  fi'
 
 if [ "$n_diff" -eq 0 ] && [ "$n_miss" -eq 0 ]; then
   echo "   VM matches the tracked tree."
@@ -257,14 +302,21 @@ restart_hint
 # Did the push break what was already running? Files landing is not the same as services
 # surviving, and the cheapest moment to learn otherwise is now, not at the next restart.
 # Advisory only: a red line here means look, not that the sync failed.
-ssh "${SSH_OPTS[@]}" "$VM_HOST" '
+# The `[ -n "$b" ] && echo` that used to end this script was its LAST command, so on a host
+# where systemd knows no `bridge` unit the remote script exited 1 — and the outer fallback
+# printed "(health probe unavailable)" after the two service probes had already run and
+# reported. A real result, overwritten by a false one. Every branch prints; the script's exit
+# status now only means "could the host be asked at all".
+# shellcheck disable=SC2016  # the probe body must reach the REMOTE shell unexpanded
+vm_ssh_advisory "post-apply service health" '
   for probe in "MT:3020/api/health" "account-service:8443/health"; do
     name="${probe%%:*}"; hp="${probe#*:}"
     if curl -sf -m 5 "http://127.0.0.1:${hp}" >/dev/null 2>&1; then echo "   health OK   $name"
     else echo "   HEALTH FAIL $name — check it"; fi
   done
   b="$(systemctl is-active bridge 2>/dev/null || true)"
-  [ -n "$b" ] && echo "   bridge      $b"' 2>/dev/null || echo "   (health probe unavailable)"
+  if [ -n "$b" ]; then echo "   bridge      $b"
+  else echo "   bridge      UNKNOWN — systemd reports nothing for unit \"bridge\""; fi'
 
 # Operator time log, if this machine keeps one (untracked). Set TIME_LOG and TIME_LOG_SLUG
 # alongside VM_HOST in ~/.agency/vm.env. UNSET is a deliberate no-op; SET-BUT-UNUSABLE is not —

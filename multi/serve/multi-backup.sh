@@ -13,16 +13,30 @@
 #   restic snapshots; restic restore latest --target /tmp/restore
 #   psql < ironclaw.sql / accounts.sql into fresh containers; copy .agency back.
 set -euo pipefail
-set -a; . "$HOME/.agency/backup.env"; set +a
-# curl_tg keeps the alert bot token off argv. Sourced DEFENSIVELY: under `set -e` a hard `.`
-# on a missing file aborts before a single dump is taken, so the ALERTING path would take down
-# the BACKUP it exists to monitor. Degrade instead — back up without alerting, and say so.
-if [ -f "$(dirname "$0")/../../deploy/lib/curl-private.sh" ]; then
-  . "$(dirname "$0")/../../deploy/lib/curl-private.sh"
-else
-  echo "WARN: deploy/lib/curl-private.sh missing — backing up WITHOUT failure alerting" >&2
-  curl_tg() { return 0; }   # no-op: never let a missing alert helper fail the backup
-fi
+# fleet.sh first: it supplies FLEET_AGENCY_DIR (used on the very next line), the container
+# resolvers below, AND curl_tg — it hard-sources deploy/lib/curl-private.sh by absolute path.
+# That makes curl-private.sh a hard dependency of this script from this line onward.
+. "$(dirname "$0")/../../deploy/lib/fleet.sh"
+# `set -a` IS REQUIRED and this is the file that proves why (CONTRIBUTING.md, "Sourcing an
+# env file"): backup.env carries RESTIC_REPOSITORY and RESTIC_PASSWORD, which `restic` reads
+# from its environment and nowhere else. NEITHER NAME APPEARS ANYWHERE BELOW — the only
+# variables this script mentions are the optional BACKUP_ALERT_* pair — so read on its own
+# it looks like a plain-source candidate, and converting it would break every backup silently.
+set -a; . "$FLEET_AGENCY_DIR/backup.env"; set +a
+# curl_tg (which keeps the alert bot token off argv) comes from fleet.sh above.
+#
+# THERE WAS A DEFENSIVE `[ -f ] || curl_tg() { return 0; }` BLOCK HERE, and it was dead. Its
+# rationale was sound — under `set -e` a hard `.` on a missing file aborts before a single dump
+# is taken, so the ALERTING path would take down the BACKUP it exists to monitor — but fleet.sh,
+# sourced three lines up, hard-sources that same file by absolute path with no guard. The abort
+# it guarded against already happened above it, before `mktemp`, before either `pg_dump`, and
+# before `trap _on_exit EXIT`, so the fallback could never run and the degradation it promised
+# could not occur.
+#
+# It is deleted rather than restored, because restoring it means making fleet.sh's source
+# defensive, and a missing curl-private.sh would then turn `curl_bearer` into a silent no-op for
+# every provisioning and teardown script in the fleet — a far worse failure than this one. A
+# backup that cannot start is covered where a backup that never runs is covered: multi-watchdog.sh.
 
 WORK=$(mktemp -d); chmod 700 "$WORK"
 # ONE exit handler: clean the tempdir AND alert on failure. A backup that RUNS but FAILS
@@ -42,9 +56,13 @@ _on_exit() {
 }
 trap _on_exit EXIT
 
-# instance project was renamed mt-experiment -> multi; match either container generation
-docker exec "$(docker ps -qf 'name=(multi|mt-experiment)-db')" pg_dump -U postgres ironclaw > "$WORK/ironclaw.sql"
-docker exec "$(docker ps -qf name=account-db)"                 pg_dump -U postgres accounts > "$WORK/accounts.sql"
+# Container names come from the fleet resolvers, sourced at the top. That source is NOT
+# defensive the way curl-private.sh is, and the asymmetry is deliberate: a missing alert helper
+# costs alerting, whereas a wrong container name costs the BACKUP — `docker ps -qf` exits 0 on
+# no match, so the previous shape degraded to `docker exec "" pg_dump`, which could leave a
+# zero-byte dump in a snapshot that looks complete. Fail loudly instead.
+docker exec "$(fleet_mt_db_container)"      pg_dump -U postgres ironclaw > "$WORK/ironclaw.sql"
+docker exec "$(fleet_account_db_container)" pg_dump -U postgres accounts > "$WORK/accounts.sql"
 
 # /opt/git = the bare git mirrors. /opt/ironworks = deployed scripts + recovery runbook.
 # Edit this file in the tree, not on the box: `sync-vm.sh --apply` pushes the tracked tree over
@@ -56,9 +74,9 @@ docker exec "$(docker ps -qf name=account-db)"                 pg_dump -U postgr
 # LOAD-BEARING PRECONDITION: both MASTER_KEY and RESTIC_PASSWORD must live off-box. Excluding
 # them WITHOUT off-box custody makes disk-loss recovery impossible — never remove these excludes
 # without confirming the off-box copies exist.
-restic backup "$WORK" "$HOME/.agency" /opt/git /opt/ironworks \
+restic backup "$WORK" "$FLEET_AGENCY_DIR" /opt/git /opt/ironworks \
   --exclude /opt/ironworks/multi/instance/.env \
-  --exclude "$HOME/.agency/backup.env" \
+  --exclude "$FLEET_AGENCY_DIR/backup.env" \
   --tag multi-serve
 # Retention ceiling ~90 days:
 # 14 daily + 8 weekly + 3 monthly — the oldest kept monthly is ≈90 days old.

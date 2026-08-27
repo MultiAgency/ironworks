@@ -7,9 +7,7 @@ Needs: the MT instance + Account Service up, and proof-a / proof-b provisioned w
 slug-bound guidance files in ~/.agency/clients (see multi/clients/GUIDANCE.template.md).
 Run: IRONCLAW_API=http://127.0.0.1:3020 python3 test_client_guidance_live.py
 """
-import os, sys, pathlib
-
-os.environ.setdefault("IRONCLAW_API", "http://127.0.0.1:3020")
+import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "seam"))
 import context_ingress as ing
 
@@ -17,7 +15,7 @@ import context_ingress as ing
 # external client's answer (their synthetic guidance never mentions them).
 FORBIDDEN = ("MultiAgencyHQ", "MultiAgency", "Aide", "Multiplex")
 
-from common import Checks   # the tick-list; this file keeps its own verdict line
+from common import Checks  # noqa: E402 the tick-list; this file keeps its own verdict line
 
 checks = Checks()
 check = checks.check

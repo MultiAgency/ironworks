@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Move one agent container to a different ironclaw image, preserving its
 # volume, port, restart policy, and environment. Written for the
-# repin (upstream #7464 moved telegram from WebGeneratedCode pairing to device-link).
-# The fleet now pins v1.3.0 (post-#7464); the deep-link intake tool was retired —
-# device-link is the go-forward personal-connection ceremony.
+# repin of any rev — it was first written for the #7464 telegram strategy change,
+# which is history rather than a property of this tool. The pin of record is
+# IRONCLAW_PIN and is deliberately not restated here (UPGRADE.md); the telegram
+# auth model that comes with it is asserted by `doctor.sh --deep`, not assumed.
 #
 #   ./deploy/migrate-image.sh ironclaw-ops ironclaw:pinned
 #   ./deploy/migrate-image.sh ironclaw-ops ironclaw:pinned --rotate-token
@@ -22,7 +23,7 @@ set -euo pipefail
 C="${1:?usage: migrate-image.sh <container> <image> [--rotate-token]}"
 IMAGE="${2:?usage: migrate-image.sh <container> <image> [--rotate-token]}"
 ROTATE=0
-case "${3:-}" in --rotate-token) ROTATE=1 ;; '') ;; *) echo "!! unknown arg: $3"; exit 2 ;; esac
+case "${3:-}" in --rotate-token) ROTATE=1 ;; '') ;; *) echo "!! unknown arg: $3" >&2; exit 2 ;; esac
 REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 . "$REPO_DIR/deploy/lib/curl-private.sh"   # curl_bearer: operator token off argv
 . "$REPO_DIR/deploy/lib/fleet.sh"
@@ -36,7 +37,7 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # (doctor.sh's stray-seed sweep is the post-migration runtime backstop).
 IRONCLAW_SRC="${IRONCLAW_SRC:-/opt/ironclaw-src}"
 if [ -f "$REPO_DIR/IRONCLAW_PIN" ] && git -C "$IRONCLAW_SRC" rev-parse --git-dir >/dev/null 2>&1; then
-  REV="$(cut -d' ' -f1 "$REPO_DIR/IRONCLAW_PIN")"
+  REV="$(fleet_ironclaw_pin)"
   if git -C "$IRONCLAW_SRC" rev-parse -q --verify "$REV^{commit}" >/dev/null; then
     miss=""
     git -C "$IRONCLAW_SRC" grep -q 'system/prompts/default-system\.md' "$REV" -- crates/ \
@@ -46,9 +47,9 @@ if [ -f "$REPO_DIR/IRONCLAW_PIN" ] && git -C "$IRONCLAW_SRC" rev-parse --git-dir
     git -C "$IRONCLAW_SRC" grep -q '/data/ironclaw-reborn' "$REV" -- docker/reborn/entrypoint.sh \
       || miss="$miss entrypoint-home-default"
     if [ -n "$miss" ]; then
-      echo "!! persona surface moved upstream at pin ${REV:0:9} (missing:$miss)"
-      echo "   $FLEET_PERSONA_DST is no longer derivable from the pinned source."
-      echo "   Locate the persona path in the pinned source and update deploy/lib/fleet.sh before migrating."
+      echo "!! persona surface moved upstream at pin ${REV:0:9} (missing:$miss)" >&2
+      echo "   $FLEET_PERSONA_DST is no longer derivable from the pinned source." >&2
+      echo "   Locate the persona path in the pinned source and update deploy/lib/fleet.sh before migrating." >&2
       exit 1
     fi
     echo "   persona-surface gate: OK at pin ${REV:0:9}"
@@ -77,8 +78,8 @@ case "$img_rev" in
   "$REV")
     echo "   image provenance: OK ($IMAGE built from pin ${REV:0:9})" ;;
   *)
-    echo "!! image provenance MISMATCH: $IMAGE was built from ${img_rev:0:9}, but IRONCLAW_PIN is ${REV:0:9}."
-    echo "   Migrating would deploy a rev the pin does not describe. Retag/rebuild, or update IRONCLAW_PIN first."
+    echo "!! image provenance MISMATCH: $IMAGE was built from ${img_rev:0:9}, but IRONCLAW_PIN is ${REV:0:9}." >&2
+    echo "   Migrating would deploy a rev the pin does not describe. Retag/rebuild, or update IRONCLAW_PIN first." >&2
     exit 1 ;;
 esac
 fi
@@ -105,7 +106,7 @@ PY
 }
 NEW_TOK=""
 if [ "$ROTATE" = 1 ]; then
-  grep -q '^IRONCLAW_REBORN_WEBUI_TOKEN=' "$envfile" || { echo "!! $C has no IRONCLAW_REBORN_WEBUI_TOKEN in its env — nothing to rotate"; exit 1; }
+  grep -q '^IRONCLAW_REBORN_WEBUI_TOKEN=' "$envfile" || { echo "!! $C has no IRONCLAW_REBORN_WEBUI_TOKEN in its env — nothing to rotate" >&2; exit 1; }
   NEW_TOK=$(openssl rand -hex 32)
   replace_token_line "$envfile" "$NEW_TOK"
   echo "   rotating operator token (fresh token in the recreated container)"
@@ -132,7 +133,7 @@ if docker logs "$C" --since 2m 2>&1 | grep -q "unknown variant"; then
     "apk add -q sqlite; sqlite3 -readonly /data/ironclaw-reborn/hosted-single-tenant-volume/reborn-local-dev.db \
      \"SELECT path FROM root_filesystem_entries WHERE path LIKE '/system/extensions/.installations/installations/%' AND CAST(contents AS TEXT) LIKE '%telegram%';\"" \
     | sed 's|.*/sha256_||; s|\.json||' | head -1)
-  echo "!! stored telegram install doesn't deserialize on $IMAGE."
+  echo "!! stored telegram install doesn't deserialize on $IMAGE." >&2
   if [ -z "$hash" ]; then
     # Empty hash = the locator query matched nothing (schema/path drift). DO NOT print a
     # DELETE recipe — an empty hash yields `LIKE '%%'`, which matches EVERY row and would wipe
@@ -152,14 +153,17 @@ fi
 mint=$(curl_bearer "$tok" -s -o /dev/null -w '%{http_code}' --max-time 10 -X POST \
   -H 'content-type: application/json' -d '{}' \
   "http://127.0.0.1:$port/api/webchat/v2/extensions/telegram/pairing/mint")
-# 200 = telegram registers a deep-link pairing service (pre-#7464 pin); 404 = device-link
-# build (#7464+) where telegram registers NO pairing service, so mint 404s for
-# extension_id=telegram — the generic route still exists, the registry decides per-extension
-# (channel_pairing.rs). Both are healthy.
+# Both codes are healthy here; WHICH one is right is a property of the PINNED REV, not a
+# constant. Telegram's `[channel.connection] strategy` decides whether it registers a pairing
+# service: `web_generated_code` does (mint 200), `device_link` does not (404 for
+# extension_id=telegram only — the generic route still exists and the registry decides
+# per-extension, channel_pairing.rs). Upstream has moved this BOTH ways (#7464 to device_link,
+# #7766 back), so this script reports which it saw and `doctor.sh --deep` is what asserts the
+# running image AGREES with the pin.
 case "$mint" in
-  200) echo "   pairing: telegram deep-link mint available (HTTP 200)";;
-  404) echo "   pairing: device-link build (telegram registers no pairing service — expected)";;
-  *)   echo "!! pairing mint returned HTTP $mint — check docker logs $C"; exit 1;;
+  200) echo "   pairing: telegram registers a pairing service (mint HTTP 200)";;
+  404) echo "   pairing: telegram registers no pairing service (mint HTTP 404)";;
+  *)   echo "!! pairing mint returned HTTP $mint — check docker logs $C" >&2; exit 1;;
 esac
 if [ "$ROTATE" = 1 ]; then
   sec="$(fleet_agent_env "${C#ironclaw-}")"

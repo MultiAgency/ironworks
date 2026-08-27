@@ -38,7 +38,7 @@ def upsert_account(cur, org, a):
          acc.get("stated_problem"), acc.get("current_tooling"), acc.get("budget"),
          acc.get("timeline"), acc.get("decision_process"), acc.get("economic_buyer"),
          # Recorded team facts (migrate-002): the render path surfaces these and
-         # test_ingress_fixes.py asserts they reach the model, but the seeder never
+         # test_envelope.py asserts they reach the model, but the seeder never
          # persisted them — so a book could not supply what the analyst is told to trust.
          acc.get("owner"), acc.get("stage"), acc.get("value_band"),
          # migrate-003: whatever keys THIS partner's book needs. The seam renders them in the

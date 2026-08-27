@@ -21,7 +21,7 @@ HERE = pathlib.Path(__file__).resolve().parent
 FIXTURES = HERE / "fixtures" / "clients"
 sys.path.insert(0, str(HERE.parent / "seam"))
 
-from common import Checks   # the tick-list; this file keeps its own verdict line below
+from common import Checks  # noqa: E402 the tick-list; this file keeps its own verdict line below
 
 checks = Checks()
 check = checks.check
@@ -52,7 +52,6 @@ with tempfile.TemporaryDirectory() as td:
     import os
     os.environ["CLIENTS_DIR"] = str(tdp)
     # import-time requirement only; nothing in this test performs a call
-    os.environ.setdefault("IRONCLAW_API", "http://127.0.0.1:3020")
     import context_ingress as ing
     clients = ing.load_clients()
 

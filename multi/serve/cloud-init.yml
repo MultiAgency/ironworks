@@ -5,7 +5,8 @@
 #     --ssh-key <your-key-name> --user-data-from-file /tmp/ci.yml
 # (awk keeps only key-type + material: a stray newline or odd comment in the .pub would
 #  otherwise break the YAML — it did once. Validate: python3 -c "import yaml;yaml.safe_load(open('/tmp/ci.yml'))")
-# Rebuildable from this file alone; SETUP.md drives what comes after (image, stacks, services).
+# Rebuildable from this file alone. What comes after — image, stacks, units — is
+# deploy/README.md (lifecycle and host recovery) and README.md in this directory.
 # Hardening: ufw deny-in (SSH only), key-only SSH, unattended upgrades, non-root `multi` user.
 
 package_update: true

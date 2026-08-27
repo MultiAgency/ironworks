@@ -17,7 +17,7 @@
 name: multi
 services:
   db:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${PGPW:?mint in multi/instance/.env (openssl rand -hex 24)}
@@ -46,7 +46,7 @@ services:
 
   ironclaw:
     # Images are built as rev-named tags (ironclaw:<9-char rev> from IRONCLAW_PIN);
-    # ironclaw:main is retagged to the current pin. See deploy/UPGRADE.md.
+    # ironclaw:main is retagged to the current pin. See deploy/README.md.
     image: ${IRONCLAW_IMAGE:-ironclaw:main}
     container_name: multiclaw     # the single multi-tenant client instance (many sealed members, one box)
     restart: unless-stopped

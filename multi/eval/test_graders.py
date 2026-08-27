@@ -7,7 +7,6 @@ fail, and both verdicts are asserted. If a grader is loosened until everything p
 file goes red.
 """
 import sys, pathlib
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
 from cases import (PASS, FAIL, g_contradiction, g_stale_champion, g_confabulation,
                    g_size_distractor, g_buried_signal, g_injection, g_expired_timeline,
                    g_duplicates, g_ranking_quality, g_evidence_discipline, CASES)
@@ -132,7 +131,7 @@ def check_real_answers(failures):
         print(f"  {'ok' if ok else 'PROBLEM':8} {case_id:22} {verdict}")
 
 
-def main():
+def test_every_grader_accepts_a_good_answer_and_rejects_a_bad_one():
     failures = []
     for grader, good, bad in PAIRS:
         name = grader.__name__
@@ -144,21 +143,35 @@ def main():
             failures.append(f"{name}: BAD answer graded {v_bad} ({why_bad}) — grader cannot fail")
         status = "ok" if (v_good == PASS and v_bad == FAIL) else "PROBLEM"
         print(f"  {status:8} {name:22} good→{v_good:6} bad→{v_bad}")
-
-    check_real_answers(failures)
-
-    ids = [c["id"] for c in CASES]
-    if len(ids) != len(set(ids)):
-        failures.append("duplicate case ids")
     print(f"\n  {len(CASES)} cases, {len(PAIRS)} graders self-tested")
+    assert not failures, "GRADER SELF-TEST FAILED:\n  - " + "\n  - ".join(failures)
 
-    if failures:
-        print("\nGRADER SELF-TEST FAILED:")
-        for f in failures:
-            print(f"  - {f}")
-        sys.exit(1)
-    print("ALL GRADER SELF-TESTS PASS — every grader accepts a good answer and rejects a bad one")
+
+def test_real_model_output_is_still_graded_correct():
+    failures = []
+    check_real_answers(failures)
+    assert not failures, "GRADER SELF-TEST FAILED:\n  - " + "\n  - ".join(failures)
+
+
+def test_case_ids_are_unique():
+    ids = [c["id"] for c in CASES]
+    assert len(ids) == len(set(ids)), "duplicate case ids"
 
 
 if __name__ == "__main__":
-    main()
+    # These were once a single `main()` with no `test_*` function anywhere in the file. CI moved
+    # from naming this script explicitly to `./deploy/ironworks test`, i.e. to pytest — which
+    # collected ZERO items here and reported success, so a grader loosened until everything
+    # passed would have gone green on every push. Discovered, not listed, for the reason
+    # `test_suite_contract.py` gives: a hand-maintained call list drifts.
+    _failed = []
+    for _name, _fn in list(globals().items()):
+        if _name.startswith("test_") and callable(_fn):
+            try:
+                _fn()
+            except AssertionError as _e:
+                _failed.append(f"{_name}: {_e}")
+    if _failed:
+        print("\n" + "\n".join(_failed))
+        sys.exit(1)
+    print("ALL GRADER SELF-TESTS PASS — every grader accepts a good answer and rejects a bad one")

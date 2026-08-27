@@ -1,7 +1,7 @@
 # The seam bridge: Telegram groups -> per-client trusted context ingress -> MT IronClaw.
-# Runs as the non-root `multi` user; env (tokens, registry, state paths) comes from
-# /home/multi/.agency/bridge.env (chmod 600).
-# Install: cp to /etc/systemd/system/, systemctl daemon-reload, systemctl enable --now bridge
+# Runs as the non-root `multi` user. This checked-in unit is the default multi-user rendering.
+# For any other AGENCY_DIR, install a rendered copy with render-bridge-service.py; all four
+# path-bearing directives must move together.
 [Unit]
 Description=MultiAgency seam bridge (multi/seam/telegram_bridge.py)
 After=network-online.target docker.service
@@ -10,9 +10,11 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=multi
-WorkingDirectory=/opt/ironworks/multi/seam
+WorkingDirectory=/opt/ironworks
 EnvironmentFile=/home/multi/.agency/bridge.env
-ExecStart=/usr/bin/python3 -u /opt/ironworks/multi/seam/telegram_bridge.py
+# `/usr/bin/env` makes the rendered root authoritative even if an old bridge.env still carries
+# an AGENCY_DIR entry. EnvironmentFile and BindPaths are not environment-interpolated by systemd.
+ExecStart=/usr/bin/env AGENCY_DIR=/home/multi/.agency /usr/bin/python3 -u -m multi.seam.telegram_bridge
 Restart=always
 RestartSec=5
 # stdlib-only process holding every client's tokens; keep it boxed in
@@ -20,6 +22,7 @@ NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=tmpfs
 BindPaths=/home/multi/.agency
+ReadWritePaths=/home/multi/.agency
 BindReadOnlyPaths=/opt/ironworks
 PrivateTmp=true
 

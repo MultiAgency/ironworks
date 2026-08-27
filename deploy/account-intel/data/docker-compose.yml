@@ -4,7 +4,7 @@
 name: multiagency-data
 services:
   account-db:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     restart: unless-stopped
     environment:
       # No default password: dev-up.sh and prod-up.sh both mint a strong one into
@@ -59,9 +59,10 @@ services:
       # service CMD, seed.py FIXTURE_DIR, dev-up.sh REAL_DATA_DIR all live under
       # /app/deploy/account-intel.
       - ..:/app/deploy/account-intel:ro
-      - ~/.agency/account-identities:/identities:ro
+      - ${AGENCY_DIR:-${HOME}/.agency}/account-identities:/identities:ro
     # Plain HTTP on the private network — reached only by the trusted backend, not by the model.
-    # (TLS-with-internal-CA was for the DEFERRED WASM egress path; see extension/README.md.)
+    # (TLS-with-internal-CA was for the WASM egress path, which this runtime forbids outright:
+    #  multi/README.md, "Why the adapter exists, and why not a tool extension (do not reopen)".)
     ports:
       - "127.0.0.1:8443:8443"     # reached by the trusted backend over localhost / the private network
     networks: [multiagency-data]

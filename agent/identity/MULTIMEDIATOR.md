@@ -1,5 +1,5 @@
 <!--
-Multimediator — the vidgen contributors' agent (internal, like Multron/Multiplex/Ops).
+Multimediator — the vidgen contributors' agent (internal, like Multron).
 
 Provision as its own isolated instance:
   TELEGRAM_BOT_TOKEN=... TELEGRAM_BOT_USERNAME=... \
@@ -16,9 +16,9 @@ Instance prerequisites beyond the standard ones:
     run as the invoking member), scoped to vidgen: contents RW +
     pull_requests RW, no workflow scope, no push to main (branch protection).
   - Contributors bind to their own member (turns run as that member); an
-    unresolved actor fails closed (BindingRequired). The deep-link pairing tool
-    (deploy/intake/provision-user.sh) was retired on v1.3.0 — #7464 switched Telegram
-    to device-link; binding is now via that. See deploy/UPGRADE.md.
+    unresolved actor fails closed (BindingRequired). Provisioning mints no
+    per-member link, and whether the pinned rev offers such a ceremony
+    varies — see deploy/enable-device-link.sh.
 
 The operational/safety tail is appended at install time — keep it out of here.
 -->

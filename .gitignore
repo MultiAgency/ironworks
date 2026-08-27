@@ -34,19 +34,10 @@ wrangler.local.jsonc
 # Internal records
 admin/
 
-# Names a live host. The units beside it ship, so they can be drift-checked.
-multi/serve/SETUP.md
-
-# Partner-specific commercial content. Tooling ships; personas written for one partner
-# do not. Provision from a local copy via PERSONA_SOURCE.
-agent/identity/IDEA_SCOUT.md
-
-# Positioning about an upstream project we depend on, not documentation. Its durable
-# technical claims are already in README.md and multi/README.md.
-docs/multi-tenant-cross-agent-collaboration.md
-
-# Retired experiments. broker/ publishes a deny-list where confine-member.sh uses an
-# allowlist; hq/ drove state that has no provisioning path here, so no reader could run it.
+# Retired experiments, kept out of the published tree. Confinement of record is
+# multi/provision/confine-member.sh; nothing here is on a serving path. The rules stay
+# until the directories are removed — a path that is neither tracked nor ignored is
+# invisible to every gate (deploy/gate-coverage.sh).
 deploy/broker/
 deploy/hq/
 
@@ -63,20 +54,19 @@ multi/verify/test_instr_live.py
 multi/verify/verify_live_isolation.py
 deploy/repoint-hostname.sh
 
-# Personas of agents that no longer run. These are data, not code, and provision-agent.sh
-# revives one from a local copy via PERSONA_SOURCE — the same arrangement as IDEA_SCOUT
-# above, so nothing is lost operationally. What a published inventory should describe is the
-# fleet that IS, not the one that was. INTAKE is the clearest case: its experiment's tooling
-# already left this repo, so the persona documented something a reader cannot find.
-agent/identity/INTAKE.md
-agent/identity/MULTIPLEX.md
-agent/identity/OPS.md
-
-# Unlanded: nothing on the client path calls it. Ship it when its caller ships.
-multi/seam/handoff.py
-multi/seam/test_handoff_2b.py
-
 # Build / dependency / tool output
+# `pyproject.toml` wires a custom build_py (build_support.BuildPy). Measured 2026-08-26, in an
+# isolated venv: `pip install .` writes build/lib/ — copied seam sources, whose C901s failed
+# `ruff check .`; `pip install -e .` writes no build/ at all. But the egg_info step runs in BOTH
+# paths, so ironworks.egg-info/ appears either way. Untracked and unignored, each was invisible
+# to every gate that takes its file set from the index while still breaking the ones reading disk.
+#
+# Deliberately NO dist/ entry: nothing in this repo invokes a command that creates one. An ignore
+# rule for a path nothing generates is a rule nobody can verify, and it is not free — "ignored" is
+# an accepted state, so gate-coverage could never flag a future legitimately-tracked dist/ that
+# this had silently swallowed.
+build/
+*.egg-info/
 **/*.wasm
 target/
 node_modules/
@@ -90,6 +80,9 @@ __pycache__/
 # which is the tool's decision rather than a recorded one.
 .pytest_cache/
 .ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
 
 # Logs & OS
 *.log

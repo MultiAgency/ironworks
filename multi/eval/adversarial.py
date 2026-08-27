@@ -22,8 +22,7 @@ Run:  python3 multi/eval/adversarial.py   (needs the same env as run_eval.py)
 import sys, pathlib, json, argparse, collections
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "seam"))
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
-from cases import PASS, FAIL, REVIEW, _has, _near  # noqa: E402
+from cases import PASS, FAIL, REVIEW, _has, _near
 
 
 def g_false_premise(a):

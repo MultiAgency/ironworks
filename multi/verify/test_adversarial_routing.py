@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# ADVERSARIAL routing test for the telegram bridge — complements test_ingress_fixes.py's
+# ADVERSARIAL routing test for the telegram bridge — complements test_telegram_bridge.py's
 # routing/no-cross-leak coverage (which already proves correct routing, fail-closed-on-
 # unregistered, per-gid client mapping, token no-cross-leak, gate, redaction). This adds the
 # hostile / malformed / misconfig edges that a real attacker or a provisioning slip would hit:
@@ -13,12 +13,10 @@
 #
 # Pure-function test of summoned()/load_groups(); no live Telegram, no real registry touched.
 import os, sys, pathlib, tempfile
-os.environ.setdefault("TELEGRAM_BOT_TOKEN", "dummy-bot-token-for-import")
-os.environ.setdefault("IRONCLAW_API", "http://127.0.0.1:3020")
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-import context_ingress as ing
-import telegram_bridge as tb
+import context_ingress as ing  # noqa: E402
+import telegram_bridge as tb  # noqa: E402
 
 def cc(slug, gid):
     # persona supplied explicitly: ClientConfig has no usable default persona
@@ -26,7 +24,7 @@ def cc(slug, gid):
                             name=slug, telegram_group_id=gid, persona=f"persona-{slug}")
 
 GROUPS = {"-100111": cc("acme", "-100111"), "-100222": cc("bravo", "-100222")}
-from common import Checks   # the tick-list; this file keeps its own verdict line below
+from common import Checks  # noqa: E402 the tick-list; this file keeps its own verdict line below
 
 checks = Checks()
 check = checks.check

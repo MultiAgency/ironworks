@@ -14,9 +14,24 @@
   "kv_namespaces": [
     { "binding": "THREADS", "id": "<your-kv-namespace-id>" }
   ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "VISITOR_SESSIONS", "class_name": "VisitorSession" }
+    ]
+  },
+  // A Durable Object class needs a MIGRATION, not an `exports` block. There is no top-level
+  // `exports` field in wrangler's config schema (checked against 4.90.0) — unknown top-level
+  // keys only produce "Unexpected fields found in ...", so this looked accepted while
+  // `wrangler deploy` aborted on the VISITOR_SESSIONS binding for a class with no migration
+  // tag. `new_sqlite_classes` is what makes the storage SQLite-backed; `new_classes` would give
+  // the older key-value backend.
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["VisitorSession"] }
+  ],
   "vars": {
     "IRONCLAW_API": "https://your-secretary-backend.example.com",
-    "TEAM_CHAT_ID": "-100XXXXXXXXXXXXX"
+    "TEAM_CHAT_ID": "-100XXXXXXXXXXXXX",
+    "SECRETARY_RATE_LIMIT": "6"
     // MODEL is intentionally unset. worker.js imports the repo-root MODEL_PIN as a text
     // module (see "rules" above) and parses it at build time, so the pin really does govern
     // — this comment used to claim a runtime fallback that could not exist, and the literal

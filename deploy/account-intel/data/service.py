@@ -14,38 +14,75 @@ from flask import Flask, request, jsonify
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
+from service_guards import (duplicate_orgs, insecure_mode, like_contains, new_ref, safe_error,
+                            validate_identity_map)
+from migrations import status as migration_status
+
 DSN = os.environ["ACCOUNT_DB_DSN"]                 # DB creds live here only
 # {token: org_id} — one credential maps to exactly one org. Two sources, merged:
 #   ACCOUNT_IDENTITIES        env JSON — the static (dev/demo) base, fixed at startup
 #   ACCOUNT_IDENTITIES_FILE   path to a JSON file, HOT-RELOADED on mtime change — so
 #                             provisioning a client org never restarts the service
 # Fail closed: refuse to start with neither configured; unknown token -> 401 per request.
-ENV_IDENTITIES = json.loads(os.environ.get("ACCOUNT_IDENTITIES") or "{}")
+ENV_IDENTITIES = validate_identity_map(
+    json.loads(os.environ.get("ACCOUNT_IDENTITIES") or "{}"), "ACCOUNT_IDENTITIES")
 IDENTITIES_FILE = os.environ.get("ACCOUNT_IDENTITIES_FILE", "")
 if not ENV_IDENTITIES and not IDENTITIES_FILE:
     raise RuntimeError(
         "no identity source — the Account Service refuses to start without one (fail closed). "
         "Set ACCOUNT_IDENTITIES ({\"<token>\": \"<org_id>\"} JSON) and/or ACCOUNT_IDENTITIES_FILE.")
-_file_ident = {"mtime": None, "map": {}}
+_file_ident = {"mtime": None, "map": {}, "loaded": False, "error": None}
+
+def _validated(doc, path):
+    """Schema-check a freshly read identity map before it replaces the live one, and report
+    duplicate orgs. The rules themselves live in service_guards so they are testable without
+    flask/psycopg installed; this wrapper is the logging half."""
+    doc = validate_identity_map(doc, path)
+    dupes = duplicate_orgs(doc)
+    if dupes:
+        print(f"identities: {len(dupes)} org(s) have MORE THAN ONE live token "
+              f"({', '.join(dupes)}) — a mid-rotation state or a failed re-provision left "
+              "authority behind. Deregister the stale token.", flush=True)
+    return doc
+
 
 def _identities():
-    """The live {token: org} map. File entries override env entries. A malformed or missing
-    file never takes identities down: keep the last good file map and retry next request."""
+    """The current {token: org} map. File entries override env entries.
+
+    A failed file reload invalidates the file-backed authority immediately. Keeping a stale map
+    while merely logging the failure lets removed credentials continue authenticating and makes
+    `/ready` claim the source is healthy. Clear it, report not-ready, and retry on every request
+    until a valid current file is loaded.
+    """
     if IDENTITIES_FILE:
         try:
-            mtime = os.stat(IDENTITIES_FILE).st_mtime_ns
+            st = os.stat(IDENTITIES_FILE)
+            mtime = st.st_mtime_ns
             if mtime != _file_ident["mtime"]:
+                # The file holds every client's org credential. Group- or world-readable is a
+                # finding, not a fatality: refusing to load would take every client down over a
+                # mode bit, which trades a confidentiality risk for a certain outage.
+                loose = insecure_mode(st.st_mode)
+                if loose is not None:
+                    print(f"identities: {IDENTITIES_FILE} is mode {loose:o} — it holds every "
+                          "client's org token and must be 0600. chmod it.", flush=True)
                 with open(IDENTITIES_FILE) as f:
-                    _file_ident["map"] = json.load(f)
+                    _file_ident["map"] = _validated(json.load(f), IDENTITIES_FILE)
                 _file_ident["mtime"] = mtime
+                _file_ident["loaded"] = True
+                _file_ident["error"] = None
         except FileNotFoundError:
-            # keep the last good map — a briefly-absent file (backup restore, editor
-            # move+rename, mount race) must never 401 every live client at once
             if _file_ident["mtime"] is not None:
-                print("identities file missing, keeping previous map", flush=True)
-                _file_ident["mtime"] = None       # re-log once; reload when it reappears
-        except (ValueError, OSError) as e:                  # keep last good map
-            print(f"identities file unreadable, keeping previous: {e}", flush=True)
+                print("identities file missing, invalidating file-backed authority", flush=True)
+            _file_ident.update(mtime=None, map={}, loaded=False,
+                               error="identity_file_missing")
+        except (ValueError, OSError) as e:
+            print(f"identities file unreadable, invalidating file-backed authority: {e}",
+                  flush=True)
+            # `mtime=None` forces a retry even on filesystems whose timestamp did not advance
+            # between the malformed write and its correction.
+            _file_ident.update(mtime=None, map={}, loaded=False,
+                               error="identity_file_invalid")
     return {**ENV_IDENTITIES, **_file_ident["map"]}
 
 MAX_MATCHES = 10
@@ -78,11 +115,52 @@ def _missing(acct: dict):
 
 @app.get("/health")
 def health():
+    """Liveness for the trusted seam and the host watchdog. The FAILURE path is the one that
+    matters here: `str(e)` on a psycopg error carries the connection string — host, database,
+    user, and on some failure modes the password — and /health is the one route reachable with
+    no credential at all. So the caller gets a stable code it can act on, and the diagnostic
+    goes to the process log beside a correlation id that ties the two together.
+
+    The correlation id is the whole point of not simply dropping the detail: an operator
+    reading `{"ok": false, "error": "backend_unavailable", "ref": "…"}` can find the exact
+    exception in the log, and nobody else learns anything."""
     try:
         with _conn() as c: c.execute("SELECT 1")
         return jsonify({"ok": True})
     except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 500
+        ref = new_ref()
+        # repr, not str: the exception TYPE is the fastest signal in a log, and neither form
+        # leaves this process.
+        print(f"health check failed ref={ref}: {type(e).__name__}: {e!r}", flush=True)
+        body, status = safe_error("backend_unavailable", ref)
+        return jsonify(body), status
+
+
+@app.get("/ready")
+def ready():
+    """Readiness: the service can authenticate callers and serve the committed DB contract."""
+    try:
+        _identities()
+        # If a file source is configured, its CURRENT load must be good. A static env identity
+        # cannot turn a failed file reload green: doing so would conceal stale/revoked file-backed
+        # authority during mixed-source development or credential rotation.
+        identity_ready = (not IDENTITIES_FILE or
+                          (_file_ident["loaded"] and _file_ident["error"] is None))
+        with _conn() as c:
+            schema = migration_status(c)
+        problems = list(schema["problems"])
+        if not identity_ready:
+            problems.append(_file_ident["error"] or "identity_source_not_loaded")
+        body = {"ok": not problems, "schema_ready": schema["ready"],
+                "identity_ready": identity_ready, "problems": problems,
+                "expected_migrations": [m["version"] for m in schema["expected"]],
+                "applied_migrations": sorted(schema["applied"])}
+        return jsonify(body), 200 if body["ok"] else 503
+    except Exception as e:
+        ref = new_ref()
+        print(f"readiness check failed ref={ref}: {type(e).__name__}: {e!r}", flush=True)
+        body, _ = safe_error("not_ready", ref)
+        return jsonify(body), 503
 
 @app.get("/find_account")
 def find_account():
@@ -91,10 +169,13 @@ def find_account():
     q = (request.args.get("query") or "").strip()
     if not q: return jsonify({"error": "missing_query"}), 400
     with _conn() as c:
+        # `like_contains` escapes the caller's `%` and `_`, and ESCAPE names the same character
+        # the escaping used rather than relying on the server default. Without it `?query=%`
+        # matched every row this org has, up to MAX_MATCHES — a lookup answering as a listing.
         rows = c.execute(
             "SELECT account_id, name, domain FROM accounts "
-            "WHERE org_id = %s AND lower(name) LIKE %s ORDER BY name LIMIT %s",
-            (org, f"%{q.lower()}%", MAX_MATCHES),
+            "WHERE org_id = %s AND lower(name) LIKE %s ESCAPE '\\' ORDER BY name LIMIT %s",
+            (org, like_contains(q.lower()), MAX_MATCHES),
         ).fetchall()
     return jsonify({"source": "multiagency", "retrieved_at": _now(),
                     "org": org, "query": q, "matches": rows, "match_count": len(rows)})
@@ -135,7 +216,8 @@ def get_account_context():
         if not acct:
             # explicit not-found — and never leaks another org's row
             return jsonify({"source": "multiagency", "retrieved_at": _now(),
-                            "account": None, "found": False, "account_id": account_id}), 404
+                            "org": org, "account": None, "found": False,
+                            "account_id": account_id}), 404
         contacts = c.execute(
             "SELECT contact_id, name, title, engaged, notes FROM contacts "
             "WHERE org_id = %s AND account_id = %s ORDER BY name", (org, account_id)).fetchall()
@@ -147,6 +229,7 @@ def get_account_context():
     if acct.get("updated_at"): acct["updated_at"] = acct["updated_at"].isoformat()
     return jsonify({
         "source": "multiagency",
+        "org": org,
         "record_id": acct["account_id"],
         "retrieved_at": _now(),
         "found": True,

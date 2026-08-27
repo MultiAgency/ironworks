@@ -33,11 +33,8 @@ import os
 import pathlib
 import re
 import sys
-
-os.environ.setdefault("IRONCLAW_API", "http://127.0.0.1:3020")
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 from common import Checks, get, post, text_of, model_pin  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "deploy/lib"))

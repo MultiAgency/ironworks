@@ -30,13 +30,10 @@
 # Prereqs: MT instance on :3020; one provisioned client for the admin leg, TWO (e.g. proof-a /
 # proof-b) for the project-isolation leg. Optional IRONCLAW_OPERATOR_TOKEN adds a positive control.
 # Run:  IRONCLAW_API=http://127.0.0.1:3020 python3 test_member_admin_negative.py
-import os, sys, json, urllib.request, urllib.error, pathlib
-
-os.environ.setdefault("IRONCLAW_API", "http://127.0.0.1:3020")
+import os, sys, pathlib
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
-from common import DEFAULT_API, Checks  # noqa: E402
+from common import Checks, request  # noqa: E402
 
 # (method, path, body) with WELL-FORMED bodies so service-layer authz actually runs. Member MUST
 # be denied on every one (401/403). Owner id `reborn-cli` is the instance default_owner.
@@ -59,15 +56,13 @@ check = checks.check
 block = checks.block
 
 def req(method, path, token, body=None):
-    data = json.dumps(body).encode() if body is not None else None
-    r = urllib.request.Request(DEFAULT_API + path, data=data, method=method,
-        headers={"Authorization": "Bearer " + token, "User-Agent": "Mozilla/5.0",
-                 "Content-Type": "application/json"})
-    try:
-        with urllib.request.urlopen(r, timeout=30) as resp:
-            return resp.status, resp.read()
-    except urllib.error.HTTPError as e:
-        return e.code, e.read()
+    """The shared non-raising client. This proof asserts on STATUS CODES — B must get 404 on A's
+    project — so a raising helper would need every assertion wrapped; see common.request.
+
+    It returns the PARSED body now, where the local copy returned raw bytes and every caller
+    then called json.loads on it.
+    """
+    return request(method, path, token, body=body, timeout=30)
 
 def clients_by_slug():
     try:
@@ -111,15 +106,15 @@ else:
                       {"name": "isolation-probe", "description": "cross-user isolation probe; auto-deleted"})
         check("A (member) can create a project — route IS member-reachable", st == 200, f"status {st}")
         if st == 200:
-            pid = (json.loads(raw).get("project") or {}).get("project_id")
+            pid = ((raw or {}).get("project") or {}).get("project_id")
         if not pid:
-            block("project cross-user isolation", f"no project_id in create response: {raw[:200]!r}")
+            block("project cross-user isolation", f"no project_id in create response: {str(raw)[:200]}")
         else:
             # B must not see A's project in its own list...
             st_b, raw_b = req("GET", "/api/webchat/v2/projects", B.ironclaw_token)
-            b_list = json.loads(raw_b).get("projects", []) if st_b == 200 else []
+            b_list = (raw_b or {}).get("projects", []) if st_b == 200 else []
             check("B's project list does not include A's project",
-                  all(p.get("project_id") != pid for p in b_list), f"B list: {raw_b[:200]!r}")
+                  all(p.get("project_id") != pid for p in b_list), f"B list: {str(raw_b)[:200]}")
             # ...and must 404 (not 200/403-with-content) on A's exact id, for read and delete.
             st_bg, _ = req("GET", f"/api/webchat/v2/projects/{pid}", B.ironclaw_token)
             check("B GET A's project by exact id -> 404 (no cross-user read)", st_bg == 404, f"status {st_bg}")
@@ -151,11 +146,4 @@ if op:
 else:
     print("     (set IRONCLAW_OPERATOR_TOKEN to add the operator positive control)")
 
-ok = checks.ok if checks.ran else False
-print(f"\nscore: {checks.passed}/{checks.ran} run" + (f", {len(checks.blocked)} BLOCKED" if checks.blocked else "")
-      + (" — admin surface operator-only; projects member-reachable but per-user isolated"
-         if ok and checks.ran else ""))
-if checks.blocked and not checks.results:
-    print("ALL LEGS BLOCKED — no assertions ran; not a pass. Operator: run on the VM.")
-    sys.exit(2)
-sys.exit(0 if ok else 1)
+checks.finish("admin surface operator-only; projects member-reachable but per-user isolated")

@@ -17,7 +17,7 @@
 #   PUBLIC egress by default; only private-IP ranges are blocked). Handing out the token
 #   doesn't weaken the confinement, it voids it.
 #   (An earlier version of this header said "hand it to their channel/agent" — that predates
-#   the confinement and was wrong. See docs/ARCHITECTURE.md § Token custody.)
+#   the confinement and was wrong. See SECURITY.md § Trust boundaries.)
 #
 # Usage:
 #   IRONCLAW_API=https://your-agency-instance.example.com \
@@ -55,8 +55,8 @@ fi
 
 # human mode: never echo the token — write it to a chmod-600 file and print the path.
 slug="$(printf '%s' "$NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//')"
-umask 077; mkdir -p "$HOME/.agency/sealed"
-out="$HOME/.agency/sealed/${slug:-client}.env"
+umask 077; mkdir -p "$FLEET_AGENCY_DIR/sealed"
+out="$FLEET_AGENCY_DIR/sealed/${slug:-client}.env"
 { echo "IRONCLAW_USER_ID=$uid"; echo "IRONCLAW_TOKEN=$token"; } > "$out"
 echo "✅ provisioned sealed account for: $NAME"
 echo "   user_id : $uid"

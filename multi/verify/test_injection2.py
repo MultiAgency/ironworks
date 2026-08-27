@@ -7,7 +7,7 @@
 # persona via `instructions` on EVERY turn, and every client turn depends on that holding. Both
 # turns are REQUIRED to carry the marker; anything else exits non-zero. Before this had an exit
 # status, a regression here printed "FAIL" and returned 0, so any caller checking status — an
-# operator's `&&` chain, the post-pin-bump checklist in deploy/UPGRADE.md — read it as success.
+# operator's `&&` chain, the post-pin-bump checklist in deploy/README.md — read it as success.
 import json
 import os
 import sys

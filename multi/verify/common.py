@@ -2,42 +2,110 @@
 
 post() targets the local MT instance (:3020) by default; pass api= for another target
 (e.g. test_instr_live.py's live-instance check).
+
+IMPORT PATHS, and the two rules that decide what a proof needs to write.
+
+  A SIBLING IN THIS DIRECTORY NEEDS NOTHING. `python3 multi/verify/x.py` puts this directory
+  on `sys.path` before the file runs, and so does pytest's basedir insertion, so
+  `sys.path.insert(0, <this directory>)` has never done anything. Eight proofs carried that
+  line; every one was a no-op and they are gone. Do not add it back.
+
+  A SEAM MODULE NEEDS ONE LINE — `sys.path.insert` of `multi/seam`, written whichever way the
+  file already spells its own root. Importing `common` happens to do that too, as a side effect
+  of the `import pins` below. Do not lean on that: it makes the order of two unrelated imports
+  load-bearing, which is the same class of silent coupling the `os.environ.setdefault` cleanup
+  removed from the seam. State what the file needs.
 """
 import atexit
 import json
 import os
 import pathlib
+import sys
 import urllib.error
 import urllib.request
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "seam"))
+import pins
+# The seam's reader under this suite's established name, and the seam's User-Agent, for the
+# same reason `model_pin` below wraps `pins`: a proof must not read the response — or address
+# the instance — a different way than production does. The reader copy this replaces walked
+# EVERY content entry carrying a `text` key, so it also picked up the model's REASONING, and the
+# UA copy it replaces was a bare "Mozilla/5.0" the product never sent, guarded by a comment
+# asserting that the difference mattered. See responses.py for both measured divergences. The
+# two injection proofs decide "did it refuse?" from this string.
+from responses import BROWSER_UA, output_text as text_of  # noqa: F401
 
 DEFAULT_API = os.environ.get("IRONCLAW_API", "http://127.0.0.1:3020").rstrip("/")
 
 
 def model_pin():
-    """The model of record, read once from the repo-root MODEL_PIN. `MODEL` env still wins.
-
-    NO FALLBACK LITERAL, deliberately. MODEL_PIN is tracked, so it is absent only in a broken
-    checkout — and a proof that quietly runs on a different model than production is worse than
-    one that refuses to start.
-    """
-    env = os.environ.get("MODEL")
-    if env:
-        return env
-    p = pathlib.Path(__file__).resolve().parents[2] / "MODEL_PIN"
+    """The model of record — the seam's reader, so a proof cannot run on a different model
+    than production reads. Raises rather than exiting, and this wrapper turns that into the
+    SystemExit the proof scripts expect."""
     try:
-        pin = p.read_text().split("#", 1)[0].strip()
+        return pins.model_pin()
+    except pins.PinError as e:
+        raise SystemExit(f"!! {e}") from e
+
+
+def _build(method, path, token, body=None, key=None, api=None):
+    """One request object, so every proof sends the same headers."""
+    headers = {"Authorization": "Bearer " + token, "User-Agent": BROWSER_UA}
+    data = None
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(body).encode()
+    if key:
+        headers["Idempotency-Key"] = key
+    return urllib.request.Request((api or DEFAULT_API) + path, data=data,
+                                  headers=headers, method=method)
+
+
+def _parse(raw):
+    """JSON if it is JSON, otherwise the decoded text.
+
+    A streaming turn answers `text/event-stream`, and the SSE framing is itself the evidence
+    that streaming survived. One of the copies this replaces called `json.loads` bare, so a
+    stream body raised out of the helper instead of being returned."""
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return raw.decode("utf-8", "replace")
+
+
+def request(method, path, token, body=None, key=None, timeout=60, api=None):
+    """`(status, parsed)` for any endpoint. NEVER raises — status 0 means it never left.
+
+    THE NON-RAISING SHAPE, and the reason there are two. `post`/`get` below raise, because most
+    proofs want an unexpected failure to stop the run. The negative proofs want the opposite:
+    asserting that B gets 404 on A's project means the 404 IS the result, and a helper that
+    raised would need every such assertion wrapped. Same split, same reasoning, as
+    `pins.pin_value` vs `pins.require_pin`.
+
+    Four copies of this existed — `proof_checks.api`, `test_responses_recovery._req`,
+    `test_member_admin_negative.req`, and the pair below. They disagreed on three things: whether
+    a non-JSON body was tolerated, whether the result was parsed or raw bytes, and what the
+    transport-failure key was called (`transport` vs `transport_error`). Nothing asserted on the
+    key, which is how they stayed different.
+    """
+    req = _build(method, path, token, body=body, key=key, api=api)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.status, _parse(r.read())
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, _parse(e.read())
+        except OSError:
+            return e.code, None
     except OSError as e:
-        raise SystemExit(f"!! cannot read {p} ({e}) — MODEL_PIN is tracked; set MODEL to override")
-    if not pin:
-        raise SystemExit(f"!! {p} has no model on its first line")
-    return pin
+        return 0, {"transport": type(e).__name__}
 
 
 def post(path, body, token, api=None, timeout=90):
-    req = urllib.request.Request((api or DEFAULT_API) + path, data=json.dumps(body).encode(),
-        headers={"Authorization": "Bearer " + token, "Content-Type": "application/json",
-                 "User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    """POST and return the parsed body, RAISING on any non-2xx. See `request` for the other
+    shape and why both exist."""
+    with urllib.request.urlopen(_build("POST", path, token, body=body, api=api),
+                                timeout=timeout) as r:
         return json.loads(r.read())
 
 
@@ -113,27 +181,21 @@ def delete_user(user_id, op_token, api=None):
     return code
 
 
-def text_of(resp):
-    out = []
-    for item in resp.get("output", []) or []:
-        for c in item.get("content", []) or []:
-            if isinstance(c, dict) and c.get("text"):
-                out.append(c["text"])
-    if not out and resp.get("output_text"):
-        out.append(resp["output_text"])
-    return "\n".join(out).strip()
 
 
 def get(path, token, api=None, timeout=30):
     """GET a JSON endpoint with a bearer token. The read-side twin of post().
 
-    Five proofs hand-rolled this. The divergence that mattered: only three of the five sent
-    the browser User-Agent that post() treats as load-bearing, so a proof could be shaped by
-    which helper its author happened to copy.
+    Five proofs hand-rolled this, and only three of the five sent the browser User-Agent. That
+    divergence is real and worth recording; the reason first given for it was not. It said a
+    proof "could be shaped by which helper its author happened to copy" — measurement (see
+    `responses.BROWSER_UA`) showed the instance answers identically to every agent, including
+    the python-urllib default. What the header actually decides is whether a request survives a
+    hosted instance's edge, and `api=` can point any of these helpers at one. So the five copies
+    were a portability difference, not a measurement difference — and one helper is still the
+    fix, because the next divergence between five hand-rolled requests need not be this one.
     """
-    req = urllib.request.Request((api or DEFAULT_API) + path,
-        headers={"Authorization": "Bearer " + token, "User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    with urllib.request.urlopen(_build("GET", path, token, api=api), timeout=timeout) as r:
         return json.loads(r.read())
 
 

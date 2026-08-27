@@ -1,0 +1,53 @@
+[build-system]
+requires = ["setuptools==75.6.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ironworks"
+version = "0.1.0"
+description = "Operator-run application layer around the pinned IronClaw runtime"
+requires-python = ">=3.12,<3.14"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest==9.0.3", "ruff==0.16.4", "coverage==7.6.10"]
+
+[tool.setuptools.packages.find]
+include = ["multi", "multi.seam"]
+
+[tool.setuptools.cmdclass]
+build_py = "build_support.BuildPy"
+
+[tool.pytest.ini_options]
+testpaths = ["multi/seam", "deploy/lib", "deploy/account-intel/data", "multi/eval",
+             "deploy/egress", "multi/verify/test_output_text_visibility.py"]
+# `deploy/egress` carries one offline, stdlib-only suite (`test_connect_proxy.py`, which
+# drives the real gateway over real sockets). It was tracked and collected by NOTHING until
+# this line: the forty lines the network guarantee rests on, gated by the aggregate run and
+# by nobody else. `deploy/egress/proof/` holds no `test_*.py` — those proofs need docker, a
+# pinned image and a live key, and stay out of CI by design.
+python_files = ["test_*.py"]
+addopts = "-ra"
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+exclude = ["admin"]
+
+[tool.ruff.lint]
+select = ["F", "E9", "B", "C90"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/test_*.py" = ["B", "C901"]
+"multi/seam/test_bridge_delivery.py" = ["B", "C901", "F403", "F405"]
+"multi/seam/test_bridge_operations.py" = ["B", "C901", "F403", "F405"]
+"multi/seam/test_bridge_recovery.py" = ["B", "C901", "F403", "F405"]
+"multi/seam/_bridge_delivery_support.py" = ["F401"]
+"deploy/ironworks" = ["C901"]
+"deploy/lib/compose-persona" = ["C901"]
+"deploy/lib/egress_status.py" = ["C901"]
+"deploy/lib/lifecycle.py" = ["C901"]
+"multi/seam/bridge_core.py" = ["C901"]
+"multi/seam/registry.py" = ["C901"]
+"multi/seam/services.py" = ["C901"]
+"multi/verify/test_session_revocation.py" = ["C901"]

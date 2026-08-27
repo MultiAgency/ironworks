@@ -18,7 +18,7 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 SLUG="${1:?usage: update-persona.sh <slug> <persona-file>}"
 PERSONA="${2:?usage: update-persona.sh <slug> <persona-file>}"
 case "$PERSONA" in /*) ;; *) PERSONA="$REPO_DIR/$PERSONA" ;; esac
-[ -f "$PERSONA" ] || { echo "!! persona not found: $PERSONA"; exit 1; }
+[ -f "$PERSONA" ] || { echo "!! persona not found: $PERSONA" >&2; exit 1; }
 C="$(fleet_container "$SLUG")"
 envf="$(fleet_agent_env "$SLUG")"
 

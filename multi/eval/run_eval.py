@@ -19,10 +19,8 @@ multi/eval/cases.py, whose graders are themselves self-tested (test_graders.py).
 import argparse, json, os, pathlib, sys, collections
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "seam"))
-sys.path.insert(0, str(pathlib.Path(__file__).parent))
 
-from cases import CASES, PASS, FAIL, REVIEW  # noqa: E402
-
+from cases import CASES, PASS, FAIL, REVIEW
 
 def build_thread():
     import context_ingress as ing
@@ -34,7 +32,7 @@ def build_thread():
     missing = [v for v in ("EVAL_IRONCLAW_TOKEN", "EVAL_ACCOUNT_TOKEN") if not os.environ.get(v)]
     if missing:
         sys.exit(f"missing {' and '.join(missing)} — the eval org's own credentials. "
-                 "Provision it and seed the book first (see multi/eval/README.md). "
+                 "Provision it and seed the book first (see multi/verify/README.md). "
                  "Never point this at a real client's tokens.")
     client = ing.ClientConfig(
         slug="eval",

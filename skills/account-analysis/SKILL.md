@@ -1,7 +1,7 @@
 ---
 name: account-analysis
 version: 0.1.0
-description: Organization-generic account qualification and discovery — collect and classify evidence, assess an account against the ORGANIZATION GUIDANCE's own criteria, rank what's unknown by decision value, and ask the single highest-value discovery question. Use whenever the team asks to qualify, assess, research, or run discovery on an account.
+description: Organization-generic account qualification and discovery — collect and classify evidence, assess an account against the ORGANIZATION GUIDANCE's own criteria, separate the decisive gaps from the merely unknown, and ask the most decisive question. Use whenever the team asks to qualify, assess, research, or run discovery on an account.
 activation:
   keywords:
     - qualify
@@ -30,14 +30,13 @@ Assess against the company's own guidance, then read the account's evidence.
   your empty-book instructions instead (say so, and help the team decide what to load).
 
 ## 2. Classify every piece of evidence
-Tag every claim per the evidence discipline in your instructions (FACT · STATED · INFERENCE ·
-HYPOTHESIS · UNKNOWN). If two sources disagree, record it as **conflicting** — do not
-silently choose one.
+Apply the evidence discipline your instructions define — every claim carries its tag. Where two
+sources disagree, that pair is **conflicting**: name both, and carry the label through to the
+Evidence section of the answer.
 
 ## 3. Assess suitability against the organization's guidance
 Work through the qualification criteria the organization's guidance defines. For each one, give a
-short labeled block — **plain lines, no markdown tables** (the chat renders them as raw
-pipes):
+short labeled block in this shape:
 
 ```
 <criterion> — Strong | Partial | Weak | Unknown
@@ -50,25 +49,29 @@ Check the guidance's **disqualification criteria** separately and state each one
 evaluate as MET or NOT MET. A met disqualifier is a hard stop — say so outright; never
 soften it into a merely "Weak" criterion.
 
-Do not invent a numeric score. Use the criteria the guidance actually defines — do not
-import BANT, MEDDIC, MEDDPICC, or any named framework it does not name.
+Work in the guidance's own vocabulary, using the criteria it actually defines, and score only
+on a scale it itself sets out.
 
-## 4. Identify material uncertainty and rank the gaps
-List the unknowns that could change the next decision. Rank each by **decision value** —
-how much the answer would move whether/how to pursue. For each: *Unknown → why it matters
-→ which decision it affects → priority.*
+## 4. Rank the gaps by what they would decide
+A gap is **decisive** when learning it would change the next decision — a different stage, a
+different offering, a different answer to whether to pursue at all. Everything else is merely
+unknown, however interesting. Put the decisive ones first, each as: *Unknown → the decision it
+would change → what the answer would have to be to change it.*
 
-## 5. Ask the single highest-value question
-Formulate one specific, decision-relevant discovery question for the top gap. Never ask
-something the evidence or the team has already answered.
+Done when every criterion you marked Unknown or Weak in step 3 has been placed: decisive, or set
+aside with one clause saying why not.
+
+## 5. Ask the most decisive question
+Formulate one specific discovery question for the top gap. Ask only what the evidence and the
+team have left open.
 
 ## 6. Incorporate the answer and reassess
 When the team answers, treat it as new evidence tagged **STATED** — cite who said it and
 when. A team assertion is not a FACT: it becomes one only when a record confirms it. Fold
-it into the assessment and **revise the affected criteria and the gap ranking**. Do not
-re-ask an answered question. Then either ask the next-highest question or, if the picture
-is clear enough, stop and recommend the next step. Where a STATED item is load-bearing for
-the decision, note that it is worth capturing into the records.
+it into the assessment and **revise the affected criteria and the gap ranking** — an answered
+gap is no longer decisive, and something else now is. Then either ask the next question or, if
+the picture is clear enough, stop and recommend the next step. Where a STATED item is
+load-bearing for the decision, note that it is worth capturing into the records.
 
 ## 7. Recommend the next step
 State what the team should do next, using **only the decisions and stages the ORGANIZATION
@@ -82,12 +85,15 @@ Lead with the conclusion. Plain chat text: no markdown at all — no tables, no 
 no `**bold**`. This chat renders none of it, so asterisks arrive as asterisks. Use short
 labeled lines; the labels below are literally how they should appear.
 
+Steps 1, 2, 4 and 6 are how you *work*; only step 3's blocks and the closing labels are how you
+*write*. An answer carrying a section per step is this skill leaking into the reply.
+
 Structure: Account · Suitability (the blocks above) · Evidence (Known / Stated / Inferred /
 Conflicting) · Top unknowns (ranked, with why), then close with:
 
     FIT: the guidance-defined offering or stage that applies, or "unclear — discovery target"
     WHY: the evidence, tagged
-    KEY UNKNOWN: the one that most changes the decision
+    KEY UNKNOWN: the most decisive one
     NEXT BEST QUESTION: one
     RECOMMENDED NEXT STEP: one of the guidance-defined decisions
 

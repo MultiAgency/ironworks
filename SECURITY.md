@@ -1,100 +1,123 @@
-# Security
+# Security contract
 
-## Reporting a vulnerability
+Report vulnerabilities through GitHub's private vulnerability-reporting tab. Do not open a public
+issue or include credentials, client records, group IDs, or live host details. If the private tab
+is unavailable, contact the repository owner through a known private channel first.
 
-Report privately through this repository's **Security → Report a vulnerability**
-tab (GitHub private vulnerability reporting). Please do not open a public issue
-for a suspected vulnerability.
+## Trust boundaries
 
-We aim to acknowledge a report within a few business days. This is a small
-project with no bug bounty; we will tell you honestly what we can and cannot fix,
-and we will credit you if you want the credit.
+This contract covers the multi-tenant product path. The single-tenant fleet and the Secretary
+([`README.md`](README.md) § What else is in this repository) run the pinned runtime but are not
+described by the boundaries below.
 
-## What this repo is, and what it is not
+- Each tenant uses a sealed IronClaw account and organization-scoped Account Service identity;
+  cross-organization resources return not found.
+- The seam holds both of a tenant's credentials and uses each on one leg only. The Account
+  Service receives that tenant's organization credential; IronClaw's HTTP authentication layer
+  receives that tenant's sealed member bearer, which is how the sealed-account boundary is
+  enforced. Neither credential nor the Account Service address belongs in model-visible content.
+- The IronClaw request body carries the selected model, composed instructions and tenant guidance,
+  user input, scoped business context, and an optional previous-response identifier. Neither
+  credential nor the Account Service address appears in that model-visible body. Instructions,
+  input, prior conversation, and model output may persist in IronClaw-managed response/thread
+  state; the bridge persists identifiers and delivery metadata only. This repository does not
+  prove that IronClaw, a reverse proxy, or surrounding infrastructure never records transport
+  authentication headers in operational logs.
+- Clients never receive member bearers. Whoever holds one can reverse per-bearer tool settings.
+- Provisioning disables non-allowlisted tools and refuses activation if confinement cannot be
+  proved.
+- The runtime sits on internal-only Docker networks. Provider traffic crosses a CONNECT-only
+  gateway with one exact `host:port` allowlist entry. The Account Service uses a separate private
+  path.
+- Guidance is mandatory, slug-bound, service-bound, and supplied every turn. A registry mismatch
+  fails closed.
+- A tenant's organization is the one the Account Service authenticates from its credential, not
+  the registry's `ORG_ID`, which is operator metadata only. The bridge binds that authenticated
+  org at startup and re-checks it on every records read, so a hot-reloaded credential that begins
+  resolving elsewhere fails the turn closed rather than degrading to a no-records answer.
+- A persisted conversation continues only while the composition it was built under still matches.
+  Service, version, composed instructions, model, `FACT_FIELDS` policy, organization scope, and
+  Account Service endpoint are bound per conversation; any change refuses continuation until an
+  operator explicitly resets it. Reset clears conversation and context continuity and preserves
+  the delivery journal.
+- The bridge stores routing and delivery identifiers in mode-`0600` SQLite, plus a non-secret
+  compatibility identity per conversation: service and version, a SHA-256 of the composed
+  model-visible instructions, the effective model, a `FACT_FIELDS` policy hash, and the
+  authenticated Account Service organization id and normalized base URL. It stores no message
+  text, response text, account records, persona or guidance content, and no credentials — the
+  instruction and policy fingerprints are hashes, and the base URL is refused if it carries
+  credentials.
 
-This repo is configuration, personas, and tooling. It runs the **unmodified
-upstream [ironclaw](https://github.com/nearai/ironclaw) binary** at the rev
-pinned in `IRONCLAW_PIN` — no fork, no patches, and no ironclaw source is
-included here.
+## Egress guarantee
 
-So please route reports accordingly:
+Only when `./deploy/ironworks egress status` reports `VERIFIED` may an operator claim that the
+runtime has no direct public route and network egress is restricted to the configured model
+provider independently of model-visible tools.
 
-- **Report here** — anything in this repo's own code: the context seam
-  (`multi/seam/`), provisioning and deprovisioning scripts (`multi/provision/`),
-  the account data layer (`deploy/account-intel/data/`), fleet tooling
-  (`deploy/`), the deployment units (`multi/serve/`), or a persona or skill file
-  that weakens a boundary it is supposed to hold.
-- **Report upstream** — anything in the agent runtime itself belongs with
-  [nearai/ironclaw](https://github.com/nearai/ironclaw). If you are unsure which
-  side a bug falls on, report it here and we will help route it.
+```sh
+./deploy/ironworks egress status
+./deploy/egress/egress-control.sh verify
+./deploy/egress/egress-control.sh activate --confirm
+./deploy/egress/egress-control.sh rollback --i-accept-unrestricted-egress
+```
 
-## What we consider security-relevant
+Activation recreates the runtime. Stop the bridge gracefully, activate, verify runtime health and
+containment, restart, and run the isolation proofs. A gateway failure is fail-closed: inference
+stops while containment remains. Rollback deliberately restores unrestricted egress and records a
+degraded state.
 
-The boundaries this project exists to hold, roughly in order of severity:
+The allowed model provider remains a data sink by design. A prompt-injected turn could encode data
+to that provider, though it cannot reach attacker infrastructure through this boundary. Reassess
+the policy if the provider host, port, model path, or URL-fetch behavior changes.
 
-- **Cross-tenant data access.** One client's turn reaching another client's
-  accounts, memory, threads, or credentials.
-- **Credential exposure.** Any path that puts a client's org token or sealed
-  account token where the model, another client, or a log can see it. The seam
-  is the only component that should ever hold them.
-- **Confinement escape.** A member turn regaining network egress, write, or
-  execution capability that provisioning is supposed to have removed — including
-  via prompt injection in account data or a chat message.
-- **Fail-open behavior.** Anything that serves a client when it should refuse:
-  an unregistered group, a missing or mismatched guidance file, an unknown token,
-  a duplicate group id.
+## Delivery guarantee
 
-## Known and accepted limitations
+| Property | Guarantee |
+|---|---|
+| Model execution | At most once, except before a response ID becomes durable |
+| Telegram delivery | Complete only when every chunk is acknowledged; otherwise retained for retry or explicit reconciliation |
+| Re-delivery | Uses the original stored response and never a second model execution |
+| Ordering | Strict within a group; serial across groups |
 
-These are deliberate trade-offs, documented rather than hidden. Reports that
-restate them are welcome but already known:
+Nothing is exactly once. Updates move transactionally through `RECEIVED`, `TURN_STARTED`,
+`TURN_COMPLETED`, `DELIVERY_STARTED`, `DELIVERED`, and `ACKED`. Response ID and thread pointers
+commit together. Recovery fetches a completed response instead of regenerating it.
 
-- **Deleting a member does not revoke its token.** A sealed account token is a
-  signed session; the server's revoked-set is in-memory only and account deletion
-  never adds to it, and upstream exposes no API to revoke another user's session.
-  A leaked token therefore keeps authenticating until it expires — the lifetime is
-  hardcoded at 365 days. The only containment is rotating the instance's session
-  signing key, which logs out every client at once. Deprovisioning says this
-  plainly rather than claiming access is cut; the mitigation that makes it
-  tolerable is custody: the token is held by the seam and never reaches a client.
-- **One bot, one bridge process.** All client groups share a single Telegram bot
-  token and one bridge process — a shared single point of failure, and the token
-  can read every group it is in. Turns are also served serially, so one long turn
-  delays every other client's.
-- **Tool disabling is per-bearer.** Upstream scopes tool permissions per
-  principal with no tenant-global scope, so confinement is applied per member at
-  provisioning time and must be re-applied after a runtime version bump.
-- **Persona governance is empirical.** Injecting the persona every turn is
-  behavior we re-prove against the runtime on each version bump, not a guarantee
-  the runtime contracts.
-- **The tool catalog confinement reads is not the whole model-visible surface.**
-  `multi/provision/confine-member.sh` disables every tool outside its allowlist by
-  reading `/api/webchat/v2/settings/tools`, and re-reads that catalog to certify the
-  result. But the catalog and the surface the model is actually offered are two
-  different sets. Measured on a confined client member at the pinned rev: the catalog
-  held 50 entries (37 disabled) while the model was offered 17 tools, and **five of
-  those were absent from the catalog entirely** — `result_read`,
-  `outbound_delivery_targets_list`, `project_create`, `skill_activate` and
-  `capability_info`. Confinement never considered them, because nothing listed them.
-  Two things bound this, and neither is luck:
-  - **`disabled` is enforced at dispatch, not merely advertised.** A catalogued,
-    disabled tool is still offered to the model, but calling it is refused —
-    `policy_denied`, "the capability is disabled by tool approval settings"
-    (reproduced twice on a live member). So this is an *advertisement* defect: it
-    wastes context and invites attempts, but it is not a containment escape.
-  - **The egress guarantee does not rest on the catalog being complete.** The egress
-    tools are catalogued and disabled, and `multi/verify/test_egress_closed.py` checks
-    the *outcome* — a real member turn ordered to fetch a URL must call no network tool
-    and return none of that URL's content. That check is what `deploy/UPGRADE.md`
-    step 6 makes mandatory after every pin bump, and it holds regardless of what the
-    catalog omits.
+If a model request may have run but no response ID is durable, the update becomes
+`RECOVERY_BLOCKED` and is never replayed. **"May have run" is a claim about evidence, not about
+intent**: a returned status line proves the request arrived, and a timeout or a post-connection
+failure leaves it ambiguous — both block recovery. Constructing a request object opens no socket
+and is not evidence of anything; a failure that proves the request never left the process is an
+ordinary failure the tenant can retry. Use `./deploy/ironworks bridge status`; exit `0` is
+healthy, `2` unhealthy, and `3` unevaluated. Fix forward after delivery state has processed
+traffic unless the store mechanically proves no update or cursor was recorded.
 
-  Of the five uncatalogued tools, none grants egress; `project_create` is a write, and
-  is per-user isolated (proven in `multi/verify/test_member_admin_negative.py`).
-  Reports that a *catalogued* tool state is not honoured, or that any uncatalogued tool
-  reaches another tenant or the network, are in scope and we want them.
+## Pinned-runtime limitations
 
-## Supported versions
+- **No individual member-session revocation.** Deleting or suspending a member does not
+  invalidate its bearer. Custody, residual-authority reporting, and fleet-wide signing-key
+  rotation are the current controls. Probe with `multi/verify/test_session_revocation.py`.
+- **Built-in HTTP lacks default-deny configuration.** Per-bearer confinement and the network
+  boundary compensate. Probe with `test_egress_closed.py`.
+- **The settings catalog is not the complete model surface.** Run `test_surface_drift.py` and
+  `test_member_admin_negative.py` after every runtime change.
+- **No per-account runtime persona.** The seam composes persona and guidance every turn; this is
+  the intended boundary.
+- **No production-profile extension lifecycle.** Telegram transport and product composition stay
+  outside the runtime.
 
-The pinned rev in `IRONCLAW_PIN` is the only supported runtime version. There are
-no released versions of this repo yet, and no backports.
+Do not patch or vendor IronClaw to close these limitations. Re-measure them after every pin bump.
+
+## Accepted operational limits
+
+- One bot and bridge process form a shared availability boundary; cross-group work is serial.
+- Response retention is externally controlled, so recovery blocks rather than regenerates when a
+  stored response cannot be fetched.
+- Tool confinement depends on token custody and must be repeated after tool-surface changes.
+- Persona governance is empirical: composition and behavior tests must pass after prompt or model
+  changes.
+- Operator scripts are supported only on single-operator hosts because some request credentials
+  may be visible to local process inspection.
+
+Credential rotation, cross-tenant exposure response, and destructive recovery procedures are in
+[`deploy/README.md`](deploy/README.md).

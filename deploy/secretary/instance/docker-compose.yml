@@ -12,7 +12,7 @@ name: secretary
 services:
   ironclaw:
     # Images are built as rev-named tags (ironclaw:<9-char rev> from IRONCLAW_PIN);
-    # ironclaw:main is retagged to the current pin. See deploy/UPGRADE.md.
+    # ironclaw:main is retagged to the current pin. See deploy/README.md.
     image: ${IRONCLAW_IMAGE:-ironclaw:main}
     restart: unless-stopped          # durable: survives reboot / Docker restart, like the fleet
     environment:
