@@ -1,5 +1,11 @@
 [build-system]
-requires = ["setuptools==75.6.0"]
+# Pinned exactly, like every other dependency here. 75.6.0 carried two advisories: a path
+# traversal in `PackageIndex.download` (high, fixed 78.1.1) and a MANIFEST.in exclusion bypass
+# via NFC/NFD collision on macOS (moderate, fixed 83.0.0). Neither is reachable from the serving
+# path — this is a BUILD-time requirement and nothing under multi/seam/ imports it — but the
+# second is adjacent to a property this build actually relies on: `build_support.BuildPy`
+# excludes test modules from the wheel, and seam-ci asserts that exclusion held.
+requires = ["setuptools==84.0.0"]
 build-backend = "setuptools.build_meta"
 
 [project]

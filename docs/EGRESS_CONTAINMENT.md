@@ -41,6 +41,18 @@ provider authorization headers.
 Changing the provider host, port, base URL, model path, or URL-fetch behavior requires policy
 review and renewed verification. Do not expand the allowlist merely to make a failing probe pass.
 
+**What the implementation identity is, and is not.** The gateway announces a hash of the
+connect-proxy source it loaded, and `egress status` compares that against the file in this tree.
+That is **drift detection under an honest process, not an attestation**: a compromised gateway
+would report whichever hash keeps it VERIFIED. It is not the control that stops one — a gateway
+executing attacker code has already defeated the boundary, and what stands against that is the
+measured forbidden-destination legs and `internal: true`. What the identity does catch is the
+realistic failure: the implementation is bind-mounted into a generic base image, so an edited
+file with no container recreate leaves the proxy serving its original bytes while the image id
+never moves. Nothing outside the process can observe that — `docker cp` and `docker exec` resolve
+the mount to the current host file, not to what is in memory — so the process's own report is the
+only available answer, and it is treated as a report.
+
 The stamp's `checks_passed` counts **evidence only**. A forbidden destination is counted when an
 uncontained container completes a handshake there, because only then does the same attempt failing
 inside the boundary distinguish containment from its absence. Destinations that are merely

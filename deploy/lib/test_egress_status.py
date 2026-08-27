@@ -349,7 +349,7 @@ class States(Base):
         st = es.evaluate("ic")
         self.assertEqual(st["state"], es.RUNNING)
         why = " ".join(st["why"])
-        self.assertIn("RUNNING gateway is executing a different connect-proxy.py", why)
+        self.assertIn("gateway REPORTS a different connect-proxy.py", why)
         self.assertIn("recreate the egress service", why)
 
     def test_a_gateway_that_reports_no_implementation_is_not_VERIFIED(self):
@@ -399,7 +399,7 @@ class States(Base):
         self.assertEqual(es.gateway_implementation("gw"), current_b)
         st = es.evaluate("ic")
         self.assertEqual(st["state"], es.RUNNING)
-        self.assertIn("executing a different", " ".join(st["why"]))
+        self.assertIn("REPORTS a different", " ".join(st["why"]))
 
     def test_topology_drift_and_unreadable_metadata_invalidate_certification(self):
         cases = {

@@ -429,6 +429,93 @@ def test_genuine_historical_v2_migrates_instead_of_being_refused():
     print("  PASS a genuine historical v2 migrates, backed up, with rows preserved")
 
 
+def test_the_recorded_historical_shapes_are_still_prefixes_of_the_current_schema():
+    """Classification reads history positionally, so an INSERT into `_SCHEMA` breaks every
+    database on disk.
+
+    `_classify_schema` accepts a v1 or v2 database by comparing its `threads` signature against
+    the first N columns of the current schema. That is sound only while migrations APPEND. Insert
+    a column in the middle of `_SCHEMA` rather than at the end and those prefixes silently denote
+    a different set: every existing operator database stops matching any supported shape and is
+    refused at open, with a message blaming the file. The names are written out in
+    `bridge_state` so history is recorded rather than derived; this is the assertion that the two
+    have not drifted apart, and it fails here rather than on a host."""
+    current = bs._TABLE_COLUMNS["threads"]
+    assert current[:len(bs._V1_THREAD_COLUMNS)] == bs._V1_THREAD_COLUMNS, (
+        f"v1's recorded columns are no longer the start of the current schema:\n"
+        f"  recorded: {bs._V1_THREAD_COLUMNS}\n  current : {current[:len(bs._V1_THREAD_COLUMNS)]}")
+    assert current[:len(bs._V2_THREAD_COLUMNS)] == bs._V2_THREAD_COLUMNS, (
+        f"v2's recorded columns are no longer the start of the current schema:\n"
+        f"  recorded: {bs._V2_THREAD_COLUMNS}\n  current : {current[:len(bs._V2_THREAD_COLUMNS)]}")
+    assert len(bs._V1_THREAD_COLUMNS) < len(bs._V2_THREAD_COLUMNS) < len(current), \
+        "the schema stopped growing by appending, which is what these prefixes assume"
+    print("  PASS the recorded v1/v2 column shapes are still prefixes of the current schema")
+
+
+V1_OLD_UPDATES = """
+CREATE TABLE meta(key TEXT PRIMARY KEY, value TEXT);
+CREATE TABLE threads(gid TEXT PRIMARY KEY, prev TEXT, supplied TEXT NOT NULL DEFAULT '{}',
+  ever_supplied INTEGER NOT NULL DEFAULT 0, last_turn_at TEXT, orphans TEXT NOT NULL DEFAULT '{}');
+CREATE TABLE updates(update_id INTEGER PRIMARY KEY, gid TEXT, state TEXT NOT NULL,
+  idempotency_key TEXT, response_id TEXT, prev_before TEXT, prev_after TEXT,
+  attempts INTEGER NOT NULL DEFAULT 0, first_seen TEXT, updated_at TEXT, error_code TEXT);
+INSERT INTO meta(key, value) VALUES('schema_version', '1');
+"""
+
+
+def test_a_historical_auxiliary_table_migrates_instead_of_reading_as_corrupt():
+    """AUXILIARY TABLES GET THE SAME APPEND-ONLY RULE AS `threads`, and did not.
+
+    They were held to the CURRENT signature at every version, so a legitimate v1 whose `updates`
+    predates `message_id`/`delivered_at` was rejected as "malformed" — a word that describes
+    corruption — while migration only ever ALTERed `threads`. The database was unopenable and
+    had no route forward: not a lost row, but a lost DATABASE, and the operator sent to look for
+    damage that was not there. Same drift that made "schema version 2" name two shapes; it just
+    landed on another table."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "state.db"
+        db = sqlite3.connect(str(path))
+        db.executescript(V1_OLD_UPDATES)
+        db.execute("INSERT INTO threads(gid, prev) VALUES(?,?)", (GID, "resp_legacy"))
+        db.execute("INSERT INTO updates(update_id, gid, state) VALUES(?,?,?)", (7, GID, "ACKED"))
+        db.commit(); db.close()
+
+        st = bs.BridgeState(path)
+        assert st.meta_get("schema_version") == str(bs.SCHEMA_VERSION)
+        assert st.thread_row(GID)["prev"] == "resp_legacy", "the conversation pointer was lost"
+        assert dict(st.update_row(7))["state"] == "ACKED", "the delivery journal was lost"
+        present = [name for name, *_ in bs._signature_on(st.db, "updates")]
+        for late in ("message_id", "delivered_at"):
+            assert late in present, f"{late} was not appended to the historical updates table"
+        st.close()
+        # The second open is the real test: at the current version the signature must be exact,
+        # so accepting the shape without completing it would buy exactly one successful open.
+        again = bs.BridgeState(path)
+        assert again.thread_row(GID)["prev"] == "resp_legacy"
+        again.close()
+    print("  PASS a historical auxiliary table is completed rather than called corrupt")
+
+
+def test_an_unrecognised_auxiliary_shape_is_still_refused_and_named_honestly():
+    """POSITIVE CONTROL for the above: prefix-tolerance must not become shape-blindness. A table
+    that is not a prefix of anything is genuinely unrecognised, and the refusal says that rather
+    than implying corruption it cannot actually diagnose."""
+    with tempfile.TemporaryDirectory() as tmp:
+        path = pathlib.Path(tmp) / "state.db"
+        db = sqlite3.connect(str(path))
+        db.executescript(V1_OLD_UPDATES.replace(
+            "gid TEXT, state TEXT NOT NULL,", "WRONG TEXT, state TEXT NOT NULL,"))
+        db.commit(); db.close()
+        try:
+            bs.BridgeState(path)
+        except bs.StateError as e:
+            assert "matches no shape this bridge recognises" in str(e), e
+            assert "malformed" not in str(e), "a historical shape is still being called malformed"
+        else:
+            raise AssertionError("an unrecognised auxiliary shape was accepted")
+    print("  PASS an unrecognised auxiliary shape is refused in words that fit the evidence")
+
+
 def test_a_seven_column_intermediate_v2_migrates_rather_than_being_refused():
     """"Schema version 2" named THREE shapes, not two. Between the five-column v2 and the
     version bump, a database could be written with `organization_id` and `account_service_base`

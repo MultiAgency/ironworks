@@ -219,9 +219,16 @@ _TABLE_COLUMNS = {
                 "error_code", "message_id", "delivered_at"),
     "workers": ("gid", "update_id", "stage", "started_at", "deadline_at", "heartbeat_at"),
 }
-_V1_THREAD_COLUMNS = _TABLE_COLUMNS["threads"][:6]
-_V2_THREAD_COLUMNS = _TABLE_COLUMNS["threads"][:11]
-_V2_INTERMEDIATE_THREAD_COLUMNS = _TABLE_COLUMNS["threads"]
+# HISTORY, WRITTEN OUT — not `_TABLE_COLUMNS["threads"][:6]`. Slicing the current schema defines
+# the past as "whatever the present happens to start with", which is true only while every
+# migration APPENDS. Insert a column into `_SCHEMA` instead of appending and `[:6]` silently
+# denotes a different set, every database on disk stops matching any supported shape, and the
+# refusal blames the operator's file. These are the names those versions actually had;
+# `test_thread_compatibility` asserts they remain prefixes of the current schema, so a reordering
+# fails in CI rather than on a host at open time.
+_V1_THREAD_COLUMNS = ("gid", "prev", "supplied", "ever_supplied", "last_turn_at", "orphans")
+_V2_THREAD_COLUMNS = _V1_THREAD_COLUMNS + (
+    "service", "service_version", "instructions_sha256", "model", "context_policy_sha256")
 
 
 def _source_signature(path):
@@ -300,9 +307,27 @@ def _validate_auxiliary_schema(db, path, version, objects, tables, expected_sign
     if not tables <= known_tables:
         raise StateError(f"{path} contains unknown bridge tables: "
                          f"{', '.join(sorted(tables - known_tables))}")
+    # AUXILIARY TABLES GET THE SAME APPEND-ONLY RULE AS `threads`, and did not. They were held to
+    # the CURRENT signature at every version, so a legitimate v1 whose `updates` predates a later
+    # column was rejected as "malformed" — a word that describes corruption — with no route
+    # forward, because migration only ever ALTERed `threads`. The database became unopenable and
+    # unrecoverable through this module. That is the same drift that made "schema version 2" name
+    # two shapes; it just landed on a different table.
+    #
+    # A historical version may therefore present a PREFIX of the current signature: exactly the
+    # columns it had, with the ones appended since still missing. `_migrate_schema` adds them.
+    # Anything that is not a prefix is genuinely unrecognised, and says so in those words.
     for table in tables - {"threads", "meta"}:
-        if _signature_on(db, table) != expected_signatures[table]:
-            raise StateError(f"{path} has a malformed {table} table; refusing to repair it")
+        actual, expected = _signature_on(db, table), expected_signatures[table]
+        if actual == expected:
+            continue
+        if version != str(SCHEMA_VERSION) and actual == expected[:len(actual)]:
+            continue
+        raise StateError(
+            f"{path} declares schema version {version} but its {table} table matches no shape "
+            "this bridge recognises — not the current one, and not a prefix of it. It is either "
+            "corrupt or from a fork; refusing to repair it in place. Restore its recorded backup "
+            "or re-migrate from the JSON source.")
     if version != str(SCHEMA_VERSION):
         return
     missing = known_tables - tables
@@ -586,8 +611,44 @@ class BridgeState:
             for name, typ in additions:
                 if name not in existing:
                     self.db.execute(f"ALTER TABLE threads ADD COLUMN {name} {typ}")
+            self._append_missing_auxiliary_columns()
             self.meta_set("schema_version", str(SCHEMA_VERSION))
             self.meta_set(f"schema_v{from_version}_backup", str(backup))
+
+    def _append_missing_auxiliary_columns(self):
+        """Bring `updates`/`workers` forward the same way `threads` is brought forward.
+
+        `_validate_auxiliary_schema` now admits a historical database whose auxiliary tables are
+        a PREFIX of the current shape; this is the other half of that bargain. Without it such a
+        database would be stamped current while still missing columns, and the next open — which
+        demands an exact signature at the current version — would reject it. Accepting a shape
+        without being able to complete it would trade an unopenable database for one that opens
+        exactly once.
+
+        DDL is rebuilt from `_SCHEMA` rather than written out again, so there is one statement of
+        each column's type. A NOT NULL column with no default cannot be added to a populated
+        table, and SQLite says so; that is left to fail loudly rather than be guessed at, because
+        inventing a default is inventing data.
+        """
+        expected = _expected_signatures()
+        for table in ("updates", "workers"):
+            signature = _signature_on(self.db, table)
+            if not signature:
+                # ABSENT, not incomplete — an empty signature is SQLite's answer for "no such
+                # table". A v1 predates `workers` entirely, and `executescript(_SCHEMA)` creates
+                # it whole immediately after this runs. ALTERing it here is what that ordering
+                # made impossible, not something to work around.
+                continue
+            have = {name for name, *_ in signature}
+            for name, typ, notnull, default, _pk in expected[table]:
+                if name in have:
+                    continue
+                clause = f"{name} {typ}"
+                if default is not None:
+                    clause += f" DEFAULT {default}"
+                if notnull:
+                    clause += " NOT NULL"
+                self.db.execute(f"ALTER TABLE {table} ADD COLUMN {clause}")
 
     def close(self):
         try:

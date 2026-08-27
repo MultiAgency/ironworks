@@ -543,7 +543,7 @@ if [ "$DEGRADED" = 0 ] && [ "$REVOCATION" != "BLOCKED" ]; then
     ROUTE_STATE="present"; DEGRADED=1
     echo "  !! the currently serving bridge still holds the group in memory:" >&2
     echo "     $ROUTE_REASON. Restart the bridge, then re-run this script to converge:" >&2
-    echo "       systemctl restart multi-bridge     # or the equivalent on this host" >&2
+    echo "       systemctl restart bridge           # the unit this repository ships" >&2
     echo "     The teardown receipt retains group_id, so the rerun needs no registry." >&2
   else
     ROUTE_STATE="unknown"; DEGRADED=1

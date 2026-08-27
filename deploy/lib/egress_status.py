@@ -408,11 +408,19 @@ def _stamp_still_certifies(stamp, gateway, container):
                 "gateway announced its own identity will not report one: recreate the egress "
                 "service, then re-run deploy/egress/probe-egress.sh")
     if on_disk is None or running != on_disk:
-        return ("the RUNNING gateway is executing a different connect-proxy.py than this tree "
-                f"holds (loaded {running[:12]}…, on disk "
-                f"{(on_disk or 'unreadable')[:12]}…). The container is still serving the bytes it "
-                "started with — recreate the egress service so it loads this implementation, then "
-                "re-run deploy/egress/probe-egress.sh")
+        # REPORTS, not IS. This value is the gateway's own account of the bytes it loaded, and
+        # the wording has to say so — a compromised proxy would simply report the matching hash.
+        # That is not the control that stops one: a gateway executing attacker code has already
+        # defeated the boundary, and what stands against that is the measured legs and
+        # `internal: true`. What this DOES catch is the realistic case — an edited file and a
+        # container never recreated — which nothing outside the process can observe, because the
+        # bind mount makes `docker cp`/`exec` resolve to the current host file rather than to
+        # the bytes in memory.
+        return ("the gateway REPORTS a different connect-proxy.py than this tree holds "
+                f"(reports {running[:12]}…, on disk {(on_disk or 'unreadable')[:12]}…). The "
+                "container is most likely still serving the bytes it started with — recreate the "
+                "egress service so it loads this implementation, then re-run "
+                "deploy/egress/probe-egress.sh")
 
     # THE ALLOWLIST IS PART OF WHAT WAS PROVED, so a change to it invalidates the proof exactly as
     # a rebuild does. This field was written and never read: `probe-egress.sh` goes to some length
