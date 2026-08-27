@@ -25,9 +25,9 @@ should assign the environment they need directly.
 
 ## Working tree
 
-The parent repository and `admin/` are separate repositories and may both contain unrelated
-uncommitted work. Inspect status, preserve changes you did not create, and never reset, restore,
-stash, or overwrite them.
+The parent repository may contain unrelated uncommitted work, and a separate repository may be
+nested inside this one. Inspect status, preserve changes you did not create, and never reset,
+restore, stash, or overwrite them.
 
 ## Gates and authorities
 

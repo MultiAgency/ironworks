@@ -6,9 +6,16 @@
 #
 # After that, gitleaks runs automatically on every `git commit`.
 # Keep the pin current with:  pre-commit autoupdate
+#
+# AND MOVE `.github/workflows/secret-scan.yml` WITH IT. That workflow pins the same tool by
+# image digest, and the two are updated by different mechanisms — Dependabot proposes the
+# workflow's, `pre-commit autoupdate` moves this one — so they drift apart in silence. The
+# result is a secret gate whose local and CI halves scan with different rules, which is how a
+# finding gets caught in one place and not the other. Running autoupdate here without bumping
+# the workflow is half a change; the versions are meant to be equal.
 repos:
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.21.2
+    rev: v8.30.0
     hooks:
       - id: gitleaks
 

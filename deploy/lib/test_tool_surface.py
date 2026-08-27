@@ -22,7 +22,6 @@ as "nothing is callable", which is indistinguishable from "everything is locked 
 of the four copies this module replaced had drifted into precisely that shape.
 """
 import pathlib
-import tempfile
 import unittest
 
 import tool_surface as ts
@@ -82,34 +81,6 @@ class EgressObservedOff(unittest.TestCase):
         them must still be certifiable, or a taxonomy change reads as a broken surface."""
         for tool in ts.EGRESS:
             self.assertEqual(ts.egress_observed_off({tool: "disabled"}, "selftest"), [tool])
-
-
-class ReadDenyList(unittest.TestCase):
-    """Exported for the two `deploy/broker/` scripts, which are GITIGNORED but present on operator
-    boxes and do import this. It was deleted as dead once, on a header that read as "nothing
-    imports them" — `find . -type f -exec grep -l` still names confine-actor.sh and
-    eval/probe-confinement.sh. Nothing tested it either way until now."""
-
-    def deny(self, text):
-        with tempfile.TemporaryDirectory() as d:
-            p = pathlib.Path(d) / "deny.txt"
-            p.write_text(text)
-            return ts.read_deny_list(p)
-
-    def test_ids_are_read_in_order_with_blanks_and_comments_dropped(self):
-        self.assertEqual(
-            self.deny("# egress\nbuiltin.http\n\n  builtin.http.save  \n\t# indented comment\n"),
-            ["builtin.http", "builtin.http.save"])
-
-    def test_an_empty_or_comment_only_file_reads_as_no_ids(self):
-        """It returns [], and that is correct — but a deny-list is not the certifying reader.
-        parse_catalog is the one that must never see an empty result as an answer."""
-        self.assertEqual(self.deny(""), [])
-        self.assertEqual(self.deny("# nothing yet\n\n"), [])
-
-    def test_a_missing_file_raises_rather_than_reading_as_empty(self):
-        with self.assertRaises(OSError):
-            ts.read_deny_list(pathlib.Path(tempfile.gettempdir()) / "no-such-deny-list-4f2a.txt")
 
 
 class Module(unittest.TestCase):

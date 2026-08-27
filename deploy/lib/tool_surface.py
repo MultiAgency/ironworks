@@ -4,12 +4,14 @@ WHY THIS FILE EXISTS. Four places parsed `/api/webchat/v2/settings/tools` and de
 surface was confined: multi/provision/confine-member.sh, deploy/broker/confine-actor.sh,
 deploy/broker/eval/probe-confinement.sh, and multi/verify/test_egress_closed.py.
 
-All four still call this module. The two `deploy/broker/` ones are GITIGNORED (.gitignore:41) but
-present on operator boxes, and this header used to say they "no longer ship" — which read as
-"nothing imports them", and is how `read_deny_list` (their only caller) came to be deleted as
-dead once. Gitignored is not absent: `grep -r` here does not descend into ignored paths, so
-verify with `find . -type f -exec grep -l` before removing anything this module exports.
-Every one of them is a FAIL-OPEN risk — a parser that returns {} for a body it does not
+Two callers remain. The `deploy/broker/` pair went with the retired broker experiment
+on 2026-08-27, and `read_deny_list` — exported for them alone — went with them. It had been
+deleted once before, as dead, on a header that read as "nothing imports them" while the files
+were still on disk; that removal was wrong and this one is not, because the callers are gone
+rather than merely invisible. THE RULE THAT MISTAKE TAUGHT STILL APPLIES to everything else
+here: gitignored is not absent, `grep -r` does not descend into ignored paths, so verify with
+`find . -type f -exec grep -l` before removing anything this module exports.
+Every one of the four was a FAIL-OPEN risk — a parser that returns {} for a body it does not
 understand reads as "nothing is callable", which is indistinguishable from "everything is
 locked down". Four copies meant four chances for one to drift into that shape, and one had:
 
@@ -63,13 +65,3 @@ def egress_observed_off(state, who=""):
                          "(http/http.save/outbound_deliver) were seen disabled — surface "
                          "unrecognized, refusing to certify (fail closed)")
     return seen
-
-
-def read_deny_list(path):
-    """Deny-list file -> tool ids, blank lines and # comments stripped.
-
-    Used only by the two `deploy/broker/` scripts, which are GITIGNORED but present on operator
-    boxes and do import this (`confine-actor.sh`, `eval/probe-confinement.sh`). The header above
-    used to say that experiment "no longer ships"; the files are still here, so it did not."""
-    with open(path) as fh:
-        return [ln.strip() for ln in fh if ln.strip() and not ln.lstrip().startswith("#")]

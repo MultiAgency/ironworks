@@ -1,7 +1,7 @@
 # deploy/lib/cloudflare.sh — the cloudflared tunnel surface: ingress rules, reload, DNS wait.
 #
 # Factored out when two scripts carried divergent copies of all of this. Both sourcers still
-# exist: provision-agent.sh (tracked) and repoint-hostname.sh (GITIGNORED, .gitignore:55, but
+# exist: provision-agent.sh (tracked) and repoint-hostname.sh (GITIGNORED by the monitoring/maintenance stanza in .gitignore, but
 # present on operator boxes). Removing an export from this file needs
 # `find . -type f -exec grep -l`, not `grep -r`, which does not descend into ignored paths —
 # this header once said only one script shipped, and a caller in the invisible half spent that

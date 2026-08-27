@@ -31,16 +31,6 @@ id_ed25519*
 # Real Worker deploy config (the tracked wrangler.jsonc is a template)
 wrangler.local.jsonc
 
-# Internal records
-admin/
-
-# Retired experiments, kept out of the published tree. Confinement of record is
-# multi/provision/confine-member.sh; nothing here is on a serving path. The rules stay
-# until the directories are removed — a path that is neither tracked nor ignored is
-# invisible to every gate (deploy/gate-coverage.sh).
-deploy/broker/
-deploy/hq/
-
 # Operator-workstation tooling. Fleet operation ships (multi/serve/); tooling for one
 # machine does not. The audience decides, not the content.
 deploy/backup-laptop-agency.sh

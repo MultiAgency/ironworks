@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import contextlib
 import pathlib
 import sys
 import unittest
@@ -40,7 +41,7 @@ class RouteAuthority(unittest.TestCase):
     RECORDED = "2026-08-27T12:00:00+00:00"
 
     def _recorded(self, started=RECORDED, pid=4242):
-        return ((pid, started), "")
+        return (rr.RECORDED, (pid, started), "")
 
     def _stopped_with(self, record, kill, started_at=None):
         """systemd says stopped; vary what the store recorded and what the process looks like."""
@@ -95,8 +96,82 @@ class RouteAuthority(unittest.TestCase):
     def test_a_cleanly_stopped_bridge_leaves_no_record_to_contradict(self):
         """The common path: the bridge compare-and-clears its PID on a clean stop, so there is
         nothing to probe and systemd's word stands."""
-        st = self._stopped_with((None, "bridge PID metadata is missing"), (False, "unused"))
+        st = self._stopped_with(
+            (rr.NO_RECORD, None, "the bridge store records no PID"), (False, "unused"))
         self.assertEqual(st["state"], rr.ABSENT)
+
+
+class WithoutServiceManager(unittest.TestCase):
+    """A host with no systemd still has to be able to converge.
+
+    The bridge is an ordinary `python3 -u telegram_bridge.py`; a unit exists where systemd does,
+    and on a developer machine it is started by hand. Returning UNKNOWN there made deprovision
+    permanently DEGRADED with no operator action that could clear it — a gate people learn to
+    ignore. This module's own host is such a machine, so the path is not hypothetical.
+    """
+
+    RECORDED = "2026-08-27T12:00:00+00:00"
+
+    def _epoch(self, offset=0):
+        import datetime as dt
+        return dt.datetime.fromisoformat(self.RECORDED).timestamp() + offset
+
+    def _no_systemd(self, record, kill=None, started_at=None, removed="1"):
+        stack = [mock.patch.object(rr, "_bridge_record", return_value=record)]
+        if kill is not None:
+            stack.append(mock.patch.object(rr, "_kill_probe", return_value=kill))
+        if started_at is not None:
+            stack.append(mock.patch.object(rr, "_process_started_at",
+                                           return_value=(started_at, "")))
+        with contextlib.ExitStack() as es:
+            for p in stack:
+                es.enter_context(p)
+            return rr.evaluate("unused", removed, "unused", rr.NO_SERVICE_MANAGER)
+
+    def test_a_cleanly_stopped_bridge_is_ABSENT(self):
+        """The pid is cleared on a clean stop, so its absence is positive evidence — which is
+        exactly why "no record" and "cannot read the record" had to stop being the same value."""
+        st = self._no_systemd((rr.NO_RECORD, None, "the bridge store records no PID"))
+        self.assertEqual(st["state"], rr.ABSENT)
+        self.assertEqual(st["authority"], "bridge-state")
+
+    def test_an_unreadable_store_is_UNKNOWN_not_absent(self):
+        st = self._no_systemd((rr.UNREADABLE, None, "bridge PID metadata is unreadable"))
+        self.assertEqual(st["state"], rr.UNKNOWN)
+
+    def test_a_live_bridge_older_than_the_removal_is_PRESENT(self):
+        st = self._no_systemd((rr.RECORDED, (4242, self.RECORDED), ""), kill=(True, ""),
+                              started_at=self._epoch(-10), removed=str(self._epoch(60)))
+        self.assertEqual(st["state"], rr.PRESENT)
+
+    def test_a_live_bridge_started_after_the_removal_is_ABSENT(self):
+        st = self._no_systemd((rr.RECORDED, (4242, self.RECORDED), ""), kill=(True, ""),
+                              started_at=self._epoch(-10), removed=str(self._epoch(-600)))
+        self.assertEqual(st["state"], rr.ABSENT)
+
+    def test_a_reused_pid_does_not_make_it_PRESENT(self):
+        """The identity check is what survives losing systemd's MainPID corroboration."""
+        st = self._no_systemd((rr.RECORDED, (4242, self.RECORDED), ""), kill=(True, ""),
+                              started_at=self._epoch(3600), removed=str(self._epoch(60)))
+        self.assertEqual(st["state"], rr.ABSENT)
+
+    def test_a_dead_recorded_pid_is_ABSENT(self):
+        st = self._no_systemd((rr.RECORDED, (4242, self.RECORDED), ""), kill=(False, "gone"))
+        self.assertEqual(st["state"], rr.ABSENT)
+
+    def test_every_verdict_names_which_authority_answered(self):
+        """"systemd says stopped" and "nothing claims to be running" are different strengths of
+        the same word, and an operator reading an audit line deserves to know which one it was."""
+        st = self._no_systemd((rr.NO_RECORD, None, "no PID"))
+        self.assertIn("BRIDGE_SERVICE_UNIT=none", st["reason"])
+
+    def test_an_UNAVAILABLE_service_manager_is_still_UNKNOWN(self):
+        """The declaration is what selects the weaker authority — never systemd's silence.
+        Otherwise anything that breaks `systemctl` relaxes the check instead of failing it."""
+        with mock.patch.object(rr, "_service_state", return_value=(None, "systemctl failed")):
+            st = rr.evaluate("unused", "1", "unused")
+        self.assertEqual(st["state"], rr.UNKNOWN)
+        self.assertNotIn("authority", st)
 
 
 class ShippedUnit(unittest.TestCase):

@@ -238,6 +238,48 @@ def js_checks(check, record):
               ["node", "--input-type=module", "--check"], stdin=source)
 
 
+def file_ending_guard(record):
+    """A blank line at EOF, or a missing final newline, over every tracked TEXT file.
+
+    WHY THIS IS NOT A RUFF RULE. Both defects this catches shipped past every gate here: a
+    blank line at EOF in `tool_surface.py` and a triple blank line in its test, each left by
+    deleting the thing above it. `ruff` selects `W` now, which covers W291/W292/W293 and E303
+    — but W391 (blank line at EOF) is a PREVIEW rule in the pinned ruff, so `--select W` does
+    not raise it and enabling `--preview` to get it would turn on every other unstable rule
+    with it. `git diff --check` sees it, and nothing here runs that.
+
+    So the one case ruff cannot reach is checked directly, and over ALL tracked text rather
+    than just Python, because the class is not a Python one: the same edit leaves the same
+    residue in a shell script or a markdown file, where no linter is looking at all.
+    """
+    files = tracked("*")
+    if files is None:
+        record("file endings", BLOCKED)
+        return
+    hits, unreadable = [], []
+    for path in files:
+        try:
+            raw = path.read_bytes()
+        except OSError as e:
+            unreadable.append((_rel(path), f"{type(e).__name__}: {e.strerror}"))
+            continue
+        if not raw or b"\0" in raw[:8000]:
+            continue                      # empty, or binary — neither has a "line ending"
+        try:
+            text = raw.decode()
+        except UnicodeDecodeError:
+            continue
+        if text.endswith("\n\n"):
+            hits.append((_rel(path), "blank line at end of file"))
+        elif not text.endswith("\n"):
+            hits.append((_rel(path), "no newline at end of file"))
+    for rel, why in hits:
+        print(f"FAILED: {rel}: {why}", file=sys.stderr)
+    for rel, why in unreadable:
+        print(f"BLOCKED: {rel}: {why}", file=sys.stderr)
+    record("file endings", FAIL if hits else (BLOCKED if unreadable else PASS))
+
+
 def main():
     results = []
 
@@ -260,6 +302,7 @@ def main():
           ["ruff", "check", ".", "deploy/lib/compose-persona", "deploy/ironworks"])
     shell_checks(check, record)
     js_checks(check, record)
+    file_ending_guard(record)
     check("Secretary unit tests",
           ["node", "--test", "deploy/secretary/worker/secretary-core.test.js"])
     check("service definitions",

@@ -16,7 +16,7 @@ requires-python = ">=3.12,<3.14"
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest==9.0.3", "ruff==0.16.4", "coverage==7.6.10"]
+dev = ["pytest==9.1.1", "ruff==0.16.4", "coverage==7.15.4"]
 
 [tool.setuptools.packages.find]
 include = ["multi", "multi.seam"]
@@ -38,10 +38,14 @@ addopts = "-ra"
 [tool.ruff]
 target-version = "py312"
 line-length = 100
-exclude = ["admin"]
 
 [tool.ruff.lint]
-select = ["F", "E9", "B", "C90"]
+# W + E303: the whitespace class. Two real defects — a blank line at EOF and a triple
+# blank line, both left by deleting a function and a test class — shipped past every gate
+# here, because ruff selected neither and nothing runs `git diff --check`. They were
+# caught by hand, which is not a gate. Zero findings when added, so this pins the current
+# state rather than demanding a cleanup.
+select = ["F", "E9", "B", "C90", "W", "E303"]
 
 [tool.ruff.lint.per-file-ignores]
 "**/test_*.py" = ["B", "C901"]

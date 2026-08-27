@@ -60,7 +60,7 @@ ALLOWED_MISSING = {
     # Upstream nearai/ironclaw's own tree, cited by UPGRADE.md so a bump can be checked against
     # the source. Never vendored here — this repo runs the official binary unmodified.
     "docker/reborn/entrypoint.sh": ("absent", "upstream ironclaw path, deliberately not vendored"),
-    # Two gitignored operator scripts (.gitignore:55 and the deploy/hq/ rule's neighbours) that
+    # Two gitignored operator scripts — the workstation-tooling and monitoring stanzas — that
     # CONTRIBUTING.md's "Sourcing an env file" section must name, because they are the worked
     # examples on both sides of that rule: the laptop backup script is a load-bearing `set -a`
     # (restic reads RESTIC_* from its environment) and repoint-hostname.sh is one of the two

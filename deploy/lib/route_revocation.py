@@ -21,6 +21,18 @@ ABSENT, PRESENT, UNKNOWN = "ABSENT", "PRESENT", "UNKNOWN"
 # renaming one without the other fails in CI instead of on a host.
 DEFAULT_UNIT = "bridge.service"
 
+# `BRIDGE_SERVICE_UNIT=none` — the operator DECLARING that this host runs the bridge without a
+# service manager, which is a real configuration: the bridge is an ordinary
+# `python3 -u telegram_bridge.py`, and on a developer machine it is started by hand.
+#
+# The distinction this draws is the whole point. "systemd could not answer" and "there is no
+# systemd here" look identical to `_service_state` and mean opposite things. Inferring the second
+# from the first would make anything that breaks `systemctl` quietly downgrade the authority
+# instead of failing the check — so an unavailable service manager stays UNKNOWN, and only an
+# explicit declaration selects the weaker one. Same shape as the residual-authority ledger:
+# the fact is measured, the meaning is declared, and neither is inferred from the other.
+NO_SERVICE_MANAGER = "none"
+
 
 def _command(args):
     # LC_ALL=C: `ps -o lstart=` renders month and day names in the caller's locale, and
@@ -66,8 +78,18 @@ def _service_state(unit):
     return fields, ""
 
 
+RECORDED, NO_RECORD, UNREADABLE = "recorded", "no-record", "unreadable"
+
+
 def _bridge_record(path, seam_dir):
-    """((pid, started_at_iso), "") for the process the bridge recorded, or (None, why).
+    """(status, record, why). Status separates "nothing is recorded" from "cannot tell".
+
+    THOSE TWO ARE NOT THE SAME ANSWER and the caller decides differently on each. The bridge
+    compare-and-clears its pid on a clean stop precisely so that ABSENCE is positive evidence —
+    no pid means it stopped, not that the question failed. A store that cannot be opened, or a
+    pid that will not parse, is the opposite: unmeasured. Collapsing both into `None` was safe
+    only while systemd was the authority and this was a cross-check; without a service manager
+    it becomes the authority, and then the distinction is the whole verdict.
 
     `started_at` travels with the pid because a pid ALONE cannot say whose it is. The bridge
     compare-and-clears the pid on a clean stop, so a lingering one means an unclean exit — and on
@@ -76,7 +98,7 @@ def _bridge_record(path, seam_dir):
     "a process that inherited its number".
     """
     if not pathlib.Path(path).is_file():
-        return None, "bridge state database is absent, so its process identity is unmeasured"
+        return NO_RECORD, None, "bridge state database is absent, so no bridge has run here"
     sys.path.insert(0, str(seam_dir))
     try:
         import bridge_state as bs
@@ -87,20 +109,20 @@ def _bridge_record(path, seam_dir):
         finally:
             st.close()
     except Exception as e:
-        return None, f"bridge PID metadata is unreadable ({type(e).__name__}: {e})"
+        return UNREADABLE, None, f"bridge PID metadata is unreadable ({type(e).__name__}: {e})"
     if raw in (None, ""):
-        return None, "bridge PID metadata is missing"
+        return NO_RECORD, None, "bridge PID metadata is missing, which a clean stop clears"
     try:
         pid = int(raw)
     except (TypeError, ValueError):
-        return None, f"bridge PID metadata is malformed ({raw!r})"
+        return UNREADABLE, None, f"bridge PID metadata is malformed ({raw!r})"
     if pid <= 0:
-        return None, f"bridge PID metadata is malformed ({raw!r})"
-    return (pid, started), ""
+        return UNREADABLE, None, f"bridge PID metadata is malformed ({raw!r})"
+    return RECORDED, (pid, started), ""
 
 
 def _bridge_pid(path, seam_dir):
-    record, why = _bridge_record(path, seam_dir)
+    _status, record, why = _bridge_record(path, seam_dir)
     return (record[0] if record else None), why
 
 
@@ -206,7 +228,7 @@ def _contradicted_by_a_live_recorded_pid(db_path, seam_dir):
     An absent store or an absent pid is not a contradiction: nothing has claimed to be running.
     A pid that cannot be identified IS one — unmeasured must not read as stopped.
     """
-    record, _why = _bridge_record(db_path, seam_dir)
+    _status, record, _why = _bridge_record(db_path, seam_dir)
     if record is None:
         return ""
     recorded_pid, started_iso = record
@@ -225,10 +247,66 @@ def _contradicted_by_a_live_recorded_pid(db_path, seam_dir):
             "is still running — a bridge outside this unit still holds the route")
 
 
+def _without_a_service_manager(db_path, seam_dir, registry_removed_at, why_no_service):
+    """The recorded-process authority, for a host that has no systemd to ask.
+
+    NOT EVERY HOST RUNS THE BRIDGE UNDER A UNIT. The renderer installs one where systemd exists,
+    but the bridge is an ordinary `python3 -u telegram_bridge.py` and on a developer machine it
+    is started by hand. Returning UNKNOWN there made deprovision unable to converge ANYWHERE
+    without systemd — a permanent DEGRADED with no operator action that could clear it, which is
+    how a gate becomes noise. This module's own host is such a machine.
+
+    So fall back to what the store records, which is the same evidence the systemd path
+    cross-checks against: a pid, and the start time the bridge wrote for itself. What is lost is
+    only the MainPID corroboration — the identity check still separates the recorded bridge from
+    a process that inherited its number, and ABSENT still requires positive evidence rather than
+    an absence of information. The verdict says which authority answered, because "systemd says
+    it is stopped" and "no process is running and nothing claims otherwise" are different
+    strengths of the same word.
+    """
+    note = f"no service manager to consult ({why_no_service})"
+    status, record, why = _bridge_record(db_path, seam_dir)
+    if status == UNREADABLE:
+        return {"state": UNKNOWN, "reason": f"{note}, and {why}"}
+    if status == NO_RECORD:
+        return {"state": ABSENT, "authority": "bridge-state", "reason": f"{note}; {why}"}
+
+    pid, started_iso = record
+    alive, why = _kill_probe(pid)
+    if alive is False:
+        return {"state": ABSENT, "authority": "bridge-state", "pid": pid,
+                "reason": f"{note}; the recorded bridge PID {pid} is not running"}
+    if alive is None:
+        return {"state": UNKNOWN, "reason": f"{note}; PID {pid} could not be probed: {why}"}
+
+    same, why = _is_the_recorded_process(pid, started_iso)
+    if same is False:
+        return {"state": ABSENT, "authority": "bridge-state", "pid": pid,
+                "reason": f"{note}; {why}"}
+    if same is None:
+        return {"state": UNKNOWN,
+                "reason": f"{note}; PID {pid} is running but could not be identified: {why}"}
+    started, why = _process_started_at(pid)
+    if started is None:
+        return {"state": UNKNOWN, "reason": f"{note}; {why}"}
+    verdict = _compare_epochs(pid, started, registry_removed_at)
+    verdict["authority"] = "bridge-state"
+    verdict["reason"] = f"{note}; {verdict['reason']}"
+    return verdict
+
+
 def evaluate(db_path, registry_removed_at, seam_dir, unit=DEFAULT_UNIT):
     """Return a state document. Only ABSENT permits lifecycle success."""
+    if unit == NO_SERVICE_MANAGER:
+        # DECLARED, never inferred. See NO_SERVICE_MANAGER.
+        return _without_a_service_manager(db_path, seam_dir, registry_removed_at,
+                                          f"BRIDGE_SERVICE_UNIT={NO_SERVICE_MANAGER}")
     service, why = _service_state(unit)
     if service is None:
+        # NOT a licence to fall back. systemd was expected here and could not answer, which is
+        # exactly the case where a weaker authority would be a silent downgrade: anything that
+        # breaks `systemctl` would relax the check rather than fail it. An operator who really
+        # runs the bridge without a service manager says so once, above.
         return {"state": UNKNOWN, "reason": why}
     main_pid, terminal = _serving_pid(service, unit)
     if terminal is not None:

@@ -50,7 +50,7 @@ check_agent() {
   BOTU=$(fleet_env_get "$envf" TELEGRAM_BOT_USERNAME)
   local port="${API##*:}" container; container="$(fleet_container "$slug")"
   # A local instance has no public hostname: it is reached on loopback only and
-  # fronts no Telegram bot (ironclaw-hq, the confidentiality-demo rig, is one).
+  # fronts no Telegram bot (ironclaw-hq is one).
   # Its container/API/persona checks all still apply; the public-route ones describe a
   # surface it does not have, so they SKIP rather than FAIL. (The --deep auth-model
   # check is a pure admin-API call and still runs — it asserts the image, not a bot.)
