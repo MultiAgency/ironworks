@@ -1,32 +1,34 @@
-Qwen/Qwen3.5-122B-A10B  # TEE-hosted on NEAR AI's own fleet (2026-08-20)
+qwen/qwen3.5-397b-a17b  # selected 2026-08-27; IronWorks behaviour is NOT YET EARNED
 #
-# The model of record for every MultiAgency agent. Chosen for three reasons, in order:
+# A model pin is a behavioural claim, not merely a version string.
 #
-# 1. PRIVACY. TEE-hosted models run inside NEAR AI's enclaves with TLS terminating INSIDE
-#    the TEE — 'nobody, not even NEAR, can see your prompts or outputs' (docs.near.ai/
-#    cloud/private-inference). Third-party models (anthropic/*, openai/*, google/*) are
-#    PROXIED to their providers and the TEE guarantee does not extend to them. Partner
-#    books go into every prompt, so this is the difference between a claim we can make
-#    and one we cannot.
-# 2. COST. Automatic prompt caching applies to TEE-hosted models only. The persona is a
-#    ~13KB prefix re-sent every turn, which is exactly the case caching is built for, and
-#    the token price is roughly a third of the proxied default it replaced.
-# 3. BEHAVIOUR — tested, not assumed (2026-08-20, against a real partner book): held the
-#    evidence discipline under 'give me the number, no caveats' pressure, refused a stacked
-#    approve/modify/send-as-me request with reasons, and answered the real cycle question
-#    in 7.7s citing all three reconciliation gaps.
+# TRANSITION. The prior Qwen/Qwen3.5-122B-A10B pin was operationally invalidated when
+# IronWorks' same configured nearai_chat provider path began rejecting it deterministically
+# with HTTP 400 `Model not found`. That does NOT claim confirmed permanent catalogue withdrawal.
+# Public catalogue presence is not sufficient evidence that a model is usable through
+# IronWorks' configured provider path. A pre-pin minimal turn on that exact path accepted the
+# exact identifier above, reached terminal success, and returned the same identifier without an
+# observed alias substitution; release certification must still re-earn the model-sensitive
+# serving proofs.
 #
-# Rejected: moonshotai/kimi-k2.6 (attested but 13.7s for a two-token reply — unusable in
-# chat); zai-org/GLM-5.1-FP8 (correct but 14.5s); the three explicitly 'attested 3p' models
-# report is_ready=false. Re-test BEHAVIOUR before changing this line; a model swap changes
-# the product's core promise, not just its cost.
+# SELECTION, NOT CERTIFICATION. The provider catalogue describes this model as an attested model
+# served via Chutes TEE and verified end-to-end by NEAR AI. That metadata is only the reason for
+# selecting it. Public catalogue metadata is selection evidence, not release evidence. IronWorks
+# has NOT earned a TEE, privacy, or attestation guarantee for this model. Certification must
+# verify that property on the exact provider path used by the pinned runtime.
 #
-# PROOFS RE-RUN ON THIS MODEL (2026-08-20, laptop MT instance) — a model swap changes
-# behaviour, so the security evidence was re-earned, not inherited:
-#   test_adversarial_cross_org.py  5/5  — hostile client contained; cross-org boundary holds.
-#     NOTE: under injection this model ATTEMPTS tools (builtin__glob, builtin__list_dir)
-#     where the previous one did not. Both are in the confinement allowlist and returned
-#     nothing of the other client's — but it makes confine-member.sh load-bearing in
-#     practice, not just in principle. Re-run BOTH proofs after any model change.
-#   test_two_clients.py           11/11 — two clients sealed; 'persona governs (evidence
-#     tags)' passes for both, so the discipline survives the swap.
+# CLAIMS RESET. This model's IronWorks behaviour is NOT YET EARNED. No isolation, answer-quality,
+# privacy/attestation, caching/cost, or live-tenant claim carries forward from the previous
+# model. A model swap requires re-earning model-sensitive release evidence. Evidence attached to
+# candidate 83024202440a1a6b34ab0ede3c251d601f617031 remains historical evidence for that frozen,
+# blocked 122B candidate and must not be relabelled as certification of this model.
+#
+# COST / CACHING. Provider pricing may discount cached input. IronClaw `usage.cost` is a computed
+# estimate and may not model that discount correctly, so `usage.cost` alone is not spend
+# reconciliation. No caching or cost behaviour is claimed for this 397B model until measured.
+#
+# CERTIFICATION REQUIRED. Re-earn provider-path availability; privacy/attestation on the exact
+# pinned serving path; the original two-client isolation proof; a dedicated two-pass
+# answer-quality evaluation; cost/caching measurement; and real `nf` Telegram acceptance.
+# Previously completed operational reconciliation is reusable only where the exact underlying
+# state and non-model-dependent contract remain unchanged.
