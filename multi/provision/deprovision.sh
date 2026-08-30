@@ -53,7 +53,8 @@ while [ $# -gt 0 ]; do case "$1" in
   *) echo "!! unknown arg: $1" >&2; exit 2 ;;
 esac; shift; done
 
-case "$SLUG" in (*[!a-z0-9-]*|"") echo "!! slug must be exact lowercase [a-z0-9-]+ — no wildcards, no prefixes" >&2; exit 2 ;; esac
+fleet_slug_valid "$SLUG" \
+  || { echo "!! slug must be exact lowercase [a-z0-9-]+ — no wildcards, no prefixes" >&2; exit 2; }
 
 CLIENTS_DIR="${CLIENTS_DIR:-$FLEET_AGENCY_DIR/clients}"
 IDENTITIES_FILE="${IDENTITIES_FILE:-$FLEET_AGENCY_DIR/account-identities/identities.json}"
@@ -144,8 +145,8 @@ REGISTRY_REMOVED_AT="${SCOPE_REGISTRY_REMOVED_AT:-}"
 # second run into a BLOCKED one. Only `group_id` has a demonstrated need to outlive the registry.
 if [ -n "$ACCT_TOKEN" ]; then
   AUTH_BODY=$(mktemp "${TMPDIR:-/tmp}/ironworks-deprovision-auth.XXXXXX")
-  AUTH_CODE=$(curl_header "X-Service-Token: $ACCT_TOKEN" -s --max-time 15 \
-    -o "$AUTH_BODY" -w '%{http_code}' "$ACCOUNT_BASE/list_accounts" 2>/dev/null || echo 000)
+  AUTH_CODE=$(fleet_http_code curl_header "X-Service-Token: $ACCT_TOKEN" -s --max-time 15 \
+    -o "$AUTH_BODY" -w '%{http_code}' "$ACCOUNT_BASE/list_accounts" 2>/dev/null)
   AUTH_DOC=$(cat "$AUTH_BODY"); rm -f "$AUTH_BODY"
   if [ "$AUTH_CODE" = "200" ]; then
     ORG_ID=$(printf '%s' "$AUTH_DOC" | fleet_json "d.get('org') or ''") || {
@@ -286,8 +287,8 @@ _dereg=$(ACCOUNT_IDENTITIES_FILE="$IDENTITIES_FILE" python3 "$IDENTITIES" remove
 echo "   deregistered $_dereg org token(s) (hot-reloaded, effective now)"
 
 if [ -n "$ACCT_TOKEN" ]; then
-  hc=$(curl_header "X-Service-Token: $ACCT_TOKEN" -s -o /dev/null -w '%{http_code}' \
-    "$ACCOUNT_BASE/list_accounts" || echo 000)
+  hc=$(fleet_http_code curl_header "X-Service-Token: $ACCT_TOKEN" \
+    -s -o /dev/null -w '%{http_code}' "$ACCOUNT_BASE/list_accounts")
   if [ "$hc" != "401" ]; then
     echo "!! Account-token revocation UNVERIFIED: old token returned HTTP $hc, expected 401." >&2
     echo "   Registry and credential retained for a safe retry; no success will be reported." >&2
@@ -337,8 +338,10 @@ fi
 # Full limitation and current controls: SECURITY.md.
 if [ -n "$IC_TOKEN" ]; then
   PROBE="/v1/responses/resp_00000000000000000000000000000000"
-  ctl=$(curl_bearer "not-a-real-token-000000000000" -s -o /dev/null -w '%{http_code}' "$IRONCLAW_API$PROBE" || echo 000)
-  live=$(curl_bearer "$IC_TOKEN" -s -o /dev/null -w '%{http_code}' "$IRONCLAW_API$PROBE" || echo 000)
+  ctl=$(fleet_http_code curl_bearer "not-a-real-token-000000000000" \
+    -s -o /dev/null -w '%{http_code}' "$IRONCLAW_API$PROBE")
+  live=$(fleet_http_code curl_bearer "$IC_TOKEN" \
+    -s -o /dev/null -w '%{http_code}' "$IRONCLAW_API$PROBE")
   if [ "$ctl" = "000" ] || [ "$live" = "000" ]; then
     REVOCATION="BLOCKED"
     echo "   !! REVOCATION UNVERIFIED — the instance did not answer the probe (control=$ctl, member=$live)." >&2

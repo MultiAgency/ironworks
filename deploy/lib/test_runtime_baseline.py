@@ -64,11 +64,23 @@ def test_no_runtime_path_publishes_ssh():
 
 
 def test_service_capability_freeze_is_unchanged():
+    """Every committed service is read-only, writes nothing, and reaches nothing.
+
+    THE LOOP IS GUARDED BECAUSE A GLOB CAN MATCH NOTHING. `for path in …glob(): assert …` is a
+    no-op over an empty directory, so moving or emptying `multi/services` would retire the
+    capability freeze while this test kept passing — the freeze is the thing every tenant's
+    audience rule rests on, so its silent retirement is the failure worth catching. Two suites in
+    this directory already guard their own scans this way (`test_shadowed_binding`'s
+    `test_the_scan_is_not_vacuous`, `test_egress_destinations`); this one did not."""
     expected = {"account_records": "read-only", "writes": "none", "egress": "none",
                 "outreach": "none"}
 
-    for path in (ROOT / "multi/services").glob("*.json"):
-        assert json.loads(path.read_text())["capabilities"] == expected
+    paths = sorted((ROOT / "multi/services").glob("*.json"))
+    assert len(paths) >= 2, (
+        f"found {len(paths)} service definition(s) under multi/services — this check is looking "
+        "in the wrong place, or the definitions moved and the capability freeze is now ungated")
+    for path in paths:
+        assert json.loads(path.read_text())["capabilities"] == expected, path.name
 
 
 def test_compose_runtimes_prepare_workspace_without_dac_override():

@@ -19,19 +19,18 @@ SMOKE_BASE="${SMOKE_BASE:-http://127.0.0.1:8443}"
 
 # smoke_code <label> <want-code> <secret-header|""> <path> [curl args…] — assert an HTTP status.
 #
-# `|| true` and a `${…:-000}` default, never `|| echo 000`: on a refused connection curl exits
-# NON-ZERO (which would abort the assignment under `set -e`) and still writes `000` itself, so
-# appending another would produce the literal `000000`, matching no expectation for the wrong
-# reason. The secret header goes through curl_header to stay off argv; "" skips it, which is
-# what the no-token check needs.
+# The connection-failure rule is fleet.sh's `fleet_http_code`, not a third copy of it: this file
+# used to state it in prose and implement it, while eight call sites elsewhere implemented the
+# WRONG version. One reader means one answer to "what does an unreachable service look like".
+# The secret header goes through curl_header to stay off argv; "" skips it, which is what the
+# no-token check needs.
 smoke_code() {
   local _label="$1" _want="$2" _hdr="$3" _path="$4" _got; shift 4
   if [ -n "$_hdr" ]; then
-    _got="$(curl_header "$_hdr" -s -o /dev/null -w '%{http_code}' -m 15 "$@" "$SMOKE_BASE$_path" || true)"
+    _got="$(fleet_http_code curl_header "$_hdr" -s -o /dev/null -w '%{http_code}' -m 15 "$@" "$SMOKE_BASE$_path")"
   else
-    _got="$(curl -s -o /dev/null -w '%{http_code}' -m 15 "$@" "$SMOKE_BASE$_path" || true)"
+    _got="$(fleet_http_code curl -s -o /dev/null -w '%{http_code}' -m 15 "$@" "$SMOKE_BASE$_path")"
   fi
-  _got="${_got:-000}"
   [ "$_got" = "$_want" ] || {
     echo "!! FAIL  $_label -> HTTP $_got (want $_want)" >&2
     [ "$_got" = 000 ] && echo "         000 means the request never arrived — nothing was proved." >&2

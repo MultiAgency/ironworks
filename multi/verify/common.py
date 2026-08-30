@@ -181,8 +181,6 @@ def delete_user(user_id, op_token, api=None):
     return code
 
 
-
-
 def get(path, token, api=None, timeout=30):
     """GET a JSON endpoint with a bearer token. The read-side twin of post().
 

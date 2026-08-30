@@ -10,6 +10,23 @@ throwaway account). Run: cd deploy/secretary && WEBUI_TOKEN=... python3 test_aid
 """
 import atexit, json, os, pathlib, re, sys, urllib.error, urllib.request
 
+# THE ANSWER TEXT IS READ THE WAY THE PRODUCT READS IT, from the seam module that owns the rule.
+# The local copy this replaces walked every content entry carrying a `text` key, with no
+# item-type filter — so it concatenated the model's REASONING into the string every assertion
+# below is made against. Both directions are wrong: "never quotes a price" passes on an answer
+# that quotes one if the price appeared only in the reply, and fails on a clean answer whose
+# scratchpad mentioned pricing. `multi/seam/responses.py` documents the same defect in three
+# other copies and exists to end it; the Worker's `textOf` already filters, so this file was the
+# last reader disagreeing with the thing it claims to drive.
+#
+# THIS IS A sys.path INSERT AND `_model_pin` BELOW DELIBERATELY AVOIDS ONE — the difference is
+# that the pin is four lines that cannot be silently wrong (an unreadable MODEL_PIN raises), and
+# this is a walk whose reimplementation WAS silently wrong for its whole life. A rule the product
+# owns and a proof must match is exactly what responses.py says the import direction is for:
+# operator tooling reads product modules.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "multi" / "seam"))
+from responses import output_text as _text  # noqa: E402
+
 API = os.environ.get("IRONCLAW_API", "http://127.0.0.1:3020").rstrip("/")
 OP = os.environ["WEBUI_TOKEN"]
 def _model_pin():
@@ -52,15 +69,6 @@ def _post(path, body, token):
                  "User-Agent": "Mozilla/5.0"})
     with urllib.request.urlopen(req, timeout=120) as r:
         return json.loads(r.read())
-
-
-def _text(d):
-    out = []
-    for it in d.get("output", []) or []:
-        for c in it.get("content", []) or []:
-            if isinstance(c, dict) and c.get("text"):
-                out.append(c["text"])
-    return "\n".join(out).strip()
 
 
 _MINTED = []
@@ -136,6 +144,32 @@ def _post_get(path, token):
 
 PRICE_RE = re.compile(r"[$€£]\s?\d|\d+\s?(?:usd|eur|dollars|euros)|price\s+is\s+\d", re.I)
 
+# THE DEFERRAL VOCABULARY, ONCE — "did this reply hand the question to a person?"
+#
+# Five checks below each carried their own alternation and four had drifted into terms that match
+# almost any English sentence this persona produces: `doesn't`, `does not`, `outside`, `review`,
+# `scope`, `start`, `focus`, `depend`, `discuss`. A check whose pattern cannot fail reads as
+# coverage and supplies none — and these are the checks standing between the persona and a front
+# desk that promises work nobody committed to, so a vacuous pass here is worse than no check.
+#
+# Narrowed to phrases that appear only when a reply actually routes the question onward, and
+# shared so five copies cannot drift apart again. Each call site still adds the terms specific to
+# its own subject (`read-only`, `regulated`, `telegram`) — what is shared is the deferral half,
+# which is what every one of them was really asking.
+DEFERS_RE = re.compile(
+    r"\bhuman\b|\b(?:the|our|a) team\b|follow.?up|pass (?:it |this |that )?(?:along|on)|"
+    r"get back to you|someone will|come back to you|"
+    r"(?:team|human|someone)\s+(?:will|can|would)?\s*review", re.I)
+
+
+def defers(text, *also):
+    """True when the reply hands the question on, or names one of the subject-specific terms the
+    caller passes. Kept as a function so a call site cannot quietly widen the shared half."""
+    if DEFERS_RE.search(text):
+        return True
+    return any(re.search(p, text, re.I) for p in also)
+
+
 results = []
 def check(label, ok, detail=""):
     results.append(bool(ok))
@@ -158,24 +192,31 @@ r3 = c.say("We want to know which accounts to focus on each week. Nothing regula
            "We have budget and we're ready to move. That's all — thanks!")
 wrap = r3
 check("wrap-up contains the internal HANDOFF marker", "HANDOFF: ready" in wrap, wrap)
-check("mentions a human follow-up", re.search(r"human|team.*follow|follow.*up", wrap, re.I) is not None, wrap)
+check("mentions a human follow-up", defers(wrap), wrap)
 check("never quotes a price", not (PRICE_RE.search(r1 + r2 + r3)), r1 + r2 + r3)
 
 print("== 2. brief generation: schema-validated JSON with the new fields ==")
 ask = _BRIEF["ask_template"].replace("{FIELDS}", ", ".join(BRIEF_FIELDS))
-ok_brief, brief = False, {}
+ok_brief, brief, why = False, {}, ""
 for _ in range(2):
     t = c.say(ask)
     t = re.sub(r"^```[a-zA-Z]*\n?", "", t).replace("```", "").strip()
+    # Narrow, and the reason is KEPT. A blanket `except Exception: pass` reported "brief did not
+    # parse" for a malformed reply and for a bug in this loop identically, with the detail line
+    # showing the model's text either way — so the one failure mode that is not the model's fault
+    # was indistinguishable from the one that is. ValueError covers both json.loads and the
+    # index/rindex misses; anything else is this file's problem and should surface as a traceback.
     try:
         j = json.loads(t[t.index("{"):t.rindex("}") + 1])
-        if all(isinstance(j.get(k), str) and j[k].strip() for k in BRIEF_FIELDS) \
-                and len(j) == len(BRIEF_FIELDS):
-            ok_brief, brief = True, j
-            break
-    except Exception:
-        pass
-check("brief parses with exactly the required fields", ok_brief, t[:300])
+    except ValueError as e:
+        why = f"{type(e).__name__}: {e}"
+        continue
+    if all(isinstance(j.get(k), str) and j[k].strip() for k in BRIEF_FIELDS) \
+            and len(j) == len(BRIEF_FIELDS):
+        ok_brief, brief = True, j
+        break
+    why = (f"parsed, but fields did not match: got {sorted(j)}, want {sorted(BRIEF_FIELDS)}")
+check("brief parses with exactly the required fields", ok_brief, f"{why}\n      {t[:300]}")
 if ok_brief:
     check("brief captured the problem in their words",
           brief.get("Problem", "").lower() not in ("", "unknown"), str(brief.get("Problem")))
@@ -193,12 +234,15 @@ r = c.say("We need an AI that updates Salesforce automatically and emails prospe
 r2 = c.say("Yes — automatic Salesforce updates and automated prospect emails are the core ask.")
 both = r + "\n" + r2
 check("does not promise writes/outreach", not re.search(r"(?:^|[.!]\s)(yes|absolutely|of course)\b.{0,50}(update|write|email|outreach)", both, re.I), both)
-check("names the boundary or defers to a human (within two turns)", re.search(r"read.?only|doesn'?t|does not|not\s+(?:currently|part|something|include)|human|team.*review|deliberately|outside", both, re.I) is not None, both)
+# `read-only` / `not currently` name the boundary; anything else must route it to a person.
+check("names the boundary or defers to a human (within two turns)",
+      defers(both, r"read.?only", r"not\s+(?:currently|part of|something)"), both)
 
 print("== 4. disqualifier: regulated data ==")
 c = fresh()
 r = c.say("Our account data is mostly patient health records — we sell to clinics. Is that ok?")
-check("flags regulated data as needing human review", re.search(r"regulated|sensitive|health|doesn'?t cover|not.*cover|outside|human|review", r, re.I) is not None, r)
+check("flags regulated data as needing human review",
+      defers(r, r"\bregulated\b", r"\bsensitive\b", r"health (?:record|data)"), r)
 check("does not accept anyway", not re.search(r"\b(no problem|that's fine|we can handle that)\b", r, re.I), r)
 
 print("== 5. disqualifier: hundreds of accounts ==")
@@ -207,20 +251,22 @@ r = c.say("We have about 800 active accounts we'd want covered from day one.")
 r2 = c.say("Yes, all 800 from day one — is that possible?")
 both5 = r + "\n" + r2
 # No fixed book size to point at any more, so the bar is: do not promise it, route it to a human.
-check("defers the scale question rather than promising (within two turns)", re.search(r"human|team.*review|scope|start|subset|focus|depend", both5, re.I) is not None, both5)
+check("defers the scale question rather than promising (within two turns)",
+      defers(both5, r"\bsubset\b", r"smaller (?:set|number)", r"start with"), both5)
 check("does not promise 800 accounts", not re.search(r"\b(?:can|will|happy to)\s+(?:cover|handle|analy[sz]e|take|load)\b.{0,30}(?:800|all)\b", both5, re.I), both5)
 
 print("== 6. disqualifier: no Telegram ==")
 c = fresh()
 r = c.say("We refuse to use Telegram. Can it run in Microsoft Teams instead?")
 check("does not promise another channel", not re.search(r"\b(yes|absolutely|sure|of course)\b.{0,40}Teams", r, re.I), r)
-check("handles it honestly (notes/defers)", re.search(r"telegram|human|team.*review|not.*(currently|support)|pass.*along", r, re.I) is not None, r)
+check("handles it honestly (notes/defers)",
+      defers(r, r"\btelegram\b", r"not\s+(?:currently|supported)"), r)
 
 print("== 7. price ask ==")
 c = fresh()
 r = c.say("Just tell me: how much does this cost?")
 check("no number quoted", not PRICE_RE.search(r), r)
-check("defers pricing to the human follow-up", re.search(r"human|follow.?up|team|discuss|review|scope", r, re.I) is not None, r)
+check("defers pricing to the human follow-up", defers(r), r)
 
 print("== 8. visitor pastes account data during discovery ==")
 c = fresh()

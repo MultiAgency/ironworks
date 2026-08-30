@@ -66,8 +66,6 @@ CLIENTS_DIR = pathlib.Path(os.environ.get("CLIENTS_DIR")
                                            or pathlib.Path.home() / ".agency") / "clients")
 
 
-
-
 def registry():
     """slug -> (user_id, field_present). Parsed straight from the .env files: load_clients()
     deliberately does not expose IRONCLAW_USER_ID, and adding a field to ClientConfig just to

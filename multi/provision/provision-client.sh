@@ -54,7 +54,7 @@ if [ -n "$ENV_OUT" ]; then
 fi
 
 # human mode: never echo the token — write it to a chmod-600 file and print the path.
-slug="$(printf '%s' "$NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//')"
+slug="$(fleet_slug "$NAME")"
 umask 077; mkdir -p "$FLEET_AGENCY_DIR/sealed"
 out="$FLEET_AGENCY_DIR/sealed/${slug:-client}.env"
 { echo "IRONCLAW_USER_ID=$uid"; echo "IRONCLAW_TOKEN=$token"; } > "$out"

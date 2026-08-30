@@ -73,7 +73,7 @@ if [ "${PROVISION_FROM_ENV:-}" != 1 ] && [ -n "${CONTAINER:-}${IRONCLAW_REBORN_W
   exit 1
 fi
 
-slug="$(printf '%s' "$NAME" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//')"
+slug="$(fleet_slug "$NAME")"
 [ -n "$slug" ] || { echo "!! could not derive a slug from '$NAME'" >&2; exit 1; }
 container="ironclaw-$slug"
 volume="ironclaw-$slug-data"
@@ -89,18 +89,17 @@ persona_prompt="$("$REPO_DIR/deploy/lib/compose-persona" compose \
   --persona "$PERSONA_SOURCE" --tail "$REPO_DIR/agent/identity/_operational-tail.md" \
   --slug "$slug" --slot "AGENT_NAME=$AGENT_NAME" --slot "PURPOSE=$PURPOSE")"
 
-# --- allocate the next free loopback port from 3001 up ---------------------------
-# ONE lsof for the whole scan. This used to spawn a fresh lsof per candidate — and lsof walks
-# every open fd on the box each time — so on a host already running twenty agents it cost twenty
-# full scans to find port 3021, getting slower as the fleet grew.
-# `|| true`: no listeners at all is a legitimate empty result, not a failure, and under pipefail
-# an empty grep would abort the assignment.
-listening="$(lsof -nP -iTCP -sTCP:LISTEN 2>/dev/null | awk 'NR>1 {n=split($9,a,":"); print a[n]}' | sort -u || true)"
-port=""
-for p in $(seq 3001 3099); do
-  if ! printf '%s\n' "$listening" | grep -qx "$p"; then port="$p"; break; fi
-done
-[ -n "$port" ] || { echo "!! no free port in 3001-3099" >&2; exit 1; }
+# --- allocate the next free port from 3001 up ------------------------------------
+# `fleet_first_free_port` still does ONE process for the whole scan — the property the previous
+# shape was written for, after a fresh lsof per candidate made finding port 3021 on a
+# twenty-agent host cost twenty whole-system fd walks.
+#
+# What changed is that lsof's ABSENCE is no longer an answer. `lsof … 2>/dev/null || true` on a
+# host without it produced an empty listener list, so every port looked free and this handed out
+# 3001 with an agent already bound to it — the recreate then failed on a port conflict several
+# steps later, naming the port rather than the reason.
+port="$(fleet_first_free_port 3001 3099)" \
+  || { echo "!! no free port in 3001-3099" >&2; exit 1; }
 
 # --- secrets: fresh operator token + webhook secret per instance -----------------
 OP_TOKEN="$(openssl rand -hex 32)"
@@ -188,7 +187,12 @@ echo "-- telegram webhook: $wh"
 SECRETS_DIR="${MULTRON_SECRETS_DIR:-$FLEET_AGENCY_DIR/agents}"
 umask 077; mkdir -p "$SECRETS_DIR"
 secfile="$SECRETS_DIR/$slug.env"
-q() { local s=$1 sq=\'; printf "'%s'" "${s//$sq/$sq\\$sq$sq}"; }   # single-quote for source-compat (PURPOSE has spaces)
+# `fleet_sh_quote`, not a local `q()`. This file sources fleet.sh at the top and then defined its
+# own single-quoter for the same job the library function exists for — writing operator-supplied
+# text into a file that gets `.`-sourced. fleet.sh's header says why one copy: escaping rules
+# belong in one place, and `provision.sh` already writes its env file through it. Two quoters for
+# one file format is how a display name with an apostrophe works in one provisioning path and
+# breaks the other.
 cat > "$secfile" <<EOF2
 # ironworks agent "$NAME" — keep private; never commit
 IRONCLAW_API_BASE=http://127.0.0.1:$port
@@ -197,9 +201,9 @@ TELEGRAM_BOT_USERNAME=$BOT_USERNAME
 AGENT_HOSTNAME=$hostname
 TELEGRAM_WEBHOOK_SECRET=$WH_SECRET
 CONTAINER=$container
-AGENT_NAME=$(q "$AGENT_NAME")
-PURPOSE=$(q "$PURPOSE")
-PERSONA_SOURCE=$(q "$PERSONA_SOURCE")
+AGENT_NAME=$(fleet_sh_quote "$AGENT_NAME")
+PURPOSE=$(fleet_sh_quote "$PURPOSE")
+PERSONA_SOURCE=$(fleet_sh_quote "$PERSONA_SOURCE")
 EOF2
 chmod 600 "$secfile"
 

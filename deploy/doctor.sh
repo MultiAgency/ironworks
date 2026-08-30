@@ -204,18 +204,44 @@ check_agent() {
 # Whole-fleet mode only. There is deliberately no suppression list: an uncovered
 # ironclaw-* container is either mid-provision, a leftover, or hand-built — and all
 # three resolve by fixing the state, not by silencing the check.
+#
+# AND THE CHECK ITSELF HAD THE DEFECT ITS OWN COMMENT DESCRIBES. `running=$(docker ps … | grep
+# '^ironclaw-')` under a file with no `set -e` (deliberate, see the header) leaves `$running`
+# empty on a docker that is absent, refused, or simply slow — the loop then iterates nothing and
+# the function printed PASS. "Every running agent container has an env file" was reported green
+# by a check that had not established there were any, which is the same silence one paragraph up
+# says must not read as fleet green.
+#
+# So the docker call is now separated from the match: a FAILED enumeration is SKIP (nothing was
+# learned), an enumeration that succeeds and finds nothing running says so explicitly, and PASS
+# is reserved for the case where containers were found AND every one of them was covered.
 check_fleet_coverage() {
   AGENT_RC=0
-  local covered running c
+  local covered running ps_rc c n=0
   covered=$(for f in "$SECRETS_DIR"/*.env; do [ -e "$f" ] || continue; fleet_container "$(basename "$f" .env)"; done)
-  running=$(docker ps --format '{{.Names}}' 2>/dev/null | grep '^ironclaw-')
   echo "=== fleet coverage: running agent containers vs $SECRETS_DIR/*.env ==="
+  # Assigned on its own line so `$?` is docker's, not grep's: `grep` exits 1 on no match, which
+  # is a legitimate empty fleet, while docker exiting non-zero means the question was not asked.
+  running=$(docker ps --format '{{.Names}}' 2>/dev/null); ps_rc=$?
+  if [ "$ps_rc" != 0 ]; then
+    skip "every running agent container has an env file" \
+      "docker ps exited $ps_rc — the fleet could not be enumerated, so nothing was checked"
+    echo
+    return 0
+  fi
+  running=$(printf '%s\n' "$running" | grep '^ironclaw-' || true)
   for c in $running; do
+    n=$((n + 1))
     printf '%s\n' "$covered" | grep -qx "$c" && continue
     fail "$c is running with no env file — no check above ran against it, persona included" \
       "add $SECRETS_DIR/<slug>.env for it, or stop the container if it is a leftover"
   done
-  [ "$AGENT_RC" = 0 ] && pass "every running agent container has an env file"
+  if [ "$n" = 0 ]; then
+    skip "every running agent container has an env file" \
+      "docker reported no ironclaw-* container running — an empty fleet is not a covered one"
+  elif [ "$AGENT_RC" = 0 ]; then
+    pass "every running agent container has an env file ($n running)"
+  fi
   echo
   return $AGENT_RC
 }

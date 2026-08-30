@@ -663,8 +663,6 @@ def _dispatch(body, cl, thread):
         raise
 
 
-
-
 def turn(thread, user_text, speaker=None, idempotency_key=None, budget=None):
     """Run one ingress turn: resolve -> fetch -> package -> call IronClaw -> return.
 

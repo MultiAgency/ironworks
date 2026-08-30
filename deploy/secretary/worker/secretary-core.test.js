@@ -394,6 +394,50 @@ test("a permanently failing delivery is capped instead of wedging the visitor's 
   assert.equal((await state.storage.list({prefix: "queue:", limit: 10})).size, 0);
 });
 
+test("every persisted queue record carries the counters the caps are read from", async () => {
+  // THE MID-DELIVERY CHECKPOINT DROPPED THEM. `deliverUpdate` takes a snapshot callback so a
+  // partially-delivered answer is not re-sent, and that checkpoint persisted `{update,
+  // completed}` — no `attempts`, no `deliveryAttempts`. `alarm()` reads them back as
+  // `stored?.deliveryAttempts || 0`, so that record restores with the cap reset.
+  //
+  // ASSERTED ON THE PERSISTED RECORD, not on a retry count, and that distinction is the whole
+  // test. A retry count cannot see this: within one alarm the catch block increments its own
+  // in-memory copy and overwrites the checkpoint, so the cap still lands on 3 with the bug
+  // present. Only an isolate evicted between the checkpoint and the catch loses it — and a
+  // durable object cannot be evicted on demand from a test. What CAN be checked, and is the
+  // invariant that makes eviction survivable, is that no write ever leaves the record unable
+  // to answer "how many attempts have there been".
+  const seen = [];
+  const runtime = {
+    executeUpdate: async () => ({next: "r1", reply: "hello", delivered: {visitor: false}}),
+    deliverUpdate: async (_env, _update, completed, snapshot) => {
+      await snapshot({...completed, delivered: {visitor: false, partial: true}});
+      // Read back what the checkpoint just committed — the state an evicted isolate would wake to.
+      const entries = await state.storage.list({prefix: "queue:", limit: 10});
+      for (const [, record] of entries) seen.push(record);
+      throw new Error("Forbidden: bot was blocked");
+    },
+    notifyFailure: async () => {},
+  };
+  const Session = createVisitorSessionBase(runtime);
+  const state = new State();
+  const session = new Session(state, env());
+  await session.fetch(new Request("https://do/update", {method: "POST",
+    body: JSON.stringify(update(80))}));
+  for (let i = 0; i < 10; i++) await session.alarm();
+
+  assert.equal(seen.length, 3, "the checkpoint was not exercised on every delivery attempt");
+  seen.forEach((record, i) => {
+    assert.equal(typeof record.deliveryAttempts, "number",
+      `checkpoint ${i} persisted no deliveryAttempts — an evicted isolate resets the cap`);
+    assert.equal(typeof record.attempts, "number",
+      `checkpoint ${i} persisted no attempts`);
+  });
+  // The cap itself still holds, so the record shape above is not bought at its expense.
+  assert.equal(await state.storage.get("last_outcome"), "delivery-failed");
+  assert.equal((await state.storage.list({prefix: "queue:", limit: 10})).size, 0);
+});
+
 test("a queued message is drained immediately, not on the 30s retry timer", async () => {
   // The retry backoff and the drain schedule were one constant. The rate limit allows 6
   // messages/minute/visitor, so three messages in a row meant waiting 30s and 60s for replies

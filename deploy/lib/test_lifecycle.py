@@ -130,6 +130,31 @@ class Ledger(Base):
         out, _ = lc.residual_list()
         self.assertEqual(list(out), ["acme"])
 
+    def test_a_good_minted_at_dates_the_expiry_from_the_token_not_the_clock(self):
+        """The positive control for the two refusals below: without it they would still pass if
+        `minted_at` were ignored entirely, which is the defect they exist to catch."""
+        e = lc.residual_add("acme", {"uid": "u", "lifetime_days": "365",
+                                     "minted_at": "2026-01-02T03:04:05+00:00"})
+        self.assertEqual(e["expires_at"], "2027-01-02T03:04:05+00:00")
+
+    def test_an_unreadable_minted_at_stops_the_record(self):
+        """THE FIRST RECORD IS THE ONE THAT CAN GO WRONG. `except ValueError: pass` left the base
+        at "now", so a typo'd timestamp produced an expiry computed from the clock — recorded as
+        fact, in the one field the ledger exists to state, with nothing printed. The re-record
+        guard cannot help: it preserves whatever the first call wrote."""
+        for bad in ("not-a-date", "2026-13-01T00:00:00+00:00", "2026-01-02T99:00:00+00:00"):
+            with self.assertRaises(ValueError, msg=bad):
+                lc.residual_add("acme", {"uid": "u", "lifetime_days": "365", "minted_at": bad})
+        self.assertEqual(lc.residual_list()[0], {}, "a refused record still wrote an entry")
+
+    def test_a_naive_minted_at_is_refused_rather_than_assumed_utc(self):
+        """`expires_at_epoch` comes from `.timestamp()`, which reads a naive value in LOCAL time
+        — so the same input would record a different epoch on a laptop than on the host, beside
+        an `expires_at` with no offset where every sibling entry carries `+00:00`."""
+        with self.assertRaises(ValueError):
+            lc.residual_add("acme", {"uid": "u", "lifetime_days": "365",
+                                     "minted_at": "2026-01-02T03:04:05"})
+
     def test_re_recording_does_not_push_the_recorded_expiry_forward(self):
         """AN AUDIT RECORD IS NOT A MOVING TARGET. The window belongs to a token that was minted
         once; re-recording the entry describes the same token, so recomputing `expires_at` from

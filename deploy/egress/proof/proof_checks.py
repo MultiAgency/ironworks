@@ -111,8 +111,6 @@ def api(method, path, token, body=None, key=None, timeout=180):
     return request(method, path, token, body=body, key=key, timeout=timeout, api=API)
 
 
-
-
 def in_ic(*argv, timeout=40):
     """Run a command INSIDE the runtime's own network namespace; return what it printed.
 

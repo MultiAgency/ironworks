@@ -36,9 +36,9 @@ import json
 import os
 import pathlib
 import sys
-import tempfile
 
 from agency_paths import agency_dir
+from private_state import write_private
 
 OK, AMBIGUOUS, ABSENT, USAGE = 0, 2, 3, 64
 
@@ -97,22 +97,10 @@ def org_token_counts(doc):
 def _write(doc, path=None):
     """Replace the identity map atomically, private before it has content.
 
-    mkstemp + fchmod + os.replace, in that order: a write-then-chmod publishes every client's
-    org token at the process umask for the window in between, and this file IS the authority
-    map. `indent=1` because both writers used to disagree about it and a diffable file is worth
-    more than the bytes."""
-    p = identities_path(path)
-    p.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(p.parent))
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(doc, f, indent=1)
-        os.replace(tmp, p)
-    except BaseException:
-        pathlib.Path(tmp).unlink(missing_ok=True)
-        raise
-    return p
+    The ordering argument, and the reason a write-then-chmod will not do for a file holding
+    every client's org token, is `private_state.write_private` — where it is made once for the
+    three operator state writers that all need it."""
+    return write_private(identities_path(path), doc)
 
 
 def add(token, org, path=None):

@@ -21,7 +21,7 @@ SLUG="${1:?usage: seed-real.sh <slug>  (real data under ~/.agency/account-data/<
 # Validate before $SLUG reaches a path or an in-container `sh -c "rm -rf /tmp/real-$SLUG"`:
 # an unconstrained slug allows `../` traversal and shell-metacharacter injection into the
 # container. provision.sh guards its own slug; seed-real.sh is documented for standalone use too.
-case "$SLUG" in *[!a-z0-9-]*|'') echo "!! slug must be lowercase [a-z0-9-]: $SLUG" >&2; exit 1;; esac
+fleet_slug_valid "$SLUG" || { echo "!! slug must be lowercase [a-z0-9-]: $SLUG" >&2; exit 1; }
 DATA_DIR="$FLEET_AGENCY_DIR/account-data/$SLUG"
 CFG="$FLEET_AGENCY_DIR/account-data/$SLUG.env"
 CONT="$(fleet_account_service_container)"   # the same resolver provision.sh uses; this line and

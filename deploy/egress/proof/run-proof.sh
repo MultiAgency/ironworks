@@ -50,12 +50,19 @@ done
 if docker ps --format '{{.Names}}' | grep -q "^${PROJECT}-"; then
   echo "!! a previous proof stack is still up — run: $0 --down" >&2; exit 1
 fi
-if lsof -nP -iTCP:"$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+# `fleet_first_free_port`, not `lsof`: the old `if lsof …; then` treated "lsof is not installed"
+# (exit 127) exactly like "the port is free", so on a host without it — `ubuntu-latest`, which
+# `.github/workflows/scheduled-integration.yml` runs this on — the header's claim that the script
+# "refuses to run if its port or project name collide" held for the project name only.
+if ! fleet_first_free_port "$PORT" >/dev/null; then
   echo "!! port $PORT is in use; set PROOF_PORT to something free" >&2; exit 1
 fi
 
 # ── disposable identities; the provider key is the one thing we cannot mint ────────────
-NEARAI_API_KEY="${NEARAI_API_KEY:-$(sed -n 's/^NEARAI_API_KEY=//p' "$REPO/multi/instance/.env" | tr -d '"'"'"'')}"
+# fleet_env_get, not a local sed: fleet.sh is sourced above and its header records why one
+# quoting rule for the fleet matters — a stricter reader elsewhere rejected a padded value and
+# SKIPPED the account deletion it was gating. The copy here tolerated no leading whitespace.
+NEARAI_API_KEY="${NEARAI_API_KEY:-$(fleet_env_get "$REPO/multi/instance/.env" NEARAI_API_KEY)}"
 [ -n "$NEARAI_API_KEY" ] || { echo "!! NEARAI_API_KEY not set and not readable from multi/instance/.env" >&2; exit 1; }
 export NEARAI_API_KEY
 PROOF_PGPW="$(openssl rand -hex 24)"

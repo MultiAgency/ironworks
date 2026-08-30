@@ -41,9 +41,9 @@ import json
 import os
 import pathlib
 import sys
-import tempfile
 
 from agency_paths import agency_dir
+from private_state import write_private
 
 # The stages, in order. `resume` restarts at the first one NOT reached; the order is the
 # contract between provision.sh and this file, so it lives in one place.
@@ -79,24 +79,6 @@ def teardown_path(slug):
 
 def now_iso():
     return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
-
-
-def write_private(path, doc):
-    """Atomic write at 0600, mode set BEFORE any content exists.
-
-    Same pattern as the bridge state file and the identities file: write-then-chmod publishes
-    the content at the process umask for the window in between, and these files name every
-    tenant that exists."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.name}.", suffix=".tmp")
-    try:
-        os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "w") as f:
-            json.dump(doc, f, indent=1, sort_keys=True)
-        os.replace(tmp, path)
-    except BaseException:
-        os.unlink(tmp)
-        raise
 
 
 def read_json(path, default):
@@ -224,12 +206,30 @@ def residual_add(slug, fields):
     fields = check_fields(dict(fields))
     days = int(fields.pop("lifetime_days", 0) or 0)
     minted = fields.pop("minted_at", "") or ""
+    # A MALFORMED `minted_at` USED TO BE SWALLOWED, and the swallow contradicted the paragraph
+    # below it. `except ValueError: pass` left `base` at "now", so the entry recorded an expiry
+    # computed from the clock — a fabricated fact, in the field the whole ledger exists to state,
+    # with no diagnostic anywhere. The `prior.get("expires_at")` guard below does not catch it:
+    # that protects RE-records, and this is how the FIRST one goes wrong.
+    #
+    # Naive is refused for the same reason rather than assumed to be UTC. `expires.timestamp()`
+    # reads a naive value in LOCAL time, so the same input would yield a different
+    # `expires_at_epoch` on an operator laptop than on the host, while `expires_at` recorded no
+    # offset at all next to entries that all carry `+00:00`.
     base = datetime.datetime.now(datetime.timezone.utc)
     if minted:
         try:
             base = datetime.datetime.fromisoformat(minted)
-        except ValueError:
-            pass
+        except ValueError as e:
+            raise ValueError(
+                f"minted_at={minted!r} is not an ISO-8601 timestamp ({e}). It is the only input "
+                "to a token's recorded expiry, so a value this file cannot read must stop the "
+                "record rather than silently date it from the clock.") from e
+        if base.tzinfo is None:
+            raise ValueError(
+                f"minted_at={minted!r} carries no UTC offset. Every other timestamp in this "
+                "ledger does, and a naive value is read in local time when the epoch is "
+                "computed — give it an offset (…Z or +00:00).")
     expires = base + datetime.timedelta(days=days)
     doc = read_json(ledger_path(), {})
     prior = doc.get(slug) or {}

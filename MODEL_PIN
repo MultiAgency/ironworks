@@ -11,11 +11,13 @@ qwen/qwen3.5-397b-a17b  # selected 2026-08-27; IronWorks behaviour is NOT YET EA
 # observed alias substitution; release certification must still re-earn the model-sensitive
 # serving proofs.
 #
-# SELECTION, NOT CERTIFICATION. The provider catalogue describes this model as an attested model
-# served via Chutes TEE and verified end-to-end by NEAR AI. That metadata is only the reason for
-# selecting it. Public catalogue metadata is selection evidence, not release evidence. IronWorks
-# has NOT earned a TEE, privacy, or attestation guarantee for this model. Certification must
-# verify that property on the exact provider path used by the pinned runtime.
+# SELECTION, NOT CERTIFICATION. The provider catalogue describes this model as TEE-attested and
+# verified end-to-end by NEAR AI. That is selection rationale only. Provider catalogue metadata
+# is NOT serving-path attestation evidence: the current provider API exposes no request-bound,
+# cryptographically verifiable report, signing key, quote, measurement, or model-specific
+# attestation endpoint that IronWorks can verify. IronWorks therefore makes NO independently
+# verified TEE/privacy-attestation guarantee for this model. If NEAR AI later exposes verifiable
+# request-bound attestation evidence, that claim may be re-earned.
 #
 # CLAIMS RESET. This model's IronWorks behaviour is NOT YET EARNED. No isolation, answer-quality,
 # privacy/attestation, caching/cost, or live-tenant claim carries forward from the previous
@@ -23,12 +25,17 @@ qwen/qwen3.5-397b-a17b  # selected 2026-08-27; IronWorks behaviour is NOT YET EA
 # candidate 83024202440a1a6b34ab0ede3c251d601f617031 remains historical evidence for that frozen,
 # blocked 122B candidate and must not be relabelled as certification of this model.
 #
-# COST / CACHING. Provider pricing may discount cached input. IronClaw `usage.cost` is a computed
-# estimate and may not model that discount correctly, so `usage.cost` alone is not spend
-# reconciliation. No caching or cost behaviour is claimed for this 397B model until measured.
+# COST / CACHING. The provider catalogue advertises ordinary input at $0.50/M and cache-read
+# input at $0.25/M (a 50% cache-read discount). Measured 397B turns showed 72.5–79.7% cached
+# input, so caching is release evidence; however, `usage.cost` is NOT spend reconciliation:
+# most measured turns reported zero-valued cost fields despite token consumption, and populated
+# values did not model the advertised cache discount correctly. Reconcile spend from provider
+# billing, never from `usage.cost`. `is_ready: false` is likewise not a health signal here: the
+# exact pinned model has served completed turns despite that catalogue value.
 #
-# CERTIFICATION REQUIRED. Re-earn provider-path availability; privacy/attestation on the exact
-# pinned serving path; the original two-client isolation proof; a dedicated two-pass
-# answer-quality evaluation; cost/caching measurement; and real `nf` Telegram acceptance.
+# CERTIFICATION REQUIRED. Re-earn provider-path availability; the original two-client isolation
+# proof; a dedicated two-pass answer-quality evaluation; cost/caching measurement; and real `nf`
+# Telegram acceptance. No provider privacy/attestation gate is listed because that claim is not
+# made absent independently verifiable serving-path evidence.
 # Previously completed operational reconciliation is reusable only where the exact underlying
 # state and non-model-dependent contract remain unchanged.

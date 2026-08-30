@@ -38,6 +38,7 @@ import subprocess
 import time
 
 from agency_paths import agency_dir
+from private_state import write_private
 
 RUNNING, VERIFIED, FAILED, BLOCKED = "RUNNING", "VERIFIED", "FAILED", "BLOCKED"
 
@@ -67,16 +68,13 @@ def read_stamp():
 
 
 def _record(p, doc):
-    """Publish an operator state file atomically and privately.
+    """Publish an operator state file atomically and privately, returning the document written.
 
-    tmp + fchmod + replace, in that order: a write-then-chmod publishes the file at the process
-    umask for the window in between, and a reader must never see a half-written boundary state.
-    """
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(".tmp")
-    tmp.write_text(json.dumps(doc, indent=1, sort_keys=True))
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, p)
+    This function used to argue for fchmod-then-write in its docstring and do the opposite in
+    its body, alone among the three operator state writers. It now calls the shared one, where
+    the argument is made once and a test watches the temp file mid-write rather than the
+    published mode — the assertion that a write-then-chmod also satisfies."""
+    write_private(p, doc)
     return doc
 
 

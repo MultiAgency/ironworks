@@ -36,29 +36,49 @@ REPO_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # Checks all three path segments at the IRONCLAW_PIN rev, before anything stops
 # (doctor.sh's stray-seed sweep is the post-migration runtime backstop).
 IRONCLAW_SRC="${IRONCLAW_SRC:-/opt/ironclaw-src}"
-if [ -f "$REPO_DIR/IRONCLAW_PIN" ] && git -C "$IRONCLAW_SRC" rev-parse --git-dir >/dev/null 2>&1; then
-  REV="$(fleet_ironclaw_pin)"
-  if git -C "$IRONCLAW_SRC" rev-parse -q --verify "$REV^{commit}" >/dev/null; then
-    miss=""
-    git -C "$IRONCLAW_SRC" grep -q 'system/prompts/default-system\.md' "$REV" -- crates/ \
-      || miss="$miss prompt-path-const"
-    git -C "$IRONCLAW_SRC" grep -q '"hosted-single-tenant-volume"' "$REV" -- crates/app/ironclaw_config/ \
-      || miss="$miss profile-storage-subdir"
-    git -C "$IRONCLAW_SRC" grep -q '/data/ironclaw-reborn' "$REV" -- docker/reborn/entrypoint.sh \
-      || miss="$miss entrypoint-home-default"
-    if [ -n "$miss" ]; then
-      echo "!! persona surface moved upstream at pin ${REV:0:9} (missing:$miss)" >&2
-      echo "   $FLEET_PERSONA_DST is no longer derivable from the pinned source." >&2
-      echo "   Locate the persona path in the pinned source and update deploy/lib/fleet.sh before migrating." >&2
-      exit 1
-    fi
-    echo "   persona-surface gate: OK at pin ${REV:0:9}"
-  else
-    echo "   persona-surface gate: SKIPPED (pin ${REV:0:9} not in $IRONCLAW_SRC — git fetch first; UPGRADE.md step 2)"
-  fi
-else
-  echo "   persona-surface gate: SKIPPED (no IRONCLAW_PIN or no checkout at $IRONCLAW_SRC — set IRONCLAW_SRC)"
+# A MISSING CHECKOUT IS A REFUSAL, NOT A SKIP, because of what comes after it. Both gates below
+# were behind one `[ -f IRONCLAW_PIN ] && git rev-parse` pre-guard, so on a host with no
+# /opt/ironclaw-src the persona-surface gate printed SKIPPED, `REV` was never set, the image
+# provenance gate printed SKIPPED for want of a `REV` to compare — and the script went straight
+# on to `docker stop`, `docker rm` and a recreate. Two green-looking skips authorising an
+# irreversible change to a running agent.
+#
+# `doctor.sh:158-163` reaches the same situation and skips, correctly: a skipped diagnostic
+# costs nothing. This is not a diagnostic. Either both gates can run or the migration does not
+# start, and `IRONCLAW_SRC` is named in the message because the fix is usually one env var.
+#
+# The pin file is NOT pre-guarded any more either: `fleet_ironclaw_pin` hard-errors on a missing
+# or empty IRONCLAW_PIN by design, and the `[ -f … ]` test in front of it was the reason that
+# design never got to apply here.
+if ! git -C "$IRONCLAW_SRC" rev-parse --git-dir >/dev/null 2>&1; then
+  echo "!! no IronClaw checkout at $IRONCLAW_SRC — the persona-surface and image-provenance" >&2
+  echo "   gates cannot run, and this script stops/removes/recreates a live agent container." >&2
+  echo "   Clone the pinned source there, or set IRONCLAW_SRC=<path> (UPGRADE.md step 2)." >&2
+  exit 1
 fi
+REV="$(fleet_ironclaw_pin)"
+# The pin not being IN the checkout was also a skip, for the same reason it should not be: the
+# gate exists to compare the persona path against the pinned rev, and a rev git has never seen
+# cannot be compared against. `git fetch` is the fix and it is cheap.
+if ! git -C "$IRONCLAW_SRC" rev-parse -q --verify "$REV^{commit}" >/dev/null; then
+  echo "!! pin ${REV:0:9} is not in $IRONCLAW_SRC — the persona-surface gate cannot run." >&2
+  echo "   git -C $IRONCLAW_SRC fetch --tags   (UPGRADE.md step 2), then re-run." >&2
+  exit 1
+fi
+miss=""
+git -C "$IRONCLAW_SRC" grep -q 'system/prompts/default-system\.md' "$REV" -- crates/ \
+  || miss="$miss prompt-path-const"
+git -C "$IRONCLAW_SRC" grep -q '"hosted-single-tenant-volume"' "$REV" -- crates/app/ironclaw_config/ \
+  || miss="$miss profile-storage-subdir"
+git -C "$IRONCLAW_SRC" grep -q '/data/ironclaw-reborn' "$REV" -- docker/reborn/entrypoint.sh \
+  || miss="$miss entrypoint-home-default"
+if [ -n "$miss" ]; then
+  echo "!! persona surface moved upstream at pin ${REV:0:9} (missing:$miss)" >&2
+  echo "   $FLEET_PERSONA_DST is no longer derivable from the pinned source." >&2
+  echo "   Locate the persona path in the pinned source and update deploy/lib/fleet.sh before migrating." >&2
+  exit 1
+fi
+echo "   persona-surface gate: OK at pin ${REV:0:9}"
 
 # --- target-image provenance ------------------------------------------------------
 # The gate above proves the pinned SOURCE derives the persona path; it says nothing about
@@ -66,9 +86,10 @@ fi
 # Unlabeled only WARNs — pre-label images must stay migratable, which is the one thing an
 # operator always needs. A label DISAGREEING with the pin is fatal: deployed state and the
 # pin contradict each other.
-if [ -z "${REV:-}" ]; then
-  echo "   image provenance: SKIPPED (no pin resolved above — nothing to compare against)"
-else
+#
+# `REV` is unconditionally set by now, so the "no pin resolved above" skip this gate used to
+# open with is gone: it could only fire when the gate above had already been skipped, which is
+# how one absent checkout silenced both.
 img_rev="$(docker inspect -f '{{index .Config.Labels "ironclaw.rev"}}' "$IMAGE" 2>/dev/null || true)"
 case "$img_rev" in
   ''|'<no value>')
@@ -82,7 +103,6 @@ case "$img_rev" in
     echo "   Migrating would deploy a rev the pin does not describe. Retag/rebuild, or update IRONCLAW_PIN first." >&2
     exit 1 ;;
 esac
-fi
 
 port=$(docker inspect "$C" --format '{{(index (index .HostConfig.PortBindings "3000/tcp") 0).HostPort}}')
 # Select the data volume by DESTINATION, never by position: Docker guarantees no ordering

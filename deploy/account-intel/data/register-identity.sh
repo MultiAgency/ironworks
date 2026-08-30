@@ -10,11 +10,15 @@
 #
 # Usage: ORG_TOKEN=<token> register-identity.sh <org_id>     [ACCOUNT_BASE=http://127.0.0.1:8443]
 set -euo pipefail
-. "$(dirname "$0")/../../lib/curl-private.sh"   # curl_header: keep the org token off argv
+# fleet.sh, not curl-private.sh directly: it brings curl_header in with it and it owns the two
+# other rules this script was carrying its own copy of — FLEET_AGENCY_DIR (`AGENCY_DIR` was
+# spelled out inline here, so this script honoured a knob the rest of the fleet resolves in one
+# place) and fleet_http_code (see the poll below).
+. "$(dirname "$0")/../../lib/fleet.sh"
 ORG="${1:?usage: ORG_TOKEN=<token> register-identity.sh <org_id>}"
 TOKEN="${ORG_TOKEN:?set ORG_TOKEN=<token> in the environment (not on argv — it is a secret)}"
 ACCOUNT_BASE="${ACCOUNT_BASE:-http://127.0.0.1:8443}"
-IDENT_DIR="${AGENCY_DIR:-$HOME/.agency}/account-identities"
+IDENT_DIR="$FLEET_AGENCY_DIR/account-identities"
 
 umask 077
 # deploy/lib/identities.py is the one reader AND writer of this map. The corrupt-file refusal
@@ -24,11 +28,12 @@ ORG_TOKEN="$TOKEN" ACCOUNT_IDENTITIES_FILE="$IDENT_DIR/identities.json" \
   python3 "$(dirname "$0")/../../lib/identities.py" add "$ORG"
 
 for _ in $(seq 1 10); do
-  # `|| echo 000`: a connection refusal (service down) makes curl exit non-zero, which under
+  # fleet_http_code: a connection refusal (service down) makes curl exit non-zero, which under
   # `set -e` would kill the script on the FIRST iteration — never retrying, never reaching the
-  # "is the data stack running?" diagnostic below (written for exactly this case). Swallow the
-  # curl failure into a sentinel code so the loop runs and the diagnostic prints.
-  code=$(curl_header "X-Service-Token: $TOKEN" -s -o /dev/null -w '%{http_code}' "$ACCOUNT_BASE/list_accounts" || echo 000)
+  # "is the data stack running?" diagnostic below (written for exactly this case). The helper
+  # swallows that into a sentinel code so the loop runs and the diagnostic prints.
+  code=$(fleet_http_code curl_header "X-Service-Token: $TOKEN" \
+    -s -o /dev/null -w '%{http_code}' "$ACCOUNT_BASE/list_accounts")
   [ "$code" = "200" ] && { echo "   identity live for org '$ORG' (hot reload — no restart)"; exit 0; }
   sleep 1
 done

@@ -38,8 +38,6 @@ CL = ing.ClientConfig(slug="testco", ironclaw_token="test-token",
                       account_token="test-account-token", persona="TEST PERSONA (fixture)")
 
 
-
-
 class _Resp:
     def __init__(self, d): self._d = json.dumps(d).encode()
     def read(self): return self._d
@@ -345,8 +343,6 @@ def test_failed_turn_does_not_mark_context_supplied():
     print("  PASS supplied-after-success: failed turn leaves no bookkeeping; retry delivers context")
 
 
-
-
 def test_persona_sent_every_turn():
     """Hosted-MT bakes no persona: `instructions` must carry it on EVERY turn (once-only drifts —
     multi/verify/test_injection*.py), identically, and it must never contain the account token."""
@@ -462,8 +458,6 @@ def test_speaker_subject_disambiguation():
           "attribution preserved (4); no-speaker path frozen")
 
 
-
-
 def test_data_starved_thread_recovers_when_data_appears():
     """A thread that got NO context (empty org -> the model tells the user it has no records) must
     not stay ANCHORED to that stance once the org is seeded: the seam drops the stale
@@ -495,8 +489,6 @@ def test_data_starved_thread_recovers_when_data_appears():
     finally:
         _restore_seam(saved)
     print("  PASS data-starved recovery: empty-org thread drops its stale prev once context appears")
-
-
 
 
 def test_turn_failed_status_leaves_no_bookkeeping():
@@ -586,8 +578,6 @@ def test_client_without_persona_refuses_to_serve():
     except RuntimeError as e:
         assert "no client" in str(e)
     print("  PASS no-default-persona: personaless config and clientless Thread both refuse")
-
-
 
 
 # THE SEAM ENTRY POINTS THESE TESTS STUB, named once. The triple was hand-written at twelve
@@ -723,10 +713,6 @@ def test_store_outage_degrades_instead_of_killing_the_turn():
     print("  PASS store outage: turn still answers, model told records are briefly unavailable")
 
 
-
-
-
-
 def test_lost_previous_response_id_self_heals():
     """If the server no longer knows our previous_response_id, every later turn would
     404 forever (a permanently bricked group). One retry on a fresh thread instead."""
@@ -751,8 +737,6 @@ def test_lost_previous_response_id_self_heals():
     assert len(posts) == 2 and "previous_response_id" not in posts[1], posts
     assert th.prev == "resp_new", th.prev
     print("  PASS 404 self-heal: an expired previous_response_id retries on a fresh thread")
-
-
 
 
 def test_first_seed_flags_the_dropped_conversation():
@@ -781,25 +765,6 @@ def test_first_seed_flags_the_dropped_conversation():
     assert "previous_response_id" not in posts[1], "starvation reset must still drop the stale thread"
     assert "restate" in posts[1]["input"], posts[1]["input"]
     print("  PASS first-seed disclosure: the dropped pre-records conversation is flagged, not silent")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def test_untriggered_whole_book_question_still_gets_records():

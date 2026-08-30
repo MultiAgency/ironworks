@@ -40,12 +40,22 @@ target-version = "py312"
 line-length = 100
 
 [tool.ruff.lint]
-# W + E303: the whitespace class. Two real defects — a blank line at EOF and a triple
-# blank line, both left by deleting a function and a test class — shipped past every gate
-# here, because ruff selected neither and nothing runs `git diff --check`. They were
-# caught by hand, which is not a gate. Zero findings when added, so this pins the current
-# state rather than demanding a cleanup.
-select = ["F", "E9", "B", "C90", "W", "E303"]
+# W: the whitespace class ruff can actually enforce here — W291/W292/W293, trailing space and
+# tabs. The rest of that class is NOT in this list and that is deliberate, not an oversight:
+#
+# E303 (too many blank lines) and W391 (blank line at EOF) are PREVIEW rules in the pinned
+# ruff==0.16.4. `E303` was selected here for a while and did nothing whatsoever — ruff printed
+# `warning: Selection E303 has no effect because preview is not enabled` on every run and no
+# gate read it, so the "triple blank line" this comment used to cite as the reason for the
+# selection stayed ungated, and the tree accumulated twelve of them (worst: twenty-one
+# consecutive blank lines in multi/seam/test_turn.py). Enabling `--preview` to reach two rules
+# would enable every other unstable rule with them.
+#
+# Both live in `deploy/run-quality.py::whitespace_residue_guard` now, which checks every tracked
+# TEXT file rather than just Python — the same edit leaves the same residue in a shell script.
+# `deploy/lib/test_ci_contracts.py` asserts that nothing selected here is inert, because a rule
+# that is configured and silently does nothing is worse than one that is absent.
+select = ["F", "E9", "B", "C90", "W"]
 
 [tool.ruff.lint.per-file-ignores]
 "**/test_*.py" = ["B", "C901"]

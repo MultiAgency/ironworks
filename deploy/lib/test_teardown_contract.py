@@ -25,6 +25,22 @@ import unittest
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 FLEET = ROOT / "deploy" / "lib" / "fleet.sh"
 
+# A port nothing listens on, so curl fails at the connect phase — the state every `000` in this
+# tree is about. `--max-time` keeps a firewalled host from hanging the suite.
+REFUSED = "http://127.0.0.1:9/never"
+
+
+def shell(snippet):
+    """Run a snippet with fleet.sh sourced, under the callers' own `set -euo pipefail`, and
+    return its stdout stripped. The `set` matters: half of what these helpers exist for is not
+    aborting the assignment, which only a pipefail shell can demonstrate."""
+    r = subprocess.run(
+        ["bash", "-c", f'set -euo pipefail; . "{FLEET}"; {snippet}'],
+        capture_output=True, text=True)
+    if r.returncode != 0:
+        raise AssertionError(f"snippet exited {r.returncode}: {r.stderr.strip()}")
+    return r.stdout.strip()
+
 
 def is_gone(code):
     """Run the shell rule for real. Testing a reimplementation would prove nothing about the
@@ -54,6 +70,34 @@ class TeardownContract(unittest.TestCase):
         """A stale or ambient operator token answers 401/403; the record is untouched."""
         for code in ("400", "401", "403", "409", "500", "502"):
             self.assertFalse(is_gone(code), f"HTTP {code} should not read as gone")
+
+    def test_a_refused_connection_yields_exactly_000(self):
+        """THE DEFECT `fleet_http_code` EXISTS FOR, measured against a real refused socket.
+
+        `|| echo 000` appends to the `000` curl already wrote, producing `000000` — a value that
+        equals nothing, so every `[ "$code" = "000" ]` guard written against it is unreachable and
+        the caller falls through to its else branch. That branch is not neutral: in deprovision.sh
+        it records residual authority nobody measured. The assertion is on the exact string for
+        that reason — `000000` is truthy, non-empty, and looks like a code."""
+        got = shell(f'fleet_http_code curl -s -o /dev/null -w "%{{http_code}}" '
+                    f'--max-time 5 "{REFUSED}"')
+        self.assertEqual(got, "000",
+                         "a refused connection must read as exactly 000, not an appended variant")
+
+    def test_the_wrong_idiom_is_gone_from_every_script(self):
+        """The class, not the instance. Eight live sites carried `|| echo 000` while two files in
+        the same tree documented at length why it is wrong — the rule was written down and the
+        callers never converted. Source-level is the only way to catch the ninth copy, because a
+        behavioural test only sees the paths a fixture happens to drive."""
+        offenders = []
+        for path in sorted(ROOT.glob("**/*.sh")):
+            if ".git" in path.parts:
+                continue
+            for n, line in enumerate(path.read_text().splitlines(), 1):
+                if "|| echo 000" in line and not line.lstrip().startswith("#"):
+                    offenders.append(f"{path.relative_to(ROOT)}:{n}")
+        self.assertEqual(offenders, [],
+                         "use `fleet_http_code`; `|| echo 000` yields the literal 000000")
 
     def test_both_teardown_paths_use_the_shared_helpers(self):
         """Source-level, because the alternative is provisioning a tenant to find out. If either

@@ -261,6 +261,22 @@ const MAX_MODEL_ATTEMPTS = 3;
 // failed, but a visitor who blocked the bot will 403 every send forever.
 const MAX_DELIVERY_ATTEMPTS = 3;
 
+// THE QUEUE RECORD, IN ONE PLACE. Five sites wrote this object as a literal and they did not
+// agree: the two mid-flight checkpoints persisted `{update, completed}` and dropped BOTH
+// counters, while only the catch arms carried them. `alarm()` reads them back with
+// `stored?.attempts` / `stored?.deliveryAttempts`, which default to 0 — so a record last
+// written by a checkpoint restores with the caps reset.
+//
+// That is survivable within one alarm, because the catch block uses its in-memory copy. It is
+// not survivable ACROSS one: an isolate evicted between the mid-delivery checkpoint and the
+// catch comes back with `deliveryAttempts = 0`, re-opening the unbounded retry that
+// MAX_DELIVERY_ATTEMPTS exists to close — a blocked bot 403ing every 30 seconds forever while
+// every later message from that visitor sits behind it unprocessed.
+//
+// One constructor, so the shape cannot vary by call site and a new field reaches every writer.
+const queueRecord = (update, completed, attempts, deliveryAttempts) =>
+  ({update, completed: completed ?? null, attempts, deliveryAttempts});
+
 export function createVisitorSessionBase(runtime) {
   return class VisitorSessionBase {
     constructor(state, env) { this.state = state; this.env = env; }
@@ -299,7 +315,7 @@ export function createVisitorSessionBase(runtime) {
         await txn.put("rate", recent);
         await txn.put("last_update_id", Math.max(last, update.update_id));
         await txn.delete(retryKey);
-        await txn.put(queueKey, {update, completed: null, attempts: 0});
+        await txn.put(queueKey, queueRecord(update, null, 0, 0));
         return {kind: "queued"};
       });
       if (decision.kind === "queued" || decision.queued) {
@@ -335,13 +351,14 @@ export function createVisitorSessionBase(runtime) {
         if (!completed) {
           completed = await runtime.executeUpdate(this.env, update, prev);
           await this.state.storage.transaction(async (txn) => {
-            await txn.put(queueKey, {update, completed});
+            await txn.put(queueKey, queueRecord(update, completed, attempts, deliveryAttempts));
             if (completed.next) await txn.put("previous_response_id", completed.next);
             await txn.put("last_outcome", "model-completed");
           });
         }
         await runtime.deliverUpdate(this.env, update, completed, async (snapshot) => {
-          await this.state.storage.put(queueKey, {update, completed: snapshot});
+          await this.state.storage.put(queueKey,
+            queueRecord(update, snapshot, attempts, deliveryAttempts));
         });
         await this.state.storage.transaction(async (txn) => {
           await txn.put("last_outcome", "completed");
@@ -360,7 +377,7 @@ export function createVisitorSessionBase(runtime) {
           deliveryAttempts += 1;
           if (deliveryAttempts < MAX_DELIVERY_ATTEMPTS) {
             await this.state.storage.transaction(async (txn) => {
-              await txn.put(queueKey, {update, completed, deliveryAttempts});
+              await txn.put(queueKey, queueRecord(update, completed, attempts, deliveryAttempts));
               await txn.put("last_outcome", "delivery-pending");
             });
           } else {
@@ -378,7 +395,7 @@ export function createVisitorSessionBase(runtime) {
           attempts += 1;
           if (attempts < MAX_MODEL_ATTEMPTS) {
             await this.state.storage.transaction(async (txn) => {
-              await txn.put(queueKey, {update, completed: null, attempts});
+              await txn.put(queueKey, queueRecord(update, null, attempts, deliveryAttempts));
               await txn.put("last_outcome", "model-retry");
             });
           } else {

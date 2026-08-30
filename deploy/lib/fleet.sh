@@ -105,6 +105,81 @@ fleet_json() { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 # `shlex.quote` for the same reason `fleet_json` exists: escaping rules belong in one place.
 fleet_sh_quote() { python3 -c 'import shlex,sys;print(shlex.quote(sys.argv[1]))' "$1"; }
 
+# fleet_slug <display-text> — the slug a display name derives to. Lowercased, every run of
+# non-alphanumerics collapsed to one `-`, no leading or trailing `-`.
+#
+# Two scripts carried this pipeline byte-for-byte (provision-agent.sh and provision-client.sh)
+# and three more carried the matching VALIDATION rule with three different messages and two
+# different exit codes. A slug names a container, a volume, a hostname, an env file and a
+# directory under the operator state root, so two answers to "what is this client called" is two
+# answers to "which files are this client's".
+fleet_slug() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-//;s/-$//'
+}
+
+# fleet_slug_valid <slug> — true when the slug is exactly lowercase letters, digits and `-`,
+# and non-empty.
+#
+# POSIX CLASSES, NOT `a-z0-9`, AND THE DIFFERENCE IS NOT COSMETIC. A bracket RANGE in a shell
+# pattern is resolved by the current collation, and under `en_US.UTF-8` — the default on macOS
+# and most dev shells — `[a-z]` matches `A` through `Z` as well. All three copies of this rule
+# used `*[!a-z0-9-]*`, so all three ACCEPTED `Acme` while their own error message said
+# "must be lowercase". Measured on this tree's shell: `case Acme in *[!a-z0-9-]*)` does not
+# match, and the same test under `LC_ALL=C` does.
+#
+# The consequence is not traversal — `/` and `.` are rejected either way, which is what
+# seed-real.sh's guard is really for — but a hand-typed `Acme` produced `~/.agency/clients/
+# Acme.env` beside the `acme.env` that `fleet_slug` derives, and on a case-insensitive
+# filesystem those are the same file with two names. `[:lower:]` and `[:digit:]` are single
+# classes, not ranges, so no collation can widen them.
+#
+# NON-EMPTY IS PART OF THE RULE, not an extra: `*[!…]*` does not match the empty string, so the
+# copy that omitted `''` accepted "" as a valid slug. Callers keep their own message and exit
+# code — seed-real.sh exits 1 where the provisioning pair exits 2, and that is their contract,
+# not this function's business. What they share is the answer.
+fleet_slug_valid() {
+  case "${1:-}" in ''|*[![:lower:][:digit:]-]*) return 1 ;; *) return 0 ;; esac
+}
+
+# fleet_first_free_port <lo> [hi] — print the lowest port in [lo,hi] nothing is bound to, or
+# return 1 if the whole range is taken. `hi` defaults to `lo`, which is the "is THIS port free?"
+# question.
+#
+# NOT `lsof`, and that is the point. Two callers asked this with lsof and both inherited its
+# absence as a wrong answer: `if lsof …; then` treats "not installed" (exit 127) identically to
+# "the port is free", so run-proof.sh's collision guard was inert on any host without it —
+# including `ubuntu-latest`, which scheduled-integration.yml runs it on — while provision-agent's
+# scan fell back to an EMPTY listener list and handed out 3001 with an agent already on it.
+#
+# A bind attempt cannot be wrong by being absent, and it answers the question docker will ask.
+# Binding 0.0.0.0 rather than loopback for the same reason: `docker run -p <port>:3000` publishes
+# on all interfaces, so that is the conflict that matters. The socket is never listened on and is
+# closed immediately, so nothing can connect to it.
+#
+# ONE process for the whole range, which is also why the range form exists: provision-agent.sh
+# scans 3001-3099 and its previous shape spawned a full lsof per candidate — each walking every
+# open fd on the box — so finding port 3021 on a twenty-agent host cost twenty whole-system scans.
+fleet_first_free_port() {
+  python3 - "$1" "${2:-$1}" <<'PY'
+import socket, sys
+lo, hi = int(sys.argv[1]), int(sys.argv[2])
+for port in range(lo, hi + 1):
+    s = socket.socket()
+    # SO_REUSEADDR so a lingering TIME_WAIT socket is not mistaken for a live listener. A real
+    # listener still refuses the bind, which is the state worth reporting.
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        s.bind(("0.0.0.0", port))
+    except OSError:
+        continue
+    finally:
+        s.close()
+    print(port)
+    sys.exit(0)
+sys.exit(1)
+PY
+}
+
 # fleet_require_container <name> — hard-fail unless the container is running. `grep -qx`, not
 # a substring match: `secretary-ironclaw-1` must not satisfy a check for `ironclaw-1`.
 fleet_require_container() {
@@ -112,25 +187,37 @@ fleet_require_container() {
     echo "!! container is not running: $1" >&2; return 1; }
 }
 
+# fleet_http_code <curl-invocation…> — run a curl (or curl_bearer/curl_header/curl_tg)
+# invocation whose ONLY stdout is `%{http_code}`, and print that code. A request that never left
+# prints `000`.
+#
+# THE SWALLOW RULE, WRITTEN ONCE. Without `-f`, curl exits 0 on 4xx/5xx — but NON-ZERO when the
+# request never left (connection refused, DNS, timeout). Under `set -euo pipefail` that aborts
+# the assignment, which is how an unreachable instance killed a teardown mid-way (after the org
+# token had already been deregistered) and how a retry loop died on its first iteration instead
+# of reaching the diagnostic written for exactly that case. So every caller needs the failure
+# swallowed into a code it can interpret.
+#
+# The WRONG way to swallow it is `|| echo 000`, and it is wrong in a way that reads as correct:
+# curl has ALREADY written `000` before it exits non-zero, so appending another yields the
+# literal `000000`. That value matches no case arm and no equality test, so a probe that never
+# reached the instance falls through to whatever the else branch says — in deprovision.sh, to
+# "the former member token STILL AUTHENTICATES", a fabricated residual-authority ledger entry
+# and exit 3 where the contract says 4. `|| true` plus a `${…:-000}` default is the right way,
+# and it lives here so no call site has to remember which is which.
+fleet_http_code() {
+  local _code
+  _code="$("$@" || true)"
+  printf '%s\n' "${_code:-000}"
+}
+
 # fleet_delete_member <operator-token> <api-base> <user-id> — delete a sealed member record,
 # printing the HTTP code. Teardown happens in two places and they wrote this twice:
 # provision.sh's compensator (undoing what one failed run created) and deprovision.sh (removing
 # a tenant for good). They must agree, because the question both are answering is the same one.
-#
-# THE `|| echo 000` IS THE POINT, and is why this is a function rather than a copied line.
-# Without `-f`, curl exits 0 on 4xx/5xx — but NON-ZERO when the request never left (connection
-# refused, DNS, timeout). provision.sh carried the guard; deprovision.sh did not, and runs under
-# `set -euo pipefail`. So an unreachable instance aborted deprovisioning at this line — AFTER
-# step 1 had already deregistered the org token — leaving a half-torn-down tenant and no summary
-# saying so. 000 is now a value the caller must interpret, not a signal that kills the script.
-# `|| true` and a default, NOT `|| echo 000`: on a refused connection curl exits non-zero AND
-# still writes `%{http_code}` as `000`, so appending another produced the literal `000000` —
-# which reads as a bizarre status in the operator's audit line and matches no case arm.
 fleet_delete_member() {
-  local _code
-  _code="$(curl_bearer "$1" -s -o /dev/null -w '%{http_code}' -X DELETE \
-    "$2/api/webchat/v2/admin/users/$3" || true)"
-  printf '%s\n' "${_code:-000}"
+  fleet_http_code curl_bearer "$1" -s -o /dev/null -w '%{http_code}' -X DELETE \
+    "$2/api/webchat/v2/admin/users/$3"
 }
 
 # fleet_member_is_gone <http-code> — the one rule for reading that code. 404 counts as gone: the

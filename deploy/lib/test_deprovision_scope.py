@@ -341,6 +341,12 @@ printf '%s\n' "${FAKE_PROCESS_STARTED:-Thu Aug 27 12:00:00 2026}"
         self.assertIn("bridge entry removed: 1", result.stdout)
 
     def _local_cleanup_order(self):
+        """Paths under CLIENTS_DIR that the `rm` stub was asked to remove, in order.
+
+        `[]` means two different things — the stub was never invoked, or it was invoked only on
+        paths elsewhere — and callers making an `assertNotIn` assertion cannot tell them apart.
+        Every caller that asserts on absence therefore also asserts on the presence of something
+        it set up; see `test_guidance_remove_failure_retains_registry_and_rerun_converges`."""
         if not self.rm_log.exists():
             return []
         return [pathlib.Path(p) for p in self.rm_log.read_text().splitlines()
@@ -460,7 +466,16 @@ printf '%s\n' "${FAKE_PROCESS_STARTED:-Thu Aug 27 12:00:00 2026}"
         retained = registry.read_text()
         for value in ("account-token", "member-token", "-1007", "user-7"):
             self.assertIn(value, retained, f"retry identifier {value!r} was not retained")
-        self.assertNotIn(registry, self._local_cleanup_order(),
+        # THE POSITIVE HALF FIRST. `assertNotIn` over an empty list passes, so this assertion was
+        # strongest exactly when the `rm` stub had never run — a broken PATH stub, a script that
+        # exited before cleanup, or a renamed FAKE_RM_LOG would all have read as "the registry was
+        # correctly retained". The siblings below use `[-2:]`/`[-3:]` and fail on an empty list;
+        # this one had no such floor.
+        order = self._local_cleanup_order()
+        self.assertIn(guidance, order,
+                      "the guidance removal was never even attempted — this test observed "
+                      f"nothing, so its assertion below proves nothing (log: {order})")
+        self.assertNotIn(registry, order,
                          "registry removal was attempted after guidance cleanup failed")
 
         self.rm_log.unlink(missing_ok=True)

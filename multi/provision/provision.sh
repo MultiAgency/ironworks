@@ -76,7 +76,7 @@ SLUG="${POSITIONAL[0]:-}"
 NAME="${POSITIONAL[1]:-}"
 GROUP_ID="${POSITIONAL[2]:-}"
 [ -n "$SLUG" ] || { echo "usage: provision.sh <slug> \"<Display Name>\" <telegram_group_id> [--service <name>] [--dry-run|--resume|--status]" >&2; exit 2; }
-case "$SLUG" in *[!a-z0-9-]*) echo "!! slug must be lowercase [a-z0-9-]: $SLUG" >&2; exit 2;; esac
+fleet_slug_valid "$SLUG" || { echo "!! slug must be lowercase [a-z0-9-]: $SLUG" >&2; exit 2; }
 
 CLIENTS_DIR="${CLIENTS_DIR:-$FLEET_AGENCY_DIR/clients}"
 STAGING_DIR="$CLIENTS_DIR/.staging"
@@ -179,8 +179,8 @@ compensate() {
       # Verify the compensation rather than assume it: the file is hot-reloaded, so the answer
       # is observable immediately.
       local ocode
-      ocode=$(curl_header "X-Service-Token: $ACCOUNT_TOKEN" -s -o /dev/null -w '%{http_code}' \
-        "$ACCOUNT_BASE/list_accounts" || echo 000)
+      ocode=$(fleet_http_code curl_header "X-Service-Token: $ACCOUNT_TOKEN" \
+        -s -o /dev/null -w '%{http_code}' "$ACCOUNT_BASE/list_accounts")
       if [ "$ocode" = "401" ]; then
         echo "   deregistered the org token — VERIFIED revoked (Account Service now answers 401)" >&2
       else
@@ -216,14 +216,14 @@ pf() { # pf <ok?> <label> [remedy]
 }
 
 # pf_http <label> <url> <remedy> [bearer] — "does this endpoint answer 200?", the shape three
-# preflight probes had copy-pasted. `|| echo 000` keeps a connection failure a FINDING rather
+# preflight probes had copy-pasted. `fleet_http_code` keeps a connection failure a FINDING rather
 # than a `set -e` abort with no preflight summary printed.
 pf_http() {
   local code
   if [ -n "${4:-}" ]; then
-    code="$(curl_bearer "$4" -s -o /dev/null -w '%{http_code}' "$2" || echo 000)"
+    code="$(fleet_http_code curl_bearer "$4" -s -o /dev/null -w '%{http_code}' "$2")"
   else
-    code="$(curl -s -o /dev/null -w '%{http_code}' "$2" || echo 000)"
+    code="$(fleet_http_code curl -s -o /dev/null -w '%{http_code}' "$2")"
   fi
   if [ "$code" = "200" ]; then pf 0 "$1"; else pf 1 "$1" "$3 (HTTP $code)"; fi
 }

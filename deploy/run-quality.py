@@ -238,23 +238,40 @@ def js_checks(check, record):
               ["node", "--input-type=module", "--check"], stdin=source)
 
 
-def file_ending_guard(record):
-    """A blank line at EOF, or a missing final newline, over every tracked TEXT file.
+# More than two consecutive blank lines. PEP 8 tops out at two (between top-level definitions),
+# so three is always residue — the gap left by deleting the thing that used to sit there.
+MAX_BLANK_RUN = 2
 
-    WHY THIS IS NOT A RUFF RULE. Both defects this catches shipped past every gate here: a
-    blank line at EOF in `tool_surface.py` and a triple blank line in its test, each left by
-    deleting the thing above it. `ruff` selects `W` now, which covers W291/W292/W293 and E303
-    — but W391 (blank line at EOF) is a PREVIEW rule in the pinned ruff, so `--select W` does
-    not raise it and enabling `--preview` to get it would turn on every other unstable rule
-    with it. `git diff --check` sees it, and nothing here runs that.
 
-    So the one case ruff cannot reach is checked directly, and over ALL tracked text rather
-    than just Python, because the class is not a Python one: the same edit leaves the same
-    residue in a shell script or a markdown file, where no linter is looking at all.
+def whitespace_residue_guard(record):
+    """Blank-line residue over every tracked TEXT file: at EOF, at the end of a line, or in a
+    run of three or more.
+
+    WHY THIS IS NOT A RUFF RULE — AND WHY THE PREVIOUS ANSWER TO THAT WAS HALF RIGHT. This
+    docstring used to say `ruff` "selects W now, which covers W291/W292/W293 and E303" and that
+    only W391 was out of reach as a preview rule. Two things were wrong with that. E303 is not a
+    W rule; and it is preview-only in the pinned ruff EXACTLY as W391 is, so selecting it in
+    `pyproject.toml` did nothing at all. Ruff said so on every single run —
+
+        warning: Selection `E303` has no effect because preview is not enabled.
+
+    — and nothing read it. The triple blank line named above as the reason this gate exists was
+    therefore still ungated after it was written, and by the time it was measured the tree held
+    twelve of them, the worst being TWENTY-ONE consecutive blank lines in
+    `multi/seam/test_turn.py`.
+
+    So the blank-run check moved here, next to the EOF check it was always the twin of, and for
+    the same two reasons: `--preview` would enable every other unstable rule to get these two,
+    and the class is not a Python one — the identical edit leaves the identical residue in a
+    shell script or a markdown file, where no linter is looking at all.
+
+    THE SELECTION IS ALSO ASSERTED, in `deploy/lib/test_ci_contracts.py`: a rule that is selected
+    and silently inert is the defect this paragraph describes, and prose cannot catch the next
+    one.
     """
     files = tracked("*")
     if files is None:
-        record("file endings", BLOCKED)
+        record("whitespace residue", BLOCKED)
         return
     hits, unreadable = [], []
     for path in files:
@@ -263,21 +280,41 @@ def file_ending_guard(record):
         except OSError as e:
             unreadable.append((_rel(path), f"{type(e).__name__}: {e.strerror}"))
             continue
-        if not raw or b"\0" in raw[:8000]:
-            continue                      # empty, or binary — neither has a "line ending"
-        try:
-            text = raw.decode()
-        except UnicodeDecodeError:
-            continue
-        if text.endswith("\n\n"):
-            hits.append((_rel(path), "blank line at end of file"))
-        elif not text.endswith("\n"):
-            hits.append((_rel(path), "no newline at end of file"))
+        hits += [(f"{_rel(path)}{at}", why) for at, why in _residue_in(raw)]
     for rel, why in hits:
         print(f"FAILED: {rel}: {why}", file=sys.stderr)
     for rel, why in unreadable:
         print(f"BLOCKED: {rel}: {why}", file=sys.stderr)
-    record("file endings", FAIL if hits else (BLOCKED if unreadable else PASS))
+    record("whitespace residue", FAIL if hits else (BLOCKED if unreadable else PASS))
+
+
+def _residue_in(raw):
+    """[(location-suffix, why)] for one file's bytes. Empty for a file with nothing to say.
+
+    Split out from the walk above so each has one job, and because it makes the rules directly
+    testable on bytes — `deploy/lib/test_ci_contracts.py` calls this rather than building a git
+    tree per case."""
+    if not raw or b"\0" in raw[:8000]:
+        return []                         # empty, or binary — neither has a "line ending"
+    try:
+        text = raw.decode()
+    except UnicodeDecodeError:
+        return []
+    found = []
+    if text.endswith("\n\n"):
+        found.append(("", "blank line at end of file"))
+    elif not text.endswith("\n"):
+        found.append(("", "no newline at end of file"))
+    run = start = 0
+    for n, line in enumerate(text.splitlines(), 1):
+        if line.strip():
+            run = 0
+            continue
+        start = n if run == 0 else start
+        run += 1
+        if run == MAX_BLANK_RUN + 1:
+            found.append((f":{start}", f"more than {MAX_BLANK_RUN} consecutive blank lines"))
+    return found
 
 
 def main():
@@ -302,7 +339,7 @@ def main():
           ["ruff", "check", ".", "deploy/lib/compose-persona", "deploy/ironworks"])
     shell_checks(check, record)
     js_checks(check, record)
-    file_ending_guard(record)
+    whitespace_residue_guard(record)
     check("Secretary unit tests",
           ["node", "--test", "deploy/secretary/worker/secretary-core.test.js"])
     check("service definitions",

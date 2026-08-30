@@ -86,13 +86,27 @@ else:
         except Exception as e:
             block(f"{method} {path}", f"call failed: {e}"); continue
         check(f"{method} {path}: member denied (401/403)", st in (401, 403), f"status {st}")
+    # THE POSITIVE CONTROL FOR EVERY DENIAL ABOVE, and it used to be neither.
+    #
+    # It read `st in (200, 403)` under the label "member read allowed", so it passed on allow AND
+    # on deny and could only fail on 401/404/5xx. Two things were lost. First, it asserted
+    # nothing about the property it names. Second — and this is why it matters here — a REVOKED
+    # or malformed member token 401s every admin route too, so the eight denials above would all
+    # go green against a token that authenticates nothing. A negative suite needs one leg that
+    # only passes when the credential is live, and this is the leg.
+    #
+    # 200 is the measured behaviour, not a preference: /settings/tools is the member-readable
+    # catalog that `confine-member.sh` writes and `test_catalog_parity.py` and
+    # `test_egress_closed.py` both read as a member. A 403 here would mean those proofs are
+    # reading nothing, which is a finding rather than an acceptable outcome.
     for method, path in READ_ROUTES:
         try:
             st, _ = req(method, path, member.ironclaw_token)
         except Exception as e:
             block(f"{method} {path}", f"call failed: {e}"); continue
-        check(f"{method} {path}: member read allowed (200/403 both fine)",
-              st in (200, 403), f"status {st}")
+        check(f"{method} {path}: member CAN read its own catalog — 200 "
+              f"(the positive control: proves the denials above are authz, not a dead token)",
+              st == 200, f"status {st}")
 
 # ---- 2. projects are member-reachable but per-user isolated (the correction above) ----
 print("== projects: member-reachable, per-user isolated ==")
