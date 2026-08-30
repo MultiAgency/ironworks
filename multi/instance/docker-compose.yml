@@ -59,6 +59,15 @@ services:
     # DEV_SECRET becomes usable by EVERY sealed client's turns (verified: ironclaw
     # obligations/handler.rs secret_owner_scope). Per-client credentials ride the seam
     # (ClientConfig, ~/.agency/clients/), never the instance env.
+    #
+    # 1.4 SECURE-DEFAULT FREEZE. Deliberately absent from this environment:
+    #   IRONCLAW_REBORN_SSH_PUBLIC_KEY          (no sshd; port 2222 is not published)
+    #   IRONCLAW_REBORN_SANDBOX_PROXY_IMAGE     (do not substitute upstream sandbox proxying
+    #                                             for the network boundary)
+    #   IRONCLAW_SANDBOX_EXTRA_ALLOWED_DOMAINS  (no extra domains, especially no wildcard)
+    # `[memory].curation_interval_turns` is likewise absent from persisted config, so background
+    # memory curation stays disabled. The stock entrypoint's contained default workspace remains
+    # `/data/ironclaw-reborn/workspace`; do not override it outside the managed home.
     environment:
       IRONCLAW_REBORN_PROFILE: production                      # -> hosted_multi_tenant + secure_default
       IRONCLAW_REBORN_POSTGRES_URL: postgres://postgres:${PGPW:?mint in multi/instance/.env}@db:5432/ironclaw

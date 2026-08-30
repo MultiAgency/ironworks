@@ -121,6 +121,8 @@ echo
 if docker ps -a --format '{{.Names}}' | grep -qx "$container"; then
   echo "!! container $container already exists — pick a different name or remove it" >&2; exit 1
 fi
+# 1.4 secure-default freeze: no SSH key/port, sandbox-proxy override, extra sandbox domains, or
+# memory-curation setting is supplied here. The stock contained workspace default remains in use.
 docker run -d --name "$container" --restart unless-stopped \
   -p "127.0.0.1:$port:3000" -v "$volume:/data" \
   -e IRONCLAW_REBORN_PROFILE=hosted-single-tenant-volume \

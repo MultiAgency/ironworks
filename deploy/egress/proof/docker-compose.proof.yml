@@ -52,6 +52,9 @@ services:
     image: ${PROOF_IMAGE:-ironclaw:main}
     depends_on:
       db: { condition: service_healthy }
+    # Match production's 1.4 secure-default freeze: SSH, sandbox proxy overrides, extra sandbox
+    # domains, and memory curation are absent. A proof that quietly enabled one would test a
+    # different runtime topology.
     environment:
       IRONCLAW_REBORN_PROFILE: production
       IRONCLAW_REBORN_POSTGRES_URL: postgres://postgres:${PROOF_PGPW:?}@db:5432/ironclaw

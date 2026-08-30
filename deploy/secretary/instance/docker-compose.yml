@@ -15,6 +15,9 @@ services:
     # ironclaw:main is retagged to the current pin. See deploy/README.md.
     image: ${IRONCLAW_IMAGE:-ironclaw:main}
     restart: unless-stopped          # durable: survives reboot / Docker restart, like the fleet
+    # Same 1.4 secure-default freeze as the MT runtime: no SSH key, port 2222, extra sandbox
+    # domains, sandbox-proxy override, or memory-curation setting. The contained stock workspace
+    # default is retained. These features are absent deliberately, not awaiting configuration.
     environment:
       IRONCLAW_REBORN_PROFILE: hosted-single-tenant-volume
       IRONCLAW_REBORN_SERVE_HOST: "0.0.0.0"

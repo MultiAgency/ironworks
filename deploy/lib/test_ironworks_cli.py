@@ -591,6 +591,81 @@ class ConsoleTest(unittest.TestCase):
             self.assertIn(required, blocked)
 
 
+class ColdStartCheckTest(unittest.TestCase):
+    """`tenant.cold_start` — would the bridge REFUSE to start?
+
+    Pinned because on 2026-08-27 nothing asked this in time: the laptop bridge served for
+    2d 9h against a store it could no longer load, and `doctor`, `tenant inspect` and
+    `tenants status` were all green on that exact store. The check must FAIL there, and — the
+    half that is easy to get wrong — must not report health when it evaluated nothing.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.console = load_console()
+        sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "multi" / "seam"))
+        import bridge_state
+        import registry
+        cls.bs, cls.reg = bridge_state, registry
+
+    def store(self, identity, state):
+        """A store holding one thread row for gid '-100'. identity=False -> legacy NULLs."""
+        d = tempfile.mkdtemp()
+        self.addCleanup(lambda: __import__("shutil").rmtree(d, ignore_errors=True))
+        db = pathlib.Path(d) / "b.db"
+        st = self.bs.BridgeState(str(db))
+        st.close()
+        con = sqlite3.connect(db)
+        cols = ", ".join(self.bs.IDENTITY_FIELDS)
+        vals = (("'svc', 1, 'i', 'm', 'c', 'org', 'http://a'") if identity
+                else ", ".join(["NULL"] * len(self.bs.IDENTITY_FIELDS)))
+        con.execute(f"INSERT INTO threads (gid, prev, {cols}) VALUES (?, ?, {vals})",
+                    ("-100", "prev-token" if state else None))
+        con.commit(); con.close()
+        return db
+
+    def client(self, gid="-100"):
+        return self.reg.ClientConfig(slug="t", ironclaw_token="x", account_token="y",
+                                     telegram_group_id=gid)
+
+    def run_check(self, db, clients):
+        rep = self.console.Report("test")
+        self.console._bridge_paths = lambda: (db, None)
+        self.console.check_thread_compatibility(rep, clients)
+        return rep
+
+    def verdict(self, rep):
+        return [c for c in rep.checks if c["id"] == "tenant.cold_start"][0]
+
+    def test_a_legacy_row_WITH_state_fails_and_names_the_remedy(self):
+        """The 2026-08-27 shape exactly: NULL identity plus a conversation that cannot be
+        attributed after the fact, so the loader refuses and this must say so first."""
+        v = self.verdict(self.run_check(self.store(identity=False, state=True),
+                                        {"t": self.client()}))
+        self.assertEqual(v["verdict"], self.console.FAIL)
+        self.assertIn("reset-thread", v["detail"])
+
+    def test_a_legacy_row_with_NO_state_passes_because_the_loader_binds_it(self):
+        """POSITIVE CONTROL: the loader rebinds this one, so flagging it would be a false
+        alarm that trains operators to ignore the check."""
+        v = self.verdict(self.run_check(self.store(identity=False, state=False),
+                                        {"t": self.client()}))
+        self.assertEqual(v["verdict"], self.console.PASS)
+
+    def test_no_bound_group_is_BLOCKED_not_PASS(self):
+        """THE VACUOUS PASS. A draft of this logic reported a confident 'cold start would
+        SUCCEED' for a host whose registry and store shared no group id — it compared nothing
+        and called it health."""
+        v = self.verdict(self.run_check(self.store(identity=False, state=True),
+                                        {"t": self.client(gid="")}))
+        self.assertEqual(v["verdict"], self.console.BLOCKED)
+
+    def test_an_absent_store_is_SKIPPED_not_PASS(self):
+        v = self.verdict(self.run_check(pathlib.Path(tempfile.mkdtemp()) / "none.db",
+                                        {"t": self.client()}))
+        self.assertEqual(v["verdict"], self.console.SKIPPED)
+
+
 class LiveCheckTest(unittest.TestCase):
     """The LIVE checks, driven with a stubbed transport.
 

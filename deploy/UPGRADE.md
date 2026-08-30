@@ -122,6 +122,36 @@ ironclaw_libsql_runtime/README.md`; upstream's own `railway.toml` sets
 overlapping redeploys. The MT instance additionally runs with the Postgres resource
 governor as a singleton — never a second MT container against the same DB or volume.
 
+## 1.3.0 -> 1.4.0 trigger-history migration
+
+IronClaw 1.4.0 performs a durable migration even though its changelog requires no manual
+migration step. In both libSQL and Postgres, `trigger_run_history` gains a non-null `source`
+defaulting to `schedule`; its primary key changes from `(tenant_id, trigger_id, fire_slot)` to
+`(tenant_id, trigger_id, fire_slot, source)`; and `thread_id` becomes nullable. libSQL rebuilds
+the table. Postgres replaces the primary-key constraint and changes the column constraint.
+
+**The old runtime is not a rollback for the new schema.** IronClaw 1.3.0 writes with
+`ON CONFLICT (tenant_id, trigger_id, fire_slot)`, which is no longer backed by a unique constraint
+after the 1.4.0 migration. Starting the old container against migrated storage can therefore boot
+yet fail trigger writes. A rollback must restore the old runtime **and** the matching pre-upgrade
+database or volume snapshot.
+
+Before step 5 is allowed for this pair, rehearse each deployed backend on a disposable restore:
+
+1. Stop or snapshot under the backend's consistency rules and create a pre-upgrade backup.
+2. Restore it under a new disposable database/volume and confirm the expected row counts.
+3. Boot the exact rev-labelled 1.4.0 image as the only writer.
+4. Verify the four-column primary key, `source='schedule'` on legacy rows, nullable `thread_id`,
+   unchanged legacy row contents, and successful new scheduled and manual trigger writes.
+5. Restart 1.4.0 against that migrated copy and repeat the reads and writes.
+6. Demonstrate that rollback restores both the 1.3.0 image and the untouched pre-upgrade snapshot;
+   then verify old reads and writes. Never point 1.3.0 at the migrated copy as the rollback test.
+
+Run this once for the MT Postgres database and once for a fleet libSQL volume that contains real
+trigger history. A schema-only empty fixture is vacuous. Record backup identifiers, row counts,
+image labels, migration logs, restart result, write results, and restore result with the candidate's
+live certification evidence. Do not perform this rehearsal on live storage.
+
 ## The bump
 
 1. **Pick the rev.** Prefer **release tags** over arbitrary main SHAs: upgrade-boot
@@ -352,6 +382,11 @@ governor as a singleton — never a second MT container against the same DB or v
 
 ## Rollback
 
-Retag `ironclaw:main` to the previous rev-named tag and repeat step 5 in the same order.
-Expect `migrate-image.sh`'s unknown-variant surgery path on any agent whose extension
-state was written by the newer binary.
+For a migration-free pair, retag `ironclaw:main` to the previous rev-named tag and repeat step 5
+in the same order. For 1.4.0 after trigger-history migration, that is insufficient: stop the new
+runtime, restore the pre-upgrade Postgres database or fleet volume, retag the old runtime, and
+only then start it. Runtime and storage are one rollback unit. If the matching snapshot is absent
+or its restore was not rehearsed, rollback is unavailable and the only safe path is fix-forward.
+
+Expect `migrate-image.sh`'s unknown-variant surgery path on any agent whose extension state was
+written by a newer binary, independently of the trigger-history rule above.

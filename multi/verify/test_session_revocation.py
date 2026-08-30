@@ -24,7 +24,7 @@ The probe route is `GET /v1/responses/<uuid-that-does-not-exist>`:
   404 -> the bearer was ACCEPTED and the response id merely does not exist (authority remains)
 It costs no model call, which is what makes it usable inside deprovision.sh.
 
-EXPECTED AT THE PINNED REV (`IRONCLAW_PIN` 70795c16e, source-traced then measured):
+LAST MEASURED AT THE PREVIOUS PIN (`IRONCLAW_PIN` 70795c16e):
   - `SignedTokenSessionStore::lookup` consults only the HMAC signature, `exp`, the
     process-local revoked set, and the tenant — it never reads the user directory. So neither
     suspension nor deletion can affect it.
@@ -33,6 +33,11 @@ EXPECTED AT THE PINNED REV (`IRONCLAW_PIN` 70795c16e, source-traced then measure
     that reaches `revoke()` at all.
   - `ADMIN_API_TOKEN_LIFETIME_DAYS = 365`, a Rust constant with no config path.
   => a deprovisioned client's member token keeps authenticating for up to a year.
+
+The current 1.4.0 baseline must re-earn this result live. The source contract remained during the
+upgrade audit, but a source trace is not a session-revocation measurement; do not inherit the
+1.3.0 verdict or change deprovisioning's exit contract until this probe is run against the exact
+1.4.0 image.
 
 That is the finding this script exists to keep honest, and it is why deprovision.sh exits 3
 (RESIDUAL AUTHORITY) rather than 0. It is NOT a reason to relax: the containment is custody —

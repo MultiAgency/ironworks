@@ -1,1 +1,1 @@
-70795c16ed0cec21eb8cba16d2dcf851d25dc83d # ironclaw-v1.3.0 (final, 2026-08-19) — release tag per UPGRADE.md step 1; carries boot fix #7721 (505cf0a15), absent from main
+4cb47cfaf3fbacd3a2f575a8da654a6542d5fdfe # ironclaw-v1.4.0 (stable, 2026-08-27) — exact release tag; the known non-streaming Responses 30s false-503 contract remains

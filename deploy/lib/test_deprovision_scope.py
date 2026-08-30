@@ -7,6 +7,7 @@ import pathlib
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 
 
@@ -277,9 +278,14 @@ printf '%s\n' "${FAKE_PROCESS_STARTED:-Thu Aug 27 12:00:00 2026}"
         # The replacement's authoritative service PID agrees with bridge metadata and its start
         # epoch is after the retained registry-removal time.
         self._set_bridge_pid(db, os.getpid())
+        # Derive the local-time `ps -o lstart` fixture from the recorded epoch. A fixed clock time
+        # on today's date flips from future to past as the suite runs later in the day, making
+        # this restart proof fail without any product change.
+        restarted = time.strftime("%a %b %d %H:%M:%S %Y",
+                                  time.localtime(int(receipt["registry_removed_at"]) + 60))
         second = self._run("--execute", "--confirm", "acme", service_state="active",
                            service_pid=os.getpid(),
-                           process_started="Fri Aug 28 12:00:00 2026")
+                           process_started=restarted)
         self.assertEqual(second.returncode, 0,
                          "the rerun did not converge:\n" + second.stdout + second.stderr)
         self.assertIn("in-memory route: absent", second.stdout)

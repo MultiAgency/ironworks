@@ -59,6 +59,11 @@ builtin.glob builtin.grep builtin.skill_list \
 ironclaw.memory.read ironclaw.memory.search ironclaw.memory.tree"
 KEEP="${CONFINE_KEEP:-$KEEP_DEFAULT}"
 
+# 1.4 BASELINE. New catalogued capabilities such as builtin.trigger_status and the Google Docs
+# semantic tools are intentionally absent from KEEP, so the generic allowlist loop below disables
+# them without granting the services anything new. GitHub GH_TOKEN direct-exec bindings and
+# suggestion-triggered tools likewise receive no authority merely because upstream ships them.
+
 # RE-RUNNING IS FREE. This used to POST a disable for every denied tool on every run, which cost
 # one request per tool per client even when the surface was already correct, and tripped the
 # API's rate limiter on a back-to-back re-run (observed: HTTP 429). That failed

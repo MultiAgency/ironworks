@@ -112,8 +112,16 @@ if cat is not None:
                      "builtin.write_file", "builtin.apply_patch", "builtin.spawn_subagent",
                      "builtin.extension_install", "builtin.admin_configuration_replace",
                      "ironclaw.memory.write"]
-    still_live = [t for t in must_be_gated if canon(t) in {canon(k) for k in cat} and canon(t) not in disabled]
-    check("every dangerous catalogued tool is disabled", not still_live, str(still_live))
+    # 1.4 additions are not part of either IronWorks service definition. Some are read-only,
+    # but the service freeze is narrower than "not an external write": automation metadata,
+    # extension credentials, and document access remain unavailable unless deliberately added.
+    must_remain_frozen = ["builtin.trigger_status", "builtin.trigger_run",
+                          "google-docs.inspect_document", "google-docs.apply_text_edits",
+                          "google-docs.create_table_with_data", "google-docs.verify_document"]
+    catalog_names = {canon(k) for k in cat}
+    still_live = [t for t in must_be_gated + must_remain_frozen
+                  if canon(t) in catalog_names and canon(t) not in disabled]
+    check("every denied catalogued tool is disabled", not still_live, str(still_live))
     check("the catalog is non-empty and recognisable", len(cat) > 20, f"{len(cat)} entries")
 
 # ---- leg B (BEHAVIOURAL, and labelled as such): what is the model actually offered? --

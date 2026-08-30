@@ -615,6 +615,76 @@ def check_containment(rep, clients, live):
                "egress tools observed disabled)")
 
 
+def check_thread_compatibility(rep, clients):
+    """Would a COLD START refuse? Asked here because nothing else asks it in time.
+
+    THE INCIDENT. 2026-08-27: the laptop bridge had served for 2d 9h and could not restart —
+    `multiagency` held a v1-era row whose identity was all NULL ("legacy compatibility identity
+    missing") plus live state, which cannot be attributed after the fact, so `_load_threads`
+    refuses rather than guesses. Interpreter-independent; the running process survived only
+    because it had loaded that state days earlier and never re-read it. A latent outage waiting
+    on any reboot, and NOTHING reported it: against that exact store, `doctor` returned 16 pass
+    / 2 FAIL with neither failure related, `tenant inspect` 10 pass, `tenants status` 5 pass.
+
+    `identity_mismatches` had exactly two callers: `telegram_bridge` at startup, where it raises
+    (too late — the outage has happened), and `tenant reset-thread`, which is the REMEDY. You had
+    to already know to run the only thing that would tell you. This is the third caller, in the
+    one place that is read before the failure rather than during it.
+
+    Uptime measures the opposite of restartability, which is precisely why this hid.
+    """
+    if clients is None:
+        return
+    try:
+        import bridge_state
+        db = pathlib.Path(_bridge_paths()[0])
+    except Exception as e:
+        return rep.blocked("tenant.cold_start", CONFIG, "a cold start would load every thread",
+                           f"bridge modules did not import: {type(e).__name__}: {e}")
+    if not db.exists():
+        return rep.skipped("tenant.cold_start", CONFIG, "a cold start would load every thread",
+                           f"no bridge store at {db} — no persisted thread can be incompatible")
+    try:
+        st = bridge_state.BridgeState(str(db), migrate=False)   # READ-ONLY: see _bridge_read
+    except Exception as e:
+        return rep.blocked("tenant.cold_start", CONFIG, "a cold start would load every thread",
+                           f"the bridge state store did not open: {type(e).__name__}: {e}")
+    try:
+        bound = {slug: c for slug, c in clients.items() if c.telegram_group_id}
+        # THE VACUOUS PASS THIS CHECK MUST NOT PRINT. A first draft of this logic reported a
+        # confident "cold start would SUCCEED" for a host where the registry and the store
+        # shared no group id at all — it compared nothing and called it health. If no tenant is
+        # bound there is no cold start to evaluate, and that is BLOCKED, never PASS.
+        if not bound:
+            return rep.blocked("tenant.cold_start", CONFIG,
+                               "a cold start would load every thread",
+                               "no tenant has a bound Telegram group — nothing to evaluate")
+        refuse, evaluated = [], 0
+        for slug, c in sorted(bound.items()):
+            row = st.thread_row(c.telegram_group_id)
+            if not row:
+                continue                     # no persisted thread: loads clean
+            evaluated += 1
+            mismatches = st.identity_mismatches(row, c)
+            if not mismatches:
+                continue
+            if (mismatches == ["legacy compatibility identity missing"]
+                    and not st.thread_has_state(row)):
+                continue                     # the loader binds this one; not a refusal
+            refuse.append(f"{slug}: {'; '.join(mismatches)}")
+    finally:
+        st.close()
+    if refuse:
+        return rep.fail("tenant.cold_start", CONFIG, "a cold start would load every thread",
+                        "the bridge would REFUSE to start: " + " | ".join(refuse) +
+                        " — it is serving now only because it loaded this state earlier. "
+                        "Stop it and run: ./deploy/ironworks tenant reset-thread <slug> "
+                        "--confirm <slug>")
+    rep.ok("tenant.cold_start", CONFIG,
+           f"a cold start would load every thread ({len(bound)} bound tenant(s), "
+           f"{evaluated} with a persisted thread)")
+
+
 def check_sealed_members(rep, clients, live):
     """Would the bridge start? Every tenant's token must be a sealed MEMBER, not the operator.
 
@@ -1072,6 +1142,7 @@ def cmd_doctor(args):
         check_account_service(rep)
     check_containment(rep, clients, live=not args.offline)
     check_sealed_members(rep, clients, live=not args.offline)
+    check_thread_compatibility(rep, clients)
     if not args.offline:
         check_bridge(rep)
     if clients is not None:

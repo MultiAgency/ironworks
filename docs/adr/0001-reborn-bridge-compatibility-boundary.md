@@ -13,10 +13,16 @@ IronClaw. The current Telegram bridge also implements generic channel and runtim
 current IronClaw Reborn is designed to own. That overlap is intentional only where stock Reborn
 cannot yet express IronWorks' organizational semantics.
 
-This decision was re-established against:
+This decision was first re-established against:
 
 - the deployed pin in `IRONCLAW_PIN` (`70795c16e`, IronClaw v1.3.0); and
 - current upstream `main` at `8dc5958a1d80c84531943e494b22bd233c81033f` on 2026-08-26.
+
+The 1.4.0 compatibility audit subsequently re-established the same boundary against exact stable
+`ironclaw-v1.4.0` (`4cb47cfaf3fbacd3a2f575a8da654a6542d5fdfe`). Stock 1.4.0 still uses
+event-keyed, pinger-owned shared threads and still lacks IronWorks' model-free delivery settlement;
+its non-streaming Responses path also retains the fixed 30-second projection wait and ambiguous
+HTTP 503 contract. The pin changed; the bridge-deletion gates did not pass.
 
 Current upstream has a production-wired Telegram extension, verified webhook ingress, generic
 idempotent admission, typed thread/turn/run state, and a host-owned delivery coordinator. It does
