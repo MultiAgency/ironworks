@@ -168,10 +168,16 @@ def direct(label, host, port, tls=True, must="block"):
 CONNECT = r'''
 import socket, sys
 target = sys.argv[1]
-s = socket.create_connection(("gw", 3128), timeout=5)
-s.sendall(("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n" % (target, target)).encode())
-print(s.recv(200).decode("latin-1", "replace").split("\r\n")[0])
-s.close()
+try:
+    s = socket.create_connection(("gw", 3128), timeout=5)
+    s.sendall(("CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n" % (target, target)).encode())
+    print(s.recv(200).decode("latin-1", "replace").split("\r\n")[0])
+    s.close()
+except Exception as e:
+    # `compose stop gw` can remove the service alias from Docker DNS. That is a blocked
+    # gateway path, not a failed namespace probe: the caller still requires CONNECT 200
+    # when gw is running and requires its absence after the stop.
+    print("blocked:" + type(e).__name__)
 '''
 
 

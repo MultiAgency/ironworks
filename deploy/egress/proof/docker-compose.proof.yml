@@ -15,6 +15,19 @@
 name: egressproof
 
 services:
+  # Mirror production's capability-free workspace initialization. A proof that grants
+  # DAC_OVERRIDE here would certify a different startup boundary from the deployed runtime.
+  workspace-init:
+    image: ${PROOF_IMAGE:-ironclaw:main}
+    user: "1000:1000"
+    entrypoint: ["/bin/mkdir", "-p", "/data/ironclaw-reborn/workspace"]
+    restart: "no"
+    network_mode: none
+    read_only: true
+    volumes: [ic-data:/data]
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
   db:
     image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     environment:
@@ -52,6 +65,7 @@ services:
     image: ${PROOF_IMAGE:-ironclaw:main}
     depends_on:
       db: { condition: service_healthy }
+      workspace-init: { condition: service_completed_successfully }
     # Match production's 1.4 secure-default freeze: SSH, sandbox proxy overrides, extra sandbox
     # domains, and memory curation are absent. A proof that quietly enabled one would test a
     # different runtime topology.

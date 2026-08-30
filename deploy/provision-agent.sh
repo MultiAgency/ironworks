@@ -123,8 +123,11 @@ if docker ps -a --format '{{.Names}}' | grep -qx "$container"; then
 fi
 # 1.4 secure-default freeze: no SSH key/port, sandbox-proxy override, extra sandbox domains, or
 # memory-curation setting is supplied here. The stock contained workspace default remains in use.
+fleet_prepare_workspace "$IMAGE" "$volume"
 docker run -d --name "$container" --restart unless-stopped \
   -p "127.0.0.1:$port:3000" -v "$volume:/data" \
+  --security-opt no-new-privileges:true \
+  --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID \
   -e IRONCLAW_REBORN_PROFILE=hosted-single-tenant-volume \
   -e IRONCLAW_REBORN_SERVE_HOST=0.0.0.0 \
   -e IRONCLAW_REBORN_WEBUI_USER_ID=reborn-cli \

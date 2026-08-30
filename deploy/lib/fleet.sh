@@ -12,6 +12,28 @@
 # shellcheck disable=SC2034  # consumed by the sourcing scripts, not here
 FLEET_PERSONA_DST="/data/ironclaw-reborn/hosted-single-tenant-volume/system/prompts/default-system.md"
 
+# IronClaw 1.4 creates this persistent directory during its root entrypoint pass. IronWorks
+# deliberately withholds DAC_OVERRIDE from the runtime, so root cannot create a child beneath
+# the image-seeded, mode-0755 home after that home is owned by uid 1000. Prepare the one path as
+# the SAME uid that owns and later serves it; do not broaden the long-lived container instead.
+# shellcheck disable=SC2034  # asserted by tests and used by fleet_prepare_workspace
+FLEET_WORKSPACE_ROOT="/data/ironclaw-reborn/workspace"
+
+# fleet_prepare_workspace <image> <volume> — deterministic, capability-free 1.4 workspace init.
+#
+# The official image seeds /data/ironclaw-reborn as 1000:1000. Docker copies that ownership into
+# a fresh named volume before this process runs, so uid 1000 can create the child on both cold
+# boot and restart. The initializer has no network, a read-only image filesystem, no capabilities,
+# and no privilege escalation; its only writable object is the already-required /data volume.
+fleet_prepare_workspace() {
+  local _image="${1:?fleet_prepare_workspace requires an image}"
+  local _volume="${2:?fleet_prepare_workspace requires a volume}"
+  docker run --rm --network none --read-only --user 1000:1000 \
+    --cap-drop ALL --security-opt no-new-privileges:true \
+    --entrypoint /bin/mkdir -v "$_volume:/data" "$_image" \
+    -p "$FLEET_WORKSPACE_ROOT"
+}
+
 # fleet_agent_env <slug> — path of the agent's recorded secrets/env file.
 fleet_agent_env() { printf '%s/%s.env\n' "${MULTRON_SECRETS_DIR:-$FLEET_AGENCY_DIR/agents}" "$1"; }
 

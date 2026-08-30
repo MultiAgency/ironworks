@@ -122,6 +122,34 @@ ironclaw_libsql_runtime/README.md`; upstream's own `railway.toml` sets
 overlapping redeploys. The MT instance additionally runs with the Postgres resource
 governor as a singleton — never a second MT container against the same DB or volume.
 
+## 1.4.0 persistent-workspace initialization
+
+IronClaw 1.4.0 adds a root entrypoint pass that resolves the default workspace to
+`/data/ironclaw-reborn/workspace`, creates it, repairs its ownership, and then drops to uid 1000
+with `gosu`. The official image already seeds `/data/ironclaw-reborn` as `1000:1000` mode `0755`.
+That ordering matters under IronWorks' `cap_drop: [ALL]`: root carrying only
+`CHOWN`, `SETUID`, and `SETGID` cannot create a new child in a directory owned by uid 1000,
+because it deliberately has no `DAC_OVERRIDE`.
+
+Do not add `DAC_OVERRIDE` to the long-lived runtime for this one mkdir. Every canonical path first
+runs a one-shot initializer as `1000:1000` with no network, no capabilities, no privilege
+escalation, and a read-only image filesystem; its only writable mount is the existing `/data`
+volume. Compose expresses that as `workspace-init` plus
+`condition: service_completed_successfully`; fleet provisioning and `migrate-image.sh` call
+`fleet_prepare_workspace` for the same operation. The normal upstream entrypoint still starts as
+root afterward, retains its ownership-repair behavior, and drops to the unprivileged runtime uid.
+
+The workspace is persistent state inside the existing `/data` volume. No new backup target is
+introduced: volume snapshots already include it. Restoring 1.3.0 after a 1.4.0 attempt still means
+restoring the matching pre-upgrade `/data` snapshot (plus the matching database for Postgres) and
+the 1.3.0 runtime; the presence of an empty workspace directory is not a substitute for that
+paired rollback.
+
+Before any live mutation, run `./deploy/workspace-boot-proof.sh` on the target host with
+`IRONCLAW_BOOT_IMAGE` set to the exact rev-labelled image. It creates and removes only
+disposable Docker objects while proving cold boot, authenticated assembly, restart persistence,
+uid/capability state, SSH absence, and the durable workspace for both canonical profiles.
+
 ## 1.3.0 -> 1.4.0 trigger-history migration
 
 IronClaw 1.4.0 performs a durable migration even though its changelog requires no manual

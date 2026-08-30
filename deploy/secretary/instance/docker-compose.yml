@@ -10,11 +10,29 @@
 # minted WEBUI_TOKEN / WEBUI_USER (must stay `reborn-cli`) / NEARAI_API_KEY.
 name: secretary
 services:
+  # Same capability-free, uid-1000 workspace initialization as the canonical MT runtime.
+  # Keeping this a one-shot preserves the upstream root ownership-repair + gosu entrypoint while
+  # avoiding DAC_OVERRIDE on the long-lived public-facing Secretary container.
+  workspace-init:
+    image: ${IRONCLAW_IMAGE:-ironclaw:main}
+    user: "1000:1000"
+    entrypoint: ["/bin/mkdir", "-p", "/data/ironclaw-reborn/workspace"]
+    restart: "no"
+    network_mode: none
+    read_only: true
+    volumes:
+      - secretary-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+
   ironclaw:
     # Images are built as rev-named tags (ironclaw:<9-char rev> from IRONCLAW_PIN);
     # ironclaw:main is retagged to the current pin. See deploy/README.md.
     image: ${IRONCLAW_IMAGE:-ironclaw:main}
     restart: unless-stopped          # durable: survives reboot / Docker restart, like the fleet
+    depends_on:
+      workspace-init: { condition: service_completed_successfully }
     # Same 1.4 secure-default freeze as the MT runtime: no SSH key, port 2222, extra sandbox
     # domains, sandbox-proxy override, or memory-curation setting. The contained stock workspace
     # default is retained. These features are absent deliberately, not awaiting configuration.

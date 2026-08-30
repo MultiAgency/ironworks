@@ -116,9 +116,17 @@ docker stop "$C" >/dev/null
 docker run --rm -v "$vol:/data" alpine sh -c \
   'cp /data/ironclaw-reborn/hosted-single-tenant-volume/reborn-local-dev.db \
       /data/ironclaw-reborn/hosted-single-tenant-volume/reborn-local-dev.db.bak-migrate && echo "   db backup: ok"'
+# 1.4's root entrypoint creates the durable workspace before gosu. Prepare that exact path as
+# uid 1000 so the target can keep the narrow CHOWN/SETUID/SETGID startup set; adding
+# DAC_OVERRIDE to a long-lived agent merely to perform one mkdir would widen steady-state risk.
+fleet_prepare_workspace "$IMAGE" "$vol"
+echo "   workspace init: ok ($FLEET_WORKSPACE_ROOT, uid 1000)"
 docker rm "$C" >/dev/null
 docker run -d --name "$C" --restart unless-stopped -p "127.0.0.1:$port:3000" \
-  -v "$vol:/data" --env-file "$envfile" "$IMAGE" >/dev/null
+  -v "$vol:/data" --env-file "$envfile" \
+  --security-opt no-new-privileges:true \
+  --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID \
+  "$IMAGE" >/dev/null
 echo "   recreated"
 
 tok=$(docker exec "$C" printenv IRONCLAW_REBORN_WEBUI_TOKEN)

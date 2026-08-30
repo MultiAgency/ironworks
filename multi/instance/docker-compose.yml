@@ -16,6 +16,23 @@
 #     host backups accordingly.
 name: multi
 services:
+  # IronClaw 1.4 creates the durable workspace during its root entrypoint pass. The runtime's
+  # deliberately narrow capability set has no DAC_OVERRIDE, so prepare that one path as the
+  # uid that owns the image-seeded home and serves afterward. This one-shot has no network,
+  # no capabilities, and no writable surface except the already-required /data volume.
+  workspace-init:
+    image: ${IRONCLAW_IMAGE:-ironclaw:main}
+    user: "1000:1000"
+    entrypoint: ["/bin/mkdir", "-p", "/data/ironclaw-reborn/workspace"]
+    restart: "no"
+    network_mode: none
+    read_only: true
+    volumes:
+      - ic-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+
   db:
     image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     restart: unless-stopped
@@ -52,6 +69,7 @@ services:
     restart: unless-stopped
     depends_on:
       db: { condition: service_healthy }
+      workspace-init: { condition: service_completed_successfully }
     # ISOLATION RULE:
     # this env allowlist is LOAD-BEARING. Never add an IRONCLAW_REBORN_DEV_SECRET__<handle> here.
     # That surface is TENANT-WIDE, not per-account: IronClaw resolves a keyed tool's credential

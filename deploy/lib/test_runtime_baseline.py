@@ -16,6 +16,7 @@ RUNTIME_PATHS = (
     "deploy/secretary/instance/docker-compose.yml",
     "deploy/egress/proof/docker-compose.proof.yml",
     "deploy/provision-agent.sh",
+    "deploy/migrate-image.sh",
 )
 OPT_IN_ENV = (
     "IRONCLAW_REBORN_SSH_PUBLIC_KEY",
@@ -30,6 +31,17 @@ def value(path):
 
 def active_lines(path):
     return [line.split("#", 1)[0] for line in (ROOT / path).read_text().splitlines()]
+
+
+def compose_service(path, name):
+    """Return one two-space-indented Compose service without needing a YAML dependency."""
+    lines = (ROOT / path).read_text().splitlines()
+    marker = f"  {name}:"
+    start = lines.index(marker)
+    end = next((i for i in range(start + 1, len(lines))
+                if lines[i].startswith("  ") and not lines[i].startswith("    ")
+                and lines[i].strip()), len(lines))
+    return "\n".join(line.split("#", 1)[0] for line in lines[start:end])
 
 
 def test_exact_runtime_and_model_pins():
@@ -57,6 +69,47 @@ def test_service_capability_freeze_is_unchanged():
 
     for path in (ROOT / "multi/services").glob("*.json"):
         assert json.loads(path.read_text())["capabilities"] == expected
+
+
+def test_compose_runtimes_prepare_workspace_without_dac_override():
+    stacks = (
+        ("multi/instance/docker-compose.yml", "${IRONCLAW_IMAGE:-ironclaw:main}",
+         "ic-data:/data"),
+        ("deploy/secretary/instance/docker-compose.yml",
+         "${IRONCLAW_IMAGE:-ironclaw:main}", "secretary-data:/data"),
+        ("deploy/egress/proof/docker-compose.proof.yml",
+         "${PROOF_IMAGE:-ironclaw:main}", "ic-data:/data"),
+    )
+    for path, image, volume in stacks:
+        initializer = compose_service(path, "workspace-init")
+        runtime = compose_service(path, "ic" if "egress/proof" in path else "ironclaw")
+
+        for required in (image, 'user: "1000:1000"',
+                         '["/bin/mkdir", "-p", "/data/ironclaw-reborn/workspace"]',
+                         "network_mode: none", "read_only: true", volume,
+                         "no-new-privileges:true", "cap_drop: [ALL]"):
+            assert required in initializer, f"{path} workspace initializer lost {required}"
+        assert "cap_add:" not in initializer, f"{path} initializer gained capabilities"
+        assert "workspace-init: { condition: service_completed_successfully }" in runtime
+        assert "cap_drop: [ALL]" in runtime
+        assert "cap_add: [CHOWN, SETUID, SETGID]" in runtime
+        assert "DAC_OVERRIDE" not in runtime
+
+
+def test_fleet_paths_use_the_same_workspace_and_runtime_security_contract():
+    fleet = (ROOT / "deploy/lib/fleet.sh").read_text()
+    for required in ("fleet_prepare_workspace()", "--network none", "--read-only",
+                     "--user 1000:1000", "--cap-drop ALL",
+                     "--security-opt no-new-privileges:true", "--entrypoint /bin/mkdir",
+                     'FLEET_WORKSPACE_ROOT="/data/ironclaw-reborn/workspace"'):
+        assert required in fleet, f"fleet workspace initializer lost {required}"
+
+    for path in ("deploy/provision-agent.sh", "deploy/migrate-image.sh"):
+        active = "\n".join(active_lines(path))
+        assert "fleet_prepare_workspace" in active, f"{path} skips workspace initialization"
+        assert "--security-opt no-new-privileges:true" in active
+        assert "--cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID" in active
+        assert "DAC_OVERRIDE" not in active, f"{path} grants DAC_OVERRIDE"
 
 
 if __name__ == "__main__":
