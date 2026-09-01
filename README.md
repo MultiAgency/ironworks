@@ -126,7 +126,7 @@ multi/provision/provision.sh <slug> "<display name>" <group-id> --service <servi
 ./deploy/ironworks egress status
 ./deploy/ironworks account-db migration-status
 ./deploy/ironworks service validate
-./deploy/ironworks release verify [--offline-only]
+./deploy/ironworks release verify [--offline-only] [--with-evidence ARTIFACT.json]
 ./deploy/ironworks test
 ```
 

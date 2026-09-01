@@ -13,7 +13,7 @@ IronWorks runs official IronClaw at `IRONCLAW_PIN`; it contains no runtime fork.
 ./deploy/ironworks egress status
 ./deploy/ironworks account-db migration-status
 ./deploy/ironworks service validate
-./deploy/ironworks release verify [--offline-only]
+./deploy/ironworks release verify [--offline-only] [--with-evidence ARTIFACT.json]
 ```
 
 Exit `0` means all evaluated checks passed, `2` means failure, `3` means a guarantee could not be
@@ -22,6 +22,34 @@ evaluated, and `64` means invalid usage. Blocked is never a pass.
 `./deploy/ironworks test` runs the whole local/CI quality gate from here — the same command CI
 runs. It is the one subcommand outside the verdict contract above: it reports the gate's own
 result, pass or fail, not a console verdict.
+
+### Certifying promotion takes two environments
+
+`release.promotable` requires repository-hygiene gates **and** a proved egress boundary. No single
+machine can supply both: the gates need a git checkout, and `/opt/ironworks` is a file copy, so
+`git ls-files` fails there; the boundary can only be proved against the running gateway, which CI
+does not have. Run each half where it can be answered, and carry the first to the second:
+
+```sh
+# 1. in the repository (or CI) — answers what needs a checkout
+./deploy/ironworks --json release verify > /tmp/repo-evidence.json
+scp /tmp/repo-evidence.json <host>:/tmp/
+
+# 2. on the serve host — answers the boundary, and reads the rest from the evidence
+./deploy/ironworks release verify --with-evidence /tmp/repo-evidence.json
+```
+
+Evidence is accepted **only** when both artifacts carry the same `tree_fingerprint`
+(`deploy/lib/tree_identity.py` — a content hash over the tracked files, computed from
+`git ls-files` in a checkout and from `DEPLOYED_MANIFEST.sha256` on a deployed copy, re-hashing
+the files on disk either way so a post-deploy edit moves it). It fills only checks the local run
+could not evaluate, never overwrites a local FAIL, and imports only a PASS. A mismatch is refused
+rather than reconciled: combining a green repository against one commit with a boundary proved on
+another would certify a release that never existed.
+
+The `live.*` legs stay BLOCKED until someone runs them, which costs model calls — so exit `3`
+after a successful composition is normal and means "promotion is certified, these proofs are still
+unrun", not "something is broken".
 
 ## Loading a tenant's records
 

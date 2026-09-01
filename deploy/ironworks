@@ -63,6 +63,9 @@ sys.path.insert(0, str(ROOT / "deploy" / "lib"))
 # inside a check: `pins` reads files and holds no environment, so importing it cannot fail on
 # a box where the product is not configured.
 import pins  # noqa: E402
+# Same reasoning: it reads files, holds no environment, and returns None rather than raising when
+# the tree cannot be named — so importing it cannot fail on an unconfigured box either.
+import tree_identity  # noqa: E402
 
 EXIT_OK, EXIT_FAILED, EXIT_BLOCKED, EXIT_USAGE = 0, 2, 3, 64
 
@@ -1565,6 +1568,55 @@ def bind_known_secrets(rep):
         pass
 
 
+def import_evidence(checks, path, fingerprint):
+    """(rows, note) — `checks` with the other environment's answers folded in where THIS one
+    could not evaluate. Never mutates `checks`.
+
+    THE PROBLEM THIS SOLVES. `release.promotable` requires repository-hygiene gates that need a
+    git checkout AND live legs that need a provisioned instance. The serve host is a file copy;
+    CI has no instance. Neither could ever produce a PASS, so the verdict was unreachable
+    everywhere and said "this release is not promotable" when it meant "ask the other room".
+
+    FOUR RULES, and each of them is the difference between composing evidence and fabricating it:
+
+      1. SAME TREE OR NOTHING. Both artifacts carry `tree_fingerprint` (deploy/lib/tree_identity),
+         a content hash computable with or without git. A mismatch is refused outright — without
+         this, CI's green repository gates would happily combine with a boundary proof taken from
+         a different commit, producing a promotion decision that was never true of any one tree.
+      2. ONLY WHERE THIS RUN WAS BLIND. A row is imported only if the local verdict is BLOCKED or
+         SKIPPED. Evidence may fill a gap; it may never overwrite something measured here.
+      3. NEVER OVER A LOCAL FAIL. Falls out of rule 2 and is worth stating: a failure found here
+         cannot be argued away by an artifact that did not look.
+      4. ONLY A PASS IS WORTH IMPORTING. Carrying the other environment's BLOCKED across just
+         moves the hole; the row stays BLOCKED locally and the reason stays honest.
+    """
+    try:
+        doc = json.loads(pathlib.Path(path).read_text())
+    except (OSError, ValueError) as e:
+        return checks, f"evidence unreadable ({type(e).__name__}), so nothing was imported"
+    theirs = doc.get("tree_fingerprint")
+    if not fingerprint or not theirs:
+        return checks, ("one side could not name its tree, so evidence cannot be matched to it "
+                        "and nothing was imported")
+    if theirs != fingerprint:
+        return checks, (f"evidence describes a DIFFERENT tree ({theirs[:12]}… vs {fingerprint[:12]}…) "
+                        "— refused; re-run it against this one")
+    by_id = {c["id"]: c for c in doc.get("checks", [])}
+    rows, taken = [], []
+    for c in checks:
+        other = by_id.get(c["id"])
+        if (c["verdict"] in (BLOCKED, SKIPPED) and other
+                and other.get("verdict") == PASS and other.get("kind") == c["kind"]):
+            rows.append({**c, "verdict": PASS,
+                         "detail": f"supplied by evidence for tree {fingerprint[:12]}…"})
+            taken.append(c["id"])
+        else:
+            rows.append(c)
+    if not taken:
+        return rows, "evidence names this tree but answered none of the checks that were blind here"
+    return rows, f"{len(taken)} check(s) supplied by evidence: {', '.join(sorted(taken)[:4])}"
+
+
 def promotion_gate(checks, egress_state):
     """(verdict, why_not) — the promotion decision, as a function of the rows and the boundary.
 
@@ -1795,7 +1847,20 @@ def cmd_release_verify(args):
     # unproved network boundary invites exactly the wrong reading. State it as a decision,
     # not as one row among twenty.
     eg = (rep.data.get("egress") or {}).get("state", "BLOCKED")
-    promotion, why_not = promotion_gate(rep.checks, eg)
+    # WHICH TREE THIS ARTIFACT IS ABOUT. Recorded unconditionally, not only when composing:
+    # an artifact that cannot say what it measured is not evidence anyone else can use later,
+    # and the cost of finding that out should not be paid at the moment someone needs it.
+    fingerprint, fp_source = tree_identity.tree_fingerprint(ROOT)
+    rep.data["tree_fingerprint"] = fingerprint
+    rep.data["tree_fingerprint_source"] = fp_source if fingerprint else None
+    if not fingerprint:
+        rep.data["tree_fingerprint_why"] = fp_source
+    rows = rep.checks
+    if args.with_evidence:
+        rows, note = import_evidence(rep.checks, args.with_evidence, fingerprint)
+        rep.data["evidence"] = {"path": str(args.with_evidence), "result": note}
+        print(f"   evidence: {note}")
+    promotion, why_not = promotion_gate(rows, eg)
     # A waived TEST_RESIDUAL does not block — but it is named in the artifact either way, so a
     # reader can see exactly what was waived and why rather than inferring it from a green row.
     rep.data["waived_residual"] = sorted((rep.data.get("residual_authority") or {})
@@ -1889,10 +1954,15 @@ def main(argv):
                           help="run the gates that can run here; name the ones that cannot")
     rv.add_argument("--offline-only", action="store_true",
                     help="do not run the gate subprocesses; list them as SKIPPED")
+    rv.add_argument("--with-evidence", metavar="ARTIFACT.json", default=None,
+                    help="a --json artifact from the OTHER environment, for the checks this one "
+                         "cannot evaluate; accepted only if it names the same tree")
 
     args = ap.parse_args(argv)
     if not getattr(args, "offline_only", None):
         args.offline_only = False
+    if not getattr(args, "with_evidence", None):
+        args.with_evidence = None
 
     route = {
         ("doctor", None): cmd_doctor,

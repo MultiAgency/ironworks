@@ -598,6 +598,115 @@ class ConsoleTest(unittest.TestCase):
             self.assertEqual("FAIL", verdict, f"egress {state} did not refuse promotion")
             self.assertIn("egress containment", why)
 
+    def test_evidence_from_another_environment_fills_only_the_blind_spots(self):
+        """COMPOSING EVIDENCE, WITHOUT FABRICATING IT.
+
+        `release.promotable` needs repository-hygiene gates (a git checkout) AND live legs (a
+        provisioned instance). The serve host is a file copy; CI has no instance. Neither could
+        produce a PASS, so the verdict was unreachable everywhere.
+
+        `--with-evidence` lets one environment answer what the other cannot. Every rule below is
+        the difference between composing and fabricating, so each is asserted rather than
+        described — a merge that trusts its input is a promotion decision no one measured."""
+        console = load_console()
+        FP = "a" * 64
+
+        def rows(*specs):
+            return [{"id": i, "verdict": v, "kind": k} for i, v, k in specs]
+
+        def evidence(fingerprint, *specs):
+            p = self.tmp / f"ev-{abs(hash((fingerprint, specs)))}.json"
+            p.write_text(json.dumps({"tree_fingerprint": fingerprint,
+                                     "checks": [{"id": i, "verdict": v, "kind": k}
+                                                for i, v, k in specs]}))
+            return str(p)
+
+        blind = rows(("gate.lib.doc_refs", "BLOCKED", "config"))
+
+        # 1. the same tree: the blind spot is filled
+        merged, note = console.import_evidence(
+            blind, evidence(FP, ("gate.lib.doc_refs", "PASS", "config")), FP)
+        self.assertEqual(merged[0]["verdict"], "PASS", note)
+        self.assertIn("gate.lib.doc_refs", note)
+
+        # 2. a DIFFERENT tree is refused outright — the rule the whole mechanism rests on
+        merged, note = console.import_evidence(
+            blind, evidence("b" * 64, ("gate.lib.doc_refs", "PASS", "config")), FP)
+        self.assertEqual(merged[0]["verdict"], "BLOCKED", "evidence from another tree was used")
+        self.assertIn("DIFFERENT tree", note)
+
+        # 3. neither side able to name its tree is refused, not assumed equal
+        for mine, theirs in ((None, FP), (FP, None)):
+            merged, note = console.import_evidence(
+                blind, evidence(theirs, ("gate.lib.doc_refs", "PASS", "config")), mine)
+            self.assertEqual(merged[0]["verdict"], "BLOCKED", f"mine={mine} theirs={theirs}")
+            self.assertIn("could not name its tree", note)
+
+        # 4. NEVER over a local FAIL. A failure found here cannot be argued away by an artifact
+        #    that did not look — this is the one that turns the feature into a liability.
+        failed = rows(("gate.lib.doc_refs", "FAIL", "config"))
+        merged, _ = console.import_evidence(
+            failed, evidence(FP, ("gate.lib.doc_refs", "PASS", "config")), FP)
+        self.assertEqual(merged[0]["verdict"], "FAIL", "evidence overwrote a locally measured FAIL")
+
+        # 5. only a PASS is worth importing; carrying their BLOCKED across just moves the hole
+        merged, _ = console.import_evidence(
+            blind, evidence(FP, ("gate.lib.doc_refs", "BLOCKED", "config")), FP)
+        self.assertEqual(merged[0]["verdict"], "BLOCKED")
+
+        # 6. unreadable or absent evidence changes nothing and says so
+        merged, note = console.import_evidence(blind, str(self.tmp / "nope.json"), FP)
+        self.assertEqual(merged[0]["verdict"], "BLOCKED")
+        self.assertIn("unreadable", note)
+
+        # 7. the input is never mutated — the caller still holds the measured rows
+        self.assertEqual(blind[0]["verdict"], "BLOCKED", "import_evidence mutated its input")
+
+    def test_a_tree_fingerprint_is_the_same_from_git_and_from_a_manifest(self):
+        """The composition key must agree across environments that identify files differently:
+        a checkout lists them with `git ls-files`, a deployed copy from the manifest sync-vm
+        stamps. Measured against the real serve host, both produced the same hash.
+
+        Content is re-hashed FROM DISK in both, rather than trusting the manifest's recorded
+        digests — otherwise an edit made on the box after deployment would be invisible and the
+        artifact would attest to a tree that is no longer there."""
+        import tree_identity
+        with tempfile.TemporaryDirectory() as d:
+            root = pathlib.Path(d)
+            (root / "sub").mkdir()
+            (root / "a.txt").write_text("alpha")
+            (root / "sub" / "b.txt").write_text("beta")
+            subprocess.run(["git", "init", "-q", d], check=True, capture_output=True)
+            subprocess.run(["git", "-C", d, "add", "-A"], check=True, capture_output=True)
+            from_git, src = tree_identity.tree_fingerprint(root)
+            self.assertEqual(src, "git")
+
+            # the same tree as a deployed copy: no .git, a manifest instead
+            with tempfile.TemporaryDirectory() as d2:
+                copy = pathlib.Path(d2)
+                (copy / "sub").mkdir()
+                (copy / "a.txt").write_text("alpha")
+                (copy / "sub" / "b.txt").write_text("beta")
+                (copy / tree_identity.MANIFEST).write_text(
+                    "a.txt " + "0" * 64 + "\nsub/b.txt " + "0" * 64 + "\ndeployed 2026-09-01T00:00:00Z\n")
+                from_manifest, src2 = tree_identity.tree_fingerprint(copy)
+                self.assertEqual(src2, "manifest")
+                self.assertEqual(from_git, from_manifest,
+                                 "the same content produced different fingerprints")
+
+                # content drift on the box MUST move it, or evidence composes against a tree
+                # that is not there. The manifest's own digests are deliberately garbage above,
+                # which also proves they are not what gets hashed.
+                (copy / "a.txt").write_text("alpha-edited")
+                drifted, _ = tree_identity.tree_fingerprint(copy)
+                self.assertNotEqual(from_manifest, drifted, "a post-deploy edit did not move it")
+
+                # a listed-but-missing file is refused, not fingerprinted as a subset
+                (copy / "a.txt").unlink()
+                gone, why = tree_identity.tree_fingerprint(copy)
+                self.assertIsNone(gone)
+                self.assertIn("listed but missing", why)
+
     def test_the_artifacts_promotable_field_stays_a_BOOLEAN(self):
         """`"BLOCKED"` is a TRUTHY string. If the tri-state verdict is ever assigned straight into
         `rep.data["promotable"]`, every machine reader of the artifact — `if doc["promotable"]:` —
