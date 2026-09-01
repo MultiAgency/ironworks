@@ -182,7 +182,8 @@ _PROOF_INPUTS = (
     "deploy/egress/connect-proxy.py",           # what the boundary actually enforces
     "deploy/egress/forbidden-destinations.json",  # what must not be reachable
     "deploy/egress/probe_attempts.py",          # discriminating / corroborating / unmeasurable
-    "deploy/egress/probe-egress.sh",            # what is asserted, and what is counted
+    "deploy/egress/probe_contained.py",         # the contained leg, and what it counts
+    "deploy/egress/probe-egress.sh",            # what is asserted, and how the run decides PASS
 )
 
 _REPO = pathlib.Path(__file__).resolve().parents[2]

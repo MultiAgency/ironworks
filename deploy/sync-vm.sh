@@ -154,8 +154,71 @@ vm_ssh_advisory "whether the bridge is running pre-change seam code" '
     fi
   fi'
 
+# WHAT THE HOST HAS THAT THE TREE DOES NOT. Everything above walks the TRACKED list, so it can
+# only ever ask "is each of my files there?" — never "what else is there?". rsync runs without
+# --delete, so a path the repository DELETES lives on the host forever, and `--check` prints
+# "VM matches the tracked tree" while it does. Measured 2026-09-01: 49 retired files, including
+# multi/seam/handoff.py and test_handoff_2b.py, months after the commit that removed them.
+#
+# That is not cosmetic where a list is DISCOVERED rather than declared: `deploy/ironworks` builds
+# its gate set with `d.glob("test_*.py")`, so an orphaned test file becomes a release-verify gate
+# on the host that does not exist in the repository or in CI.
+#
+# REPORTS, NEVER DELETES. The same tree holds live secrets (multi/instance/.env) and gitignored
+# operator scripts that are deliberately untracked, so pruning is a judgement call with a blast
+# radius, not a cleanup. This names what it found and stops.
+n_orphan=0
+orphan_report() {
+  local rc=0 dirs
+  # Derive the managed top-level directories from the tracked list rather than hardcoding them,
+  # so a new top-level directory is scanned the day it appears.
+  dirs="$(awk -F/ 'NF>1 {print $1}' "$tmp/paths.txt" | LC_ALL=C sort -u | tr '\n' ' ')"
+  [ -n "$dirs" ] || { echo "   ORPHAN SCAN UNKNOWN: no tracked directories to scan" >&2; return 0; }
+  # shellcheck disable=SC2029  # $dirs and $VM_PATH expand client-side on purpose
+  ssh "${SSH_OPTS[@]}" "$VM_HOST" "cd '$VM_PATH' 2>/dev/null || exit 9; find $dirs -type f 2>/dev/null" \
+    2>"$tmp/ssh-err" | sed 's|^\./||' | LC_ALL=C sort > "$tmp/onvm.txt" || rc=$?
+  # An empty result is indistinguishable from a failed find, so treat both as UNMEASURED. The
+  # host always has files under these directories; zero means the question did not get asked.
+  if [ "$rc" -ne 0 ] || [ ! -s "$tmp/onvm.txt" ]; then
+    # -1, NOT 0. Both are falsy to a careless caller, and the summary line below would then
+    # print "VM matches the tracked tree" on the strength of a question that was never asked.
+    n_orphan=-1
+    echo "   COULD NOT ASK  what else the host is carrying (ssh exit $rc) — nothing was" >&2
+    echo "                  measured, and that is NOT the same as finding no orphans." >&2
+    [ -s "$tmp/ssh-err" ] && echo "                  $(tr '\n' ' ' < "$tmp/ssh-err" | cut -c1-160)" >&2
+    return 0
+  fi
+  LC_ALL=C comm -13 <(LC_ALL=C sort "$tmp/paths.txt") "$tmp/onvm.txt" > "$tmp/extra.txt"
+  # Build artifacts and the operator's own .pre-/.bak- rollback copies are host state, not repo
+  # state. Counted so the number reconciles, not listed — they are not drift.
+  grep -vE '(^|/)__pycache__/|\.pyc$|\.pre-[^/]*$|\.bak-[^/]*$' "$tmp/extra.txt" > "$tmp/extra-src.txt" || true
+  n_noise=$(( $(wc -l < "$tmp/extra.txt") - $(wc -l < "$tmp/extra-src.txt") ))
+  # One `git check-ignore` for the whole list: a path the repo deliberately does not track is not
+  # an orphan. Per-file invocation was the obvious shape and is ~100 subprocesses.
+  : > "$tmp/extra-ignored.txt"
+  [ -s "$tmp/extra-src.txt" ] && git check-ignore --stdin < "$tmp/extra-src.txt" \
+    > "$tmp/extra-ignored.txt" 2>/dev/null || true
+  LC_ALL=C comm -13 <(LC_ALL=C sort "$tmp/extra-ignored.txt") <(LC_ALL=C sort "$tmp/extra-src.txt") \
+    > "$tmp/orphans.txt"
+  n_orphan=$(wc -l < "$tmp/orphans.txt" | tr -d ' ')
+  [ "$n_orphan" -eq 0 ] && return 0
+  echo "   -- on the host, not in the tracked tree: $n_orphan file(s) no sync will ever remove --"
+  sed 's/^/   ORPHAN   /' "$tmp/orphans.txt"
+  echo "   (a test file here becomes a release-verify gate the repository does not define;"
+  echo "    $(wc -l < "$tmp/extra-ignored.txt" | tr -d ' ') gitignored and $n_noise build/backup file(s) excluded — those are host state, not drift)"
+  return 0
+}
+orphan_report
+
 if [ "$n_diff" -eq 0 ] && [ "$n_miss" -eq 0 ]; then
-  echo "   VM matches the tracked tree."
+  if [ "$n_orphan" -lt 0 ]; then
+    echo "   VM has every tracked file at the right content. Whether it carries ANYTHING ELSE"
+    echo "   was not measured — see COULD NOT ASK above. This is not a clean bill of health."
+  elif [ "$n_orphan" -gt 0 ]; then
+    echo "   VM has every tracked file at the right content, and $n_orphan file(s) besides."
+  else
+    echo "   VM matches the tracked tree."
+  fi
   exit 0
 fi
 
@@ -190,15 +253,50 @@ restart_hint() {
   # Sourcing account-db.env is REQUIRED: the compose fail-fasts on ${ACCOUNT_DB_PASSWORD:?},
   # so without it the command aborts having done nothing.
   if grep -q '^deploy/account-intel/' "$tmp/changed.txt"; then
+    # --force-recreate IS THE POINT, and naming the service keeps it off account-db. The
+    # Dockerfile COPYs requirements.lock and NOTHING ELSE — service.py and its imports arrive
+    # through `- ..:/app/deploy/account-intel:ro`. So when only mounted Python changed, every
+    # build layer is CACHED, the image digest does not move, compose reports the container
+    # `Running` and replaces nothing, and gunicorn's workers keep serving the modules they
+    # imported at boot. Measured: a sync that changed service_guards.py and migrations.py
+    # reported a successful `up -d --build` while the old code stayed live. --build stays for
+    # the case that DOES move the image (Dockerfile, requirements.lock).
     echo "      account service : cd $VM_PATH/deploy/account-intel/data \\"
     echo "                          && set -a && . ~/.agency/account-db.env && set +a \\"
-    echo "                          && docker compose up -d --build"
+    echo "                          && docker compose up -d --build --force-recreate account-service"
     # Migrations apply BEFORE the restart, or new code queries columns that do not exist.
     if grep -qE '^deploy/account-intel/data/migrate-[0-9]+.*\.sql' "$tmp/changed.txt"; then
       echo "      !! MIGRATION CHANGED — apply it BEFORE that restart:"
       grep -E '^deploy/account-intel/data/migrate-[0-9]+.*\.sql' "$tmp/changed.txt" \
         | sed "s|^|         docker exec -i <account-db> psql -U postgres -d accounts < $VM_PATH/|"
     fi
+  fi
+  # THE CONTAINMENT OVERLAY MOUNTS SOURCE INTO PINNED GENERIC IMAGES, so rsync updates the file
+  # while the running container keeps serving the bytes it started with — and neither image
+  # digest ever moves, because neither file is in an image. Measured: a sync touching
+  # connect-proxy.py left `doctor` reporting the gateway running eda8ffe006ab against 2a2cecb4d9fe
+  # on disk, AFTER the egress probe had already re-stamped a PASS. The stamp certified a proxy
+  # that was not loaded, which is the exact failure egress_status.py's bind-mount check exists
+  # to catch. Same shape as the account service above; same shape as bridge.service before it.
+  #
+  # NAMING THE SERVICE IS LOAD-BEARING. A bare `up -d` over the merged compose recreates the
+  # RUNTIME container too — in-flight turns lost, every client group briefly unserved — which is
+  # what `egress-control.sh activate --confirm` is for and is not what a config reload needs.
+  egress_recreate() {   # $1 = compose service, $2 = the label, padded to the column above
+    printf '      %-16s: docker compose -f %s/multi/instance/docker-compose.yml \\\n' "$2" "$VM_PATH"
+    echo "                          -f $VM_PATH/deploy/egress/docker-compose.egress.yml \\"
+    echo "                          up -d --force-recreate $1"
+  }
+  grep -q '^deploy/egress/connect-proxy\.py$'    "$tmp/changed.txt" && egress_recreate egress  "egress gateway"
+  grep -q '^deploy/egress/ingress\.nginx\.conf$' "$tmp/changed.txt" && egress_recreate ingress "ingress nginx"
+  # A STAMP IS EVIDENCE ABOUT A PROCEDURE. Editing any proof input invalidates it by design
+  # (egress_status._PROOF_INPUTS), so doctor's egress.network FAILS until the probe is re-run —
+  # correctly, and with no restart that can fix it. Say so here rather than letting it surface as
+  # a mystery FAIL after an otherwise clean deploy.
+  if grep -qE '^deploy/egress/(connect-proxy\.py|forbidden-destinations\.json|probe_attempts\.py|probe_contained\.py|probe-egress\.sh)$' "$tmp/changed.txt"; then
+    echo "      egress proof    : the verification stamp is now STALE — a proof input changed."
+    echo "                          $VM_PATH/deploy/egress/egress-control.sh verify"
+    echo "                        (run it AFTER any recreate above, or it stamps the old bytes)"
   fi
   return 0
 }

@@ -14,6 +14,7 @@ the ones that would otherwise need someone to break production to observe.
 import json
 import os
 import pathlib
+import re
 import subprocess
 import sys
 import tempfile
@@ -337,6 +338,32 @@ class States(Base):
             (root / es._PROOF_INPUTS[0]).unlink()
             self.assertIsNone(es.proof_fingerprint(IMAGE, root=root),
                               "an unreadable input produced a hash of partial input")
+
+    def test_every_file_the_probe_EXECUTES_is_a_fingerprinted_input(self):
+        """The other direction of the test above: that one proves each LISTED input is
+        load-bearing, which says nothing about an input that was never listed.
+
+        Measured: `probe-egress.sh` used to carry 157 lines of inlined Python computing the
+        `EGRESS_CHECKS_PASSED` written into the stamp. Extracting them to `probe_contained.py`
+        moved that logic OUT of a fingerprinted file and into an unfingerprinted one, so editing
+        the count would no longer invalidate the stamp certifying it. Nothing failed: the
+        extraction was byte-identical, every gate stayed green, and the hole opened silently.
+
+        So the list is DERIVED from the script rather than restated beside it. The probe pulls
+        each file in as env data with `cat "$(dirname "$0")/<name>"`; anything it reads that way
+        is proof definition by construction, and the next extraction is covered before it
+        happens."""
+        script = es._REPO / "deploy/egress/probe-egress.sh"
+        read_in = set(re.findall(r'cat "\$\(dirname "\$0"\)/([^"]+)"', script.read_text()))
+        # A source-text scan that finds nothing passes vacuously. Assert it still has a subject:
+        # three files travel this way today, and a rename of the idiom must fail here loudly
+        # rather than silently stop checking.
+        self.assertGreaterEqual(len(read_in), 3,
+                                f"the cat-into-env idiom no longer matches; scan found {read_in}")
+        missing = sorted(f"deploy/egress/{n}" for n in read_in
+                         if f"deploy/egress/{n}" not in es._PROOF_INPUTS)
+        self.assertEqual(missing, [], "probe-egress.sh executes these, but a stamp survives their "
+                                      "edit because they are not in _PROOF_INPUTS")
 
     def test_a_gateway_running_DIFFERENT_bytes_is_not_VERIFIED(self):
         """THE BIND-MOUNT GAP. The gateway is a generic pinned base image with connect-proxy.py

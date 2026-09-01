@@ -100,3 +100,32 @@ jobs:
             exit 3
           fi
           ./deploy/egress/proof/run-proof.sh --service-path
+
+  # THE FRONT DESK'S ONLY SCHEDULED HOME. `deploy/secretary/test_aide_discovery.py` needs an MT
+  # instance plus an operator token to mint a throwaway account, so nothing ran it — not the seam
+  # suites, not `release verify`, not this workflow — and it had never executed in any form. It
+  # was recorded as blocked on a new CI secret; it is not. The disposable proof stack already
+  # stands up an instance and mints its own webui token per run, and NEARAI_API_KEY is the same
+  # secret this workflow already holds.
+  #
+  # A SEPARATE JOB, not another flag on the one above. The Secretary is a separate application
+  # with its own trust domain (README.md § "What else is in this repository"): a front-desk
+  # regression must not be reported as an egress-containment failure, and the reverse would let a
+  # red boundary hide behind a persona wording change. Its own stack, its own runner, its own
+  # verdict.
+  front-desk-discovery:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run aide discovery suite or report blocked
+        env:
+          NEARAI_API_KEY: ${{ secrets.NEARAI_API_KEY }}
+        run: |
+          if [ -z "$NEARAI_API_KEY" ]; then
+            echo '### BLOCKED: aide discovery suite' >> "$GITHUB_STEP_SUMMARY"
+            echo 'NEARAI_API_KEY is not configured; the front desk was not exercised.' >> "$GITHUB_STEP_SUMMARY"
+            echo '::error title=BLOCKED: aide discovery not run::NEARAI_API_KEY is not configured'
+            exit 3
+          fi
+          ./deploy/egress/proof/run-proof.sh --aide

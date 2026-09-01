@@ -116,6 +116,38 @@ class DocumentedGuarantees(unittest.TestCase):
                          "the delivery guarantee table must live in exactly one document; "
                          f"found in {rel or 'nothing'}")
 
+    def test_every_bind_mounted_file_has_a_post_sync_restart_hint(self):
+        """SYNCED IS NOT LIVE, and `sync-vm.sh` is the only place that says which services still
+        hold stale code once the files land.
+
+        The containment overlay mounts source off the tracked tree into pinned GENERIC images
+        (`python:3.12-slim`, `nginx:1.27-alpine`), so nothing about a changed file moves an image
+        digest: rsync updates it, compose sees no reason to replace anything, and the container
+        serves the bytes it started with. Measured in one deploy: the account service kept running
+        the `service_guards.py` its workers imported at boot while compose reported a successful
+        `up -d --build`, and the egress gateway kept enforcing a `connect-proxy.py` the tree no
+        longer held — the second caught only because `egress_status` hashes what the gateway
+        reports. Nothing catches the first.
+
+        So the hint list is checked against the compose file rather than maintained beside it. A
+        fourth mount added to the overlay fails here until `restart_hint` learns to name it."""
+        overlay = (ROOT / "deploy/egress/docker-compose.egress.yml").read_text()
+        # `- ../../<repo-relative path>:<container path>:ro` — the overlay's mount idiom.
+        mounted = set(re.findall(r'^\s+-\s+\.\./\.\./(\S+?):/\S+:ro\s*$', overlay, re.M))
+        # A source-text scan that finds nothing passes vacuously: assert it still has a subject.
+        self.assertGreaterEqual(len(mounted), 2,
+                                f"the overlay's bind-mount idiom no longer matches; found {mounted}")
+        # `sync-vm.sh` names these inside grep PATTERNS, where the dots are escaped
+        # (`connect-proxy\.py`), so drop backslashes before looking. Being permissive here is
+        # deliberate: this asserts the operator is TOLD about the file at all, and a hint that
+        # names it in any form passes. Whether the named command is the right one is what the
+        # functional cases in that script's own review cover, not a substring search.
+        hint = (ROOT / "deploy/sync-vm.sh").read_text().replace("\\", "")
+        missing = sorted(p for p in mounted if p not in hint)
+        self.assertEqual(missing, [], "these are bind-mounted into a running container but "
+                                      "sync-vm.sh never tells the operator to recreate it, so a "
+                                      "sync silently leaves the old bytes serving")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

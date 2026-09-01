@@ -15,6 +15,7 @@ imports it and hands the LIVE checks a stubbed transport — because the defects
 can have are all in what they conclude from a response, and a verdict that only exists when a
 service is up is a verdict nothing pins.
 """
+import ast
 import contextlib
 import importlib.machinery
 import importlib.util
@@ -518,32 +519,107 @@ class ConsoleTest(unittest.TestCase):
 
         skipped = rows(("gate.seam.registry", "SKIPPED", "config"),
                        ("gate.lib.lifecycle", "SKIPPED", "config"))
-        promotable, why = console.promotion_gate(skipped, "VERIFIED")
-        self.assertFalse(promotable, "every gate SKIPPED and the release reported promotable")
+        promotion, why = console.promotion_gate(skipped, "VERIFIED")
+        self.assertNotEqual(promotion, "PASS",
+                            "every gate SKIPPED and the release reported promotable")
         self.assertIn("gate.seam.registry", why)
 
         # A gate BLOCKED by a missing interpreter or a moved directory (`cannot run: ...`) is
         # the same defect in a different verdict, and keying on FAIL/SKIPPED alone missed it.
         passing = rows(("gate.seam.registry", "PASS", "config"),
                        ("gate.lib.lifecycle", "PASS", "config"))
-        self.assertEqual(console.promotion_gate(passing, "VERIFIED"), (True, ""))
+        self.assertEqual(console.promotion_gate(passing, "VERIFIED"), ("PASS", ""))
         for bad in ("FAIL", "BLOCKED", "SKIPPED"):
             verdict, why = console.promotion_gate(
                 passing + rows(("gate.accountdb.migrations", bad, "config")), "VERIFIED")
-            self.assertFalse(verdict, f"a {bad} gate row was promotable")
+            self.assertNotEqual(verdict, "PASS", f"a {bad} gate row was promotable")
             self.assertIn("gate.accountdb.migrations", why)
 
         # A LIVE row is BLOCKED here BY CONSTRUCTION — named, not required. Requiring it would
         # make the verdict unreachable on every host, which is a different way of being useless.
-        self.assertTrue(console.promotion_gate(
+        self.assertEqual("PASS", console.promotion_gate(
             passing + rows(("live.isolation", "BLOCKED", "live")), "VERIFIED")[0])
 
         # No gate suite ran at all: the discovery globs matched nothing. That must not read as
         # "nothing failed".
-        self.assertFalse(console.promotion_gate(
+        self.assertNotEqual("PASS", console.promotion_gate(
             rows(("registry.load", "PASS", "config")), "VERIFIED")[0])
 
-        self.assertFalse(console.promotion_gate(passing, "RUNNING")[0])
+        self.assertNotEqual("PASS", console.promotion_gate(passing, "RUNNING")[0])
+
+    def test_19c_uncertified_and_refused_are_different_verdicts(self):
+        """WHICH ROOM, OR WHICH RELEASE. Two-valued, this said "NOT promotable" both when a
+        guarantee had been measured and broken, and when the evidence simply could not be
+        gathered here — a claim about the artifact where the truth was a claim about the machine.
+
+        It is unreachable on purpose in both directions: repository-hygiene gates need a git
+        checkout and /opt/ironworks is a file copy; the live legs need a provisioned instance and
+        CI has none. So the host cannot answer four and CI cannot answer six, and a single FAIL
+        verdict told an operator on either one that the release was bad.
+
+        Neither verdict promotes. `rep.data["promotable"]` stays False for both — that is asserted
+        below, because widening it to a tri-state under the same artifact_version is how a machine
+        reader silently starts treating "uncertified" as "cleared"."""
+        console = load_console()
+
+        def rows(*specs):
+            return [{"id": i, "verdict": v, "kind": k} for i, v, k in specs]
+
+        ok = rows(("gate.seam.registry", "PASS", "config"))
+
+        broken, why = console.promotion_gate(
+            ok + rows(("gate.lib.lifecycle", "FAIL", "config")), "VERIFIED")
+        self.assertEqual(broken, "FAIL", "a measured, broken guarantee must REFUSE promotion")
+        self.assertIn("FAILED", why)
+
+        unasked, why = console.promotion_gate(
+            ok + rows(("gate.lib.doc_refs", "BLOCKED", "config")), "VERIFIED")
+        self.assertEqual(unasked, "BLOCKED", "an unaskable check must not read as a broken one")
+        self.assertIn("could not be evaluated in this environment", why)
+        self.assertIn("git checkout", why, "the reader is not told where the missing half lives")
+
+        # A FAIL alongside BLOCKED is still a FAIL: something is genuinely broken, and that is
+        # the more serious of the two facts. The reverse ordering would hide a real defect behind
+        # "we could not check everything".
+        mixed, _ = console.promotion_gate(
+            ok + rows(("gate.lib.doc_refs", "BLOCKED", "config"),
+                      ("gate.lib.lifecycle", "FAIL", "config")), "VERIFIED")
+        self.assertEqual(mixed, "FAIL", "a real failure was masked by an unmeasured check")
+
+        # THE BOUNDARY IS EXEMPT, in every non-VERIFIED state including the unevaluable one.
+        # A gate row measured in the wrong room can be answered by the right room; a deployment's
+        # containment cannot be certified by any other environment, so "uncertified, ask
+        # elsewhere" would name a room that does not exist. Refusal is also the conservative
+        # default for the one affirmative decision here. A draft made BLOCKED uncertified and
+        # passed locally — a laptop with docker up resolves to RUNNING and never reaches it —
+        # then failed on a fresh CI checkout with neither stamp nor containers.
+        for state in ("BLOCKED", "RUNNING", "FAILED"):
+            verdict, why = console.promotion_gate(ok, state)
+            self.assertEqual("FAIL", verdict, f"egress {state} did not refuse promotion")
+            self.assertIn("egress containment", why)
+
+    def test_the_artifacts_promotable_field_stays_a_BOOLEAN(self):
+        """`"BLOCKED"` is a TRUTHY string. If the tri-state verdict is ever assigned straight into
+        `rep.data["promotable"]`, every machine reader of the artifact — `if doc["promotable"]:` —
+        silently flips from "uncertified" to "cleared for an external tenant", under an unchanged
+        `artifact_version`. Nothing would fail; the JSON would just start lying.
+
+        Asserted on the SOURCE because the value only exists after a full `release verify` run,
+        which needs a provisioned host. The shape of the assignment is the thing that must not
+        drift, and it is checkable without one."""
+        tree = ast.parse(CLI.read_text())
+        found = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                 for t in n.targets
+                 if isinstance(t, ast.Subscript)
+                 and getattr(t.value, "attr", "") == "data"
+                 and getattr(t.slice, "value", None) == "promotable"]
+        self.assertEqual(len(found), 1,
+                         "expected exactly one assignment to rep.data['promotable']")
+        self.assertIsInstance(
+            found[0].value, ast.Compare,
+            "rep.data['promotable'] is no longer a comparison — if it now holds the tri-state "
+            "verdict directly, 'BLOCKED' is truthy and every consumer reads uncertified as "
+            "promotable")
 
     def test_the_documented_post_subcommand_flag_forms_actually_parse(self):
         """EVERY FORM THE DOCS USE, RUN. `--json` and `--offline` lived on the parent parser
@@ -1000,6 +1076,45 @@ class LiveCheckTest(unittest.TestCase):
         def fake(*_a, **_kw):
             raise exc
         return fake
+
+
+class GitlessGateVerdict(unittest.TestCase):
+    """A repository-hygiene gate on the SERVE HOST is unmeasured, not violated.
+
+    `/opt/ironworks` is a file copy, not a checkout, so `git ls-files` exits 128 and four gates
+    (doc_refs, documented_guarantees, shadowed_binding, ci_contracts) died with
+    CalledProcessError. `release verify` reported them FAIL — which asserts the guarantee is
+    broken. It is not; the question could not be asked there. Permanent red on the host for a
+    non-reason is how an operator learns to skim past red.
+    """
+    def setUp(self):
+        self.console = load_console()
+
+    def test_a_gate_that_died_for_want_of_git_is_BLOCKED_not_FAILED(self):
+        with tempfile.TemporaryDirectory() as d:      # a file copy: no .git anywhere above it
+            self.assertTrue(self.console._needs_a_git_checkout(
+                d, "", "subprocess.CalledProcessError: Command '['git', '-C', '/opt/ironworks', "
+                       "'ls-files']' returned non-zero exit status 128."))
+
+    def test_a_REAL_failure_still_fails_even_in_a_gitless_tree(self):
+        """The narrowing that keeps this honest: only a dead GIT call converts the verdict."""
+        with tempfile.TemporaryDirectory() as d:
+            self.assertFalse(self.console._needs_a_git_checkout(
+                d, "FAILED (failures=3)", "AssertionError: the guarantee drifted"))
+
+    def test_a_dead_git_call_in_a_REAL_repository_still_fails(self):
+        """Both halves are required. Inside a checkout, a git command exiting 128 means something
+        else went wrong and the gate is genuinely failing — it must not be excused as unmeasured.
+
+        The control BUILDS a repository rather than pointing at `ROOT`. A first draft used ROOT,
+        which is a checkout on a laptop and a plain file copy at /opt/ironworks — so the control
+        inverted on the serve host and this suite failed there, in the same run that was fixing
+        that exact class of environment assumption elsewhere. A test that needs a git repository
+        should make one."""
+        with tempfile.TemporaryDirectory() as d:
+            subprocess.run(["git", "init", "-q", d], check=True, capture_output=True)
+            self.assertFalse(self.console._needs_a_git_checkout(
+                d, "", "Command '['git', 'ls-files']' returned non-zero exit status 128."))
 
 
 if __name__ == "__main__":

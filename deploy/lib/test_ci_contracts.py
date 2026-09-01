@@ -1,11 +1,43 @@
 """Contracts for the gates themselves — what CI promises, and what its verdicts mean."""
 import ast
 import importlib.util
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+def _tool(argv, **kw):
+    """Run an external tool, or declare the contract unmeasurable if the binary is not here.
+
+    `FileNotFoundError` from `subprocess.run` means the TOOL is absent, which is a fact about
+    this machine and not about the repository. Measured on the serve host, which carries neither
+    ruff nor shellcheck nor coverage: `test_ruff_reports_no_warnings_of_its_own` died with
+    `FileNotFoundError: 'ruff'`, aborted the whole suite, and `release verify` scored
+    `gate.lib.ci_contracts` FAIL — reporting a broken guarantee where the truth was a missing
+    dependency. `run-quality.py` has drawn this distinction since a machine merely missing a tool
+    reported a failure; this file, which holds that contract for it, did not honour it itself.
+    """
+    kw.setdefault("cwd", ROOT)
+    kw.setdefault("capture_output", True)
+    kw.setdefault("text", True)
+    try:
+        return subprocess.run(argv, **kw)
+    except FileNotFoundError:
+        raise Unmeasurable(f"{argv[0]} is not installed on this machine") from None
+
+
+class Unmeasurable(Exception):
+    """This contract cannot be ASKED in this environment — not that it failed.
+
+    `CONTRIBUTING.md` fixes the vocabulary: 0 pass, 2 fail, 3 blocked, and "a check that could
+    not run must never report PASS". The mirror half is what this exists for — it must not
+    report FAIL either. On the serve host `/opt/ironworks` is a file copy, so every contract
+    resting on `git ls-files` is unanswerable there, and reporting that as a failed guarantee is
+    permanent red for a non-reason.
+    """
 
 
 def _load(relative, name):
@@ -162,7 +194,16 @@ def test_the_shell_gate_covers_what_runs_here_not_only_what_ships():
     with the empty case reported rather than silently skipped."""
     import subprocess
     gate = _load("deploy/run-quality.py", "quality_gate")
-    shipped, here = set(gate.tracked("*.sh")), set(gate.present("*.sh"))
+    # `tracked()` returns None when git could not answer — its own docstring calls that "a
+    # perfectly reportable BLOCKED". Honour it. `set(None)` raised TypeError on the serve host,
+    # where /opt/ironworks is a file copy: the suite died mid-run, every later contract went
+    # unexecuted, and `release verify` scored the whole gate FAIL — asserting these contracts
+    # are BROKEN when the truth is they cannot be asked here.
+    _shipped, _here = gate.tracked("*.sh"), gate.present("*.sh")
+    if _shipped is None or _here is None:
+        raise Unmeasurable("git could not list files (this tree is not a checkout), so what "
+                           "SHIPS cannot be compared with what RUNS HERE")
+    shipped, here = set(_shipped), set(_here)
     assert shipped and here, "no shell scripts found at all — the enumerator is looking wrong"
     assert shipped <= here, (
         f"`present()` lost files `tracked()` had: {sorted(p.name for p in shipped - here)}")
@@ -203,12 +244,11 @@ def test_ruff_reports_no_warnings_of_its_own():
     it wherever it appears. Both are the same defect: a suppression or selection that looks like
     configuration and does nothing. Ruff is quiet when it is happy, so anything on stderr is a
     finding and this needs no list of which rules are preview-only in this release."""
-    import subprocess
-    result = subprocess.run(
-        ["ruff", "check", ".", "deploy/lib/compose-persona", "deploy/ironworks"],
-        cwd=ROOT, capture_output=True, text=True)
+    result = _tool(["ruff", "check", ".", "deploy/lib/compose-persona", "deploy/ironworks"])
     if result.returncode == 2 and "No such file" in (result.stderr + result.stdout):
-        return                                     # ruff not installed; the gate blocks on that
+        # Was a bare `return`, which is a PASS — "ruff could not tell us" scored identically to
+        # "ruff had nothing to say", in the one file whose subject is checks that do not check.
+        raise Unmeasurable("ruff could not read the files it was given")
     noise = [ln for ln in result.stderr.splitlines() if ln.strip()]
     assert not noise, (
         "ruff emitted warnings, which means part of this configuration is not doing what it "
@@ -333,11 +373,66 @@ def _main_block(tree):
     return None
 
 
+def test_this_files_own_runner_reports_an_unmeasurable_contract_as_BLOCKED():
+    """The contract this file holds for others, applied to itself.
+
+    Asserted on the SOURCE, not by executing it: this suite runs every `test_*` it finds, so a
+    contract that ran the file would spawn a copy that ran the file, forever.
+
+    Two ways for this to rot silently, so both are pinned: drop the `except Unmeasurable` and one
+    unanswerable contract aborts the rest (what happened on the serve host — `set(None)` raised,
+    later contracts never ran, and the gate scored FAIL); drop the `SystemExit(3)` and it exits 0
+    instead, which is the unexecuted-assertions bug this runner was written to fix, wearing a
+    different hat."""
+    tree = ast.parse((ROOT / "deploy/lib/test_ci_contracts.py").read_text())
+    guard = _main_guard(tree)
+    assert guard is not None, "this file lost its __main__ runner; `release verify` would score "\
+                              "every contract in it as PASS without executing one"
+    handlers = [h for n in ast.walk(guard) if isinstance(n, ast.Try) for h in n.handlers]
+    assert any(isinstance(h.type, ast.Name) and h.type.id == "Unmeasurable" for h in handlers), (
+        "the runner no longer catches Unmeasurable, so one unanswerable contract aborts the rest")
+    exits = [n for n in ast.walk(guard)
+             if isinstance(n, ast.Raise) and isinstance(n.exc, ast.Call)
+             and getattr(n.exc.func, "id", "") == "SystemExit"
+             and n.exc.args and getattr(n.exc.args[0], "value", None) == 3]
+    assert exits, "the runner no longer exits 3 for a blocked contract — it would exit 0, and an "\
+                  "unevaluated check reported as a pass is the defect this file exists to catch"
+    # Subject floor: the machinery above is inert if nothing ever raises it.
+    raisers = [n for n in ast.walk(tree) if isinstance(n, ast.Raise)
+               and isinstance(n.exc, ast.Call) and getattr(n.exc.func, "id", "") == "Unmeasurable"]
+    assert raisers, "no contract raises Unmeasurable, so the BLOCKED path is unreachable"
+
+
+def _main_guard(tree):
+    for node in tree.body:
+        if isinstance(node, ast.If) and isinstance(node.test, ast.Compare) \
+                and getattr(node.test.left, "id", "") == "__name__" \
+                and any(isinstance(c, ast.Constant) and c.value == "__main__"
+                        for c in node.test.comparators):
+            return node
+    return None
+
+
 if __name__ == "__main__":
     # Discovered, not listed. This file had no runner at all, so `release verify`'s
     # `gate.lib.ci_contracts` ran it as a script, got exit 0 with no output, and scored eight
     # unexecuted assertions as PASS.
+    #
+    # EXIT 3 IS BLOCKED, and it is the whole point of the Unmeasurable path. A contract that
+    # cannot be asked in this environment must not exit 0 (that is the unexecuted-assertions bug
+    # above, wearing a different hat) and must not exit non-zero-as-failure either. One
+    # unmeasurable contract also no longer aborts the rest: it is collected and the others run,
+    # because "one could not be asked" is not "none were asked".
+    _blocked = []
     for _name, _fn in list(globals().items()):
         if _name.startswith("test_") and callable(_fn):
-            _fn()
+            try:
+                _fn()
+            except Unmeasurable as _e:
+                _blocked.append((_name, str(_e)))
+    if _blocked:
+        for _n, _why in _blocked:
+            print(f"  BLOCKED  {_n}: {_why}")
+        print(f"\n{len(_blocked)} CI CONTRACT(S) COULD NOT BE EVALUATED HERE — not a pass")
+        raise SystemExit(3)
     print("ALL CI CONTRACT TESTS PASS")

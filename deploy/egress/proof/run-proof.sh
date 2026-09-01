@@ -12,6 +12,7 @@
 #
 #   ./deploy/egress/proof/run-proof.sh              full proof, then tear down
 #   ./deploy/egress/proof/run-proof.sh --service-path  also drive the WHOLE IronWorks path
+#   ./deploy/egress/proof/run-proof.sh --aide       also run the front desk's discovery suite
 #   ./deploy/egress/proof/run-proof.sh --keep       leave it up for manual poking
 #   ./deploy/egress/proof/run-proof.sh --down       tear down a kept stack
 #
@@ -36,12 +37,14 @@ teardown() {
 if [ "${1:-}" = "--down" ]; then teardown; exit 0; fi
 # Every flag, not just $1 — `--keep --service-path` silently dropped the second one, and an
 # unknown flag was ignored rather than refused. Same shape as probe-egress.sh next door.
-KEEP=0 SERVICE_PATH=0
+KEEP=0 SERVICE_PATH=0 AIDE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep) KEEP=1 ;;
     --service-path) SERVICE_PATH=1 ;;
-    *) echo "!! unknown argument: $1 (usage: $0 [--keep] [--service-path] | --down)" >&2; exit 2 ;;
+    --aide) AIDE=1 ;;
+    *) echo "!! unknown argument: $1 (usage: $0 [--keep] [--service-path] [--aide] | --down)" >&2
+       exit 2 ;;
   esac
   shift
 done
@@ -120,6 +123,31 @@ if [ "$SERVICE_PATH" -eq 1 ] && [ "$rc" -eq 0 ]; then
   echo "== SERVICE PATH: bridge -> seam -> IronClaw -> gateway -> provider =="
   PROOF_API="$API" PROOF_OPERATOR="$PROOF_WEBUI_TOKEN" REPO="$REPO" \
     python3 "$HERE/service_path_checks.py" || rc=$?
+fi
+
+# Step 9: THE FRONT DESK. `deploy/secretary/test_aide_discovery.py` needs an MT instance plus an
+# operator token to mint a throwaway account — exactly what this stack already stands up. It had
+# no scheduled home anywhere and had never been run in any form, recorded as needing a new CI
+# secret. It does not: NEARAI_API_KEY is exported above and the webui token is minted per run,
+# so the only thing missing was the invocation.
+#
+# BEHIND ITS OWN FLAG because the Secretary is a separate application with its own trust domain
+# (README.md § "What else is in this repository"). Folding it into --service-path would quietly
+# widen what that flag attests to.
+if [ "$AIDE" -eq 1 ] && [ "$rc" -eq 0 ]; then
+  echo
+  echo "== FRONT DESK: aide discovery behaviour against a fresh sealed account =="
+  AIDE_SUITE="$REPO/deploy/secretary/test_aide_discovery.py"
+  if [ ! -f "$AIDE_SUITE" ]; then
+    # A missing suite is not a passing one. Without this, --aide on a tree that had moved the
+    # file would print the banner above and nothing else, and the run would stay green.
+    echo "!! --aide requested but $AIDE_SUITE is missing — refusing to report a pass" >&2
+    rc=1
+  else
+    ( cd "$REPO/deploy/secretary" \
+      && IRONCLAW_API="$API" WEBUI_TOKEN="$PROOF_WEBUI_TOKEN" \
+         python3 "$AIDE_SUITE" ) || rc=$?
+  fi
 fi
 
 echo

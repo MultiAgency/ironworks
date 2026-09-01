@@ -1566,7 +1566,7 @@ def bind_known_secrets(rep):
 
 
 def promotion_gate(checks, egress_state):
-    """(promotable, why_not) — the promotion decision, as a function of the rows and the boundary.
+    """(verdict, why_not) — the promotion decision, as a function of the rows and the boundary.
 
     A SKIPPED gate disqualifies exactly as a FAIL does. `--offline-only` marks EVERY gate SKIPPED,
     and the rule here was once "no FAIL rows", so the artifact certified promotion to an external
@@ -1576,12 +1576,39 @@ def promotion_gate(checks, egress_state):
 
     Extracted from `cmd_release_verify` so it can be driven directly. The test that covered this
     invoked the CLI and asserted FAIL, which it got — from the egress clause, on a laptop where
-    egress is never VERIFIED. It was vacuous in exactly the state the defect lived in."""
+    egress is never VERIFIED. It was vacuous in exactly the state the defect lived in.
+
+    THREE-VALUED, BECAUSE NO SINGLE ENVIRONMENT CAN SATISFY THIS. Repository-hygiene gates need a
+    git checkout, and `/opt/ironworks` is a file copy; the `live.*` legs need a provisioned
+    instance, a WEBUI_TOKEN and paid model calls, which CI has none of. So the host cannot answer
+    four checks and CI cannot answer six, and a two-valued verdict called both of those "this
+    release is NOT promotable" — a claim about the artifact, when the truth was a claim about the
+    room it was measured in. That is the failure mode this whole module argues against, sitting
+    in its own headline verdict.
+
+    FAIL still means a guarantee was measured and did not hold. BLOCKED means nothing failed and
+    the remaining evidence was not obtainable HERE — so promotion is uncertified rather than
+    refused, and the reader is told which environment holds the missing half. Neither is
+    promotable: `rep.data["promotable"]` stays False for both, so no consumer of the artifact
+    changes meaning.
+    """
     rows = [c for c in checks if c["id"] != "release.promotable"]
+    # THE BOUNDARY IS DELIBERATELY EXEMPT FROM THE BLOCKED TREATMENT BELOW, and a draft that
+    # exempted it was wrong in the softest possible direction. An unevaluable egress state
+    # (BLOCKED: no docker, no such container) is genuinely unmeasured, so the rule below would
+    # make it "uncertified, ask the other environment". There IS no other environment. A gate
+    # row like `gate.lib.doc_refs` is a claim about the REPOSITORY, and CI can answer it for
+    # any host; containment is a claim about THIS DEPLOYMENT, and no CI run can ever certify a
+    # given host's boundary. "Ask elsewhere" would name a room that does not exist.
+    #
+    # So any non-VERIFIED boundary REFUSES promotion, which is also the conservative default for
+    # the one affirmative, high-consequence decision this artifact makes. Caught by CI: the
+    # draft passed locally because a laptop with docker up resolves to RUNNING and never reached
+    # the branch, and failed on a fresh checkout that has neither stamp nor containers.
     if egress_state != "VERIFIED":
-        return False, (f"egress containment is {egress_state}, not VERIFIED — promotion to any "
-                       "external tenant is refused until the boundary is proved on the target "
-                       "host (SECURITY.md)")
+        return FAIL, (f"egress containment is {egress_state}, not VERIFIED — promotion to any "
+                      "external tenant is refused until the boundary is proved on the target "
+                      "host (SECURITY.md)")
     # PARTITIONED BY KIND, NOT BY VERDICT. A CONFIG row is something this host CAN evaluate, so
     # anything other than PASS — FAIL, SKIPPED (--offline-only), or BLOCKED (a gate whose
     # interpreter or directory was missing, `cannot run: ...`) — means a guarantee this artifact
@@ -1593,18 +1620,52 @@ def promotion_gate(checks, egress_state):
     gates_run = [c for c in rows if c["id"].startswith("gate.") and c["verdict"] == PASS]
     if unmet:
         named = sorted(c["id"] for c in unmet)
-        # Name the reason the reader is actually looking at. "Nothing ran" and "something broke"
-        # are different facts and were being reported with one sentence.
-        why = ("no gate was run (--offline-only marks them SKIPPED), and an unrun gate is not a "
-               "passing one" if all(c["verdict"] == SKIPPED for c in unmet)
-               else "an unrun or unevaluated check is not a passing one")
-        return False, (f"{len(named)} configuration check(s) did not pass "
-                       f"({', '.join(named[:4])}{', …' if len(named) > 4 else ''}) — {why}")
+        listed = f"{', '.join(named[:4])}{', …' if len(named) > 4 else ''}"
+        broke = [c for c in unmet if c["verdict"] == FAIL]
+        if broke:
+            # Name the reason the reader is actually looking at. "Nothing ran" and "something
+            # broke" are different facts and were being reported with one sentence.
+            return FAIL, (f"{len(broke)} configuration check(s) FAILED "
+                          f"({', '.join(sorted(c['id'] for c in broke)[:4])}) — a measured "
+                          "guarantee did not hold")
+        if all(c["verdict"] == SKIPPED for c in unmet):
+            return BLOCKED, (f"{len(named)} configuration check(s) were not run ({listed}) — "
+                             "--offline-only marks every gate SKIPPED, and an unrun gate is not "
+                             "a passing one")
+        return BLOCKED, (
+            f"nothing failed, but {len(named)} check(s) could not be evaluated in this "
+            f"environment ({listed}). Promotion is UNCERTIFIED, not refused. No single "
+            "environment can answer all of them: repository-hygiene gates need a git checkout "
+            "(CI, or the repo itself), and the live legs need a provisioned instance with a "
+            "model gateway key (the serve host). Certifying promotion needs the two halves "
+            "together.")
     if not gates_run:
         # A discovered gate list that found nothing must not read as "everything passed".
-        return False, ("no gate suite ran at all — the discovery globs matched nothing, so this "
-                       "artifact attests to no executed test")
-    return True, ""
+        return BLOCKED, ("no gate suite ran at all — the discovery globs matched nothing, so "
+                         "this artifact attests to no executed test")
+    return PASS, ""
+
+
+def _needs_a_git_checkout(cwd, stdout, stderr):
+    """Did this gate die because it asked git a question in a tree that has no git?
+
+    DERIVED FROM THE FAILURE, NOT FROM A LIST OF GATE NAMES. A hand-maintained "these four need
+    git" list is wrong the moment a fifth gate starts calling `git ls-files`, and wrong in the
+    silent direction — the new one reports FAIL on the serve host and nobody connects it to this.
+
+    NOT a search for "fatal: not a git repository". That string never arrives: these gates run
+    git with `capture_output=True`, so git's stderr is swallowed into CalledProcessError and the
+    only surviving trace is the repr of the argv plus its exit status. Measured on the host.
+
+    BOTH halves are required, which is what keeps this narrow. A gate that genuinely fails its
+    assertions still reports FAIL even if it happens to shell out to git, because the second
+    check would find a perfectly good repository.
+    """
+    blob = f"{stdout or ''}\n{stderr or ''}"
+    if "'git'" not in blob or "returned non-zero exit status 128" not in blob:
+        return False
+    return subprocess.run(["git", "rev-parse", "--git-dir"], cwd=cwd,
+                          capture_output=True).returncode != 0
 
 
 def cmd_release_verify(args):
@@ -1687,6 +1748,28 @@ def cmd_release_verify(args):
                 rep.fail(cid, CONFIG, title, "timed out after 600s")
                 continue
             tail = (r.stdout or r.stderr or "").strip().splitlines()[-1:] or [""]
+            # A GATE THAT NEEDS GIT, ON A TREE THAT IS NOT A CHECKOUT, IS UNMEASURED — NOT FAILED.
+            # `/opt/ironworks` is a file copy (deploy/sync-vm.sh), so `git ls-files` exits 128
+            # there and four repository-hygiene gates — doc_refs, documented_guarantees,
+            # shadowed_binding, ci_contracts — died with CalledProcessError. They were reported
+            # FAIL, which says the guarantee is VIOLATED. It is not; the question could not be
+            # asked. This module's own rule is that an unevaluated check is never a pass, and the
+            # mirror of it matters just as much: permanent red on the serve host for a non-reason
+            # is how an operator learns to skim past red. BLOCKED already means exactly this, and
+            # `release.promotable` counts it as "did not pass" either way, so nothing is
+            # weakened — the verdict just stops lying about which of the two happened.
+            if r.returncode != 0 and _needs_a_git_checkout(cwd, r.stdout, r.stderr):
+                rep.blocked(cid, CONFIG, title,
+                            f"needs a git checkout; {cwd} is not one (this is a file copy, so "
+                            "repository-hygiene gates cannot run here — run them in CI or the repo)")
+                continue
+            # EXIT 3 IS BLOCKED — the vocabulary CONTRIBUTING.md fixes for every gate here, which
+            # this runner was the last place not to honour. A gate that knows it could not
+            # evaluate itself had no way to say so: every non-zero code collapsed into FAIL, so
+            # the honest verdict `run-quality.py` already computed was flattened by its caller.
+            if r.returncode == 3:
+                rep.blocked(cid, CONFIG, title, tail[0][:200] or "the gate reported BLOCKED")
+                continue
             rep.verdict(r.returncode == 0, cid, CONFIG, title,
                         f"exit {r.returncode}: {tail[0][:200]}")
 
@@ -1712,15 +1795,22 @@ def cmd_release_verify(args):
     # unproved network boundary invites exactly the wrong reading. State it as a decision,
     # not as one row among twenty.
     eg = (rep.data.get("egress") or {}).get("state", "BLOCKED")
-    promotable, why_not = promotion_gate(rep.checks, eg)
+    promotion, why_not = promotion_gate(rep.checks, eg)
     # A waived TEST_RESIDUAL does not block — but it is named in the artifact either way, so a
     # reader can see exactly what was waived and why rather than inferring it from a green row.
     rep.data["waived_residual"] = sorted((rep.data.get("residual_authority") or {})
                                          .get("waived", {}))
-    rep.verdict(promotable, "release.promotable", CONFIG,
-                "this release may be promoted to an external tenant", why_not)
+    rep.add("release.promotable", CONFIG, promotion,
+            "this release may be promoted to an external tenant",
+            "" if promotion == PASS else why_not)
     rep.data["artifact_version"] = 2
-    rep.data["promotable"] = promotable
+    # STAYS BOOLEAN, and stays False for BLOCKED. A consumer asking "may I promote this?" gets the
+    # same answer it always did; only the row explains WHICH of the two reasons applies. Widening
+    # this field to a tri-state would change the meaning of an existing key under the same
+    # artifact_version, which is how a machine reader silently starts treating "uncertified" as
+    # "cleared".
+    rep.data["promotable"] = promotion == PASS
+    rep.data["promotion_verdict"] = promotion
     return rep.emit(args.json, "ironworks release verify")
 
 
