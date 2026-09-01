@@ -12,6 +12,24 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 # not leave this script watching the old path — and it sources curl-private.sh (curl_tg: bot
 # token off argv) on the way through.
 . "$REPO/deploy/lib/fleet.sh"
+# telegram.sh SEPARATELY, because fleet.sh does not reach it. `alert()` below calls `tg_send`,
+# which lives here and nowhere else; fleet.sh sources only curl-private.sh, which supplies
+# `curl_tg` — the function this script used to call directly, before `tg_send` was extracted
+# from it and its twin in multi-backup.sh.
+#
+# THE EXTRACTION MOVED THE CALL AND NOT THE DEPENDENCY, and the comment above went stale in the
+# same edit: it still explains where `curl_tg` comes from, which stopped being what this script
+# calls. Measured on the serve host — one line, from the alert path, on a real detection:
+#
+#     multi-watchdog.sh[1925162]: line 120: tg_send: command not found
+#
+# The failure mode is the worst available. systemd records `Result=success` because the script
+# exits 0; the watchdog goes on detecting correctly; and the only thing that never happens is
+# the part where a human is told. `watchdog.state` carried `prev_alert=0` — no alert had EVER
+# sent on that host. A monitor that cannot report is worse than no monitor, because the silence
+# reads as health.
+# shellcheck source=deploy/lib/telegram.sh
+. "$REPO/deploy/lib/telegram.sh"
 # Plain source, no `set -a` (CONTRIBUTING.md, "Sourcing an env file"): watchdog.env carries the
 # two keys named in the header, and both reach `curl_tg` as arguments. The one place here that
 # DOES need the exported form is backup.env below, because `restic` reads RESTIC_* from its

@@ -23,7 +23,18 @@ set -euo pipefail
 # variables this script mentions are the optional BACKUP_ALERT_* pair — so read on its own
 # it looks like a plain-source candidate, and converting it would break every backup silently.
 set -a; . "$FLEET_AGENCY_DIR/backup.env"; set +a
-# curl_tg (which keeps the alert bot token off argv) comes from fleet.sh above.
+# curl_tg (which keeps the alert bot token off argv) comes from fleet.sh above — but the alert
+# below calls `tg_send`, which does NOT: it lives in telegram.sh, extracted from this script and
+# multi-watchdog.sh, and fleet.sh reaches only curl-private.sh. The extraction moved both call
+# sites and neither source line, so `tg_send` has been an undefined command in both since.
+#
+# WORSE HERE THAN IN THE WATCHDOG, and that asymmetry is the reason this comment is long. The
+# watchdog calls it bare and at least logs `command not found`. This one calls it from the EXIT
+# trap under `|| true` — deliberately, so a failed alert cannot overwrite the run's real exit
+# code — and `|| true` swallows a 127 exactly as it swallows a network error. A backup that
+# failed would have reported nothing, to nobody, with `Result=success` on the unit.
+# shellcheck source=deploy/lib/telegram.sh
+. "$(dirname "$0")/../../deploy/lib/telegram.sh"
 #
 # THERE WAS A DEFENSIVE `[ -f ] || curl_tg() { return 0; }` BLOCK HERE, and it was dead. Its
 # rationale was sound — under `set -e` a hard `.` on a missing file aborts before a single dump

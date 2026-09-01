@@ -154,6 +154,9 @@ Documentation map:
   internal S2 compatibility-constraint record; the bridge remains required;
 - [`multi/services/README.md`](multi/services/README.md): what a service definition is and what
   it does not yet do;
+- [`deploy/account-intel/data/relationships/README.md`](deploy/account-intel/data/relationships/README.md):
+  the synthetic relationship book `relationship-intelligence@1` is demonstrated on, its snapshot
+  date, and the order its guidance and records must be installed in;
 - [`deploy/README.md`](deploy/README.md): lifecycle, incidents, upgrades, and recovery;
 - [`deploy/UPGRADE.md`](deploy/UPGRADE.md): the runtime pin-bump procedure of record;
 - [`multi/verify/README.md`](multi/verify/README.md): runnable proof index.
