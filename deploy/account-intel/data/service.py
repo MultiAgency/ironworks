@@ -1,21 +1,32 @@
 #!/usr/bin/env python3
 """MultiAgency internal Account Service — the ONLY thing that touches Postgres.
 
-Exposes a tiny, read-only, org-scoped BUSINESS contract (find_account / get_account_context)
-mapped from DB rows, so the DB schema can evolve independently of the agent-facing contract.
-The agent never sees SQL, the schema, or DB credentials — those live here.
+Exposes a tiny, org-scoped BUSINESS contract mapped from DB rows, so the DB schema can evolve
+independently of the agent-facing contract. The agent never sees SQL, the schema, or DB
+credentials — those live here.
 
 Identity implies org: each service credential (token) maps to exactly ONE trusted org,
 resolved server-side. The caller presents only its token — it CANNOT assert an org (any
 X-Org-Id header is ignored). The model never sees the token or an org selector.
+
+READS AND ONE APPEND, ON SEPARATE CREDENTIALS. find_account / list_accounts /
+get_account_context read; `POST /append_activity` is the single write, and it authenticates
+against its own identity map (ACCOUNT_APPEND_IDENTITIES / ACCOUNT_APPEND_IDENTITIES_FILE). A
+read token is not in that map and therefore cannot write — purpose is separated by which map a
+token is in, never by a field inside one. A deployment that configures no append map authorizes
+nobody and stays exactly as read-only as it was.
+
+The append is immutable: it inserts or it reports, and it never updates. A model never reaches
+it; the write is a host command driven by a person's explicit confirmation.
 """
 import os, json, datetime
 from flask import Flask, request, jsonify
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
-from service_guards import (duplicate_orgs, insecure_mode, like_contains, new_ref, safe_error,
-                            validate_identity_map)
+from service_guards import (AppendRequestError, SHARED_ACTIVITY_KIND, append_conflict,
+                            duplicate_orgs, insecure_mode, like_contains, new_ref,
+                            parse_append_request, safe_error, validate_identity_map)
 from migrations import status as migration_status
 
 DSN = os.environ["ACCOUNT_DB_DSN"]                 # DB creds live here only
@@ -33,6 +44,22 @@ if not ENV_IDENTITIES and not IDENTITIES_FILE:
         "Set ACCOUNT_IDENTITIES ({\"<token>\": \"<org_id>\"} JSON) and/or ACCOUNT_IDENTITIES_FILE.")
 _file_ident = {"mtime": None, "map": {}, "loaded": False, "error": None}
 
+# ── append authority, kept in its OWN map ───────────────────────────────────────────────────
+#
+# A SECOND FLAT MAP, not a field inside the first. `validate_identity_map` refuses a nested value
+# because one used to flow straight into a bound SQL parameter, and every test of that refusal
+# still holds — so purpose is separated by WHICH FILE a token is in, not by a flag inside a
+# record. A read token cannot append because it is not in this map, which is the same shape as
+# the seam's own `CredentialPurpose`: two kinds of credential, never one credential with a mode.
+#
+# Missing configuration authorizes NOBODY and is not an error. The service is read-only until an
+# operator deliberately registers append authority, so readiness, /health and every existing
+# reader behave exactly as before on a deployment that never sets these.
+ENV_APPEND_IDENTITIES = validate_identity_map(
+    json.loads(os.environ.get("ACCOUNT_APPEND_IDENTITIES") or "{}"), "ACCOUNT_APPEND_IDENTITIES")
+APPEND_IDENTITIES_FILE = os.environ.get("ACCOUNT_APPEND_IDENTITIES_FILE", "")
+_file_append_ident = {"mtime": None, "map": {}, "loaded": False, "error": None}
+
 def _validated(doc, path):
     """Schema-check a freshly read identity map before it replaces the live one, and report
     duplicate orgs. The rules themselves live in service_guards so they are testable without
@@ -47,43 +74,59 @@ def _validated(doc, path):
 
 
 def _identities():
-    """The current {token: org} map. File entries override env entries.
+    """The current {token: org} map for READS. File entries override env entries.
 
     A failed file reload invalidates the file-backed authority immediately. Keeping a stale map
     while merely logging the failure lets removed credentials continue authenticating and makes
     `/ready` claim the source is healthy. Clear it, report not-ready, and retry on every request
     until a valid current file is loaded.
     """
-    if IDENTITIES_FILE:
-        try:
-            st = os.stat(IDENTITIES_FILE)
-            mtime = st.st_mtime_ns
-            if mtime != _file_ident["mtime"]:
-                # The file holds every client's org credential. Group- or world-readable is a
-                # finding, not a fatality: refusing to load would take every client down over a
-                # mode bit, which trades a confidentiality risk for a certain outage.
-                loose = insecure_mode(st.st_mode)
-                if loose is not None:
-                    print(f"identities: {IDENTITIES_FILE} is mode {loose:o} — it holds every "
-                          "client's org token and must be 0600. chmod it.", flush=True)
-                with open(IDENTITIES_FILE) as f:
-                    _file_ident["map"] = _validated(json.load(f), IDENTITIES_FILE)
-                _file_ident["mtime"] = mtime
-                _file_ident["loaded"] = True
-                _file_ident["error"] = None
-        except FileNotFoundError:
-            if _file_ident["mtime"] is not None:
-                print("identities file missing, invalidating file-backed authority", flush=True)
-            _file_ident.update(mtime=None, map={}, loaded=False,
-                               error="identity_file_missing")
-        except (ValueError, OSError) as e:
-            print(f"identities file unreadable, invalidating file-backed authority: {e}",
-                  flush=True)
-            # `mtime=None` forces a retry even on filesystems whose timestamp did not advance
-            # between the malformed write and its correction.
-            _file_ident.update(mtime=None, map={}, loaded=False,
-                               error="identity_file_invalid")
-    return {**ENV_IDENTITIES, **_file_ident["map"]}
+    return _merged(ENV_IDENTITIES, _file_ident, IDENTITIES_FILE)
+
+
+def _append_identities():
+    """The current {token: org} map for APPENDS, from its own env var and its own file.
+
+    Identical mechanics, deliberately separate state. An empty result means nobody may append,
+    which is what a deployment that has not configured it should mean.
+    """
+    return _merged(ENV_APPEND_IDENTITIES, _file_append_ident, APPEND_IDENTITIES_FILE)
+
+
+def _merged(env_map, state, path):
+    if path:
+        _reload(state, path)
+    return {**env_map, **state["map"]}
+
+
+def _reload(state, path):
+    """Hot-reload one identity file into `state`, with the fail-closed rules `_identities` names."""
+    try:
+        st = os.stat(path)
+        mtime = st.st_mtime_ns
+        if mtime != state["mtime"]:
+            # The file holds every client's org credential. Group- or world-readable is a
+            # finding, not a fatality: refusing to load would take every client down over a
+            # mode bit, which trades a confidentiality risk for a certain outage.
+            loose = insecure_mode(st.st_mode)
+            if loose is not None:
+                print(f"identities: {path} is mode {loose:o} — it holds every "
+                      "client's org token and must be 0600. chmod it.", flush=True)
+            with open(path) as f:
+                state["map"] = _validated(json.load(f), path)
+            state["mtime"] = mtime
+            state["loaded"] = True
+            state["error"] = None
+    except FileNotFoundError:
+        if state["mtime"] is not None:
+            print("identities file missing, invalidating file-backed authority", flush=True)
+        state.update(mtime=None, map={}, loaded=False, error="identity_file_missing")
+    except (ValueError, OSError) as e:
+        print(f"identities file unreadable, invalidating file-backed authority: {e}",
+              flush=True)
+        # `mtime=None` forces a retry even on filesystems whose timestamp did not advance
+        # between the malformed write and its correction.
+        state.update(mtime=None, map={}, loaded=False, error="identity_file_invalid")
 
 MAX_MATCHES = 10
 app = Flask(__name__)
@@ -222,7 +265,10 @@ def get_account_context():
             "SELECT contact_id, name, title, engaged, notes FROM contacts "
             "WHERE org_id = %s AND account_id = %s ORDER BY name", (org, account_id)).fetchall()
         activities = c.execute(
-            "SELECT activity_id, occurred_at, kind, body FROM activities "
+            # `contributor` rides the activity so a promoted note carries who chose it. NULL for
+            # everything the team seeded, which a reader must render as unattributed rather than
+            # attributing to whoever is nearest.
+            "SELECT activity_id, occurred_at, kind, body, contributor FROM activities "
             "WHERE org_id = %s AND account_id = %s ORDER BY occurred_at", (org, account_id)).fetchall()
     for a in activities:
         if a.get("occurred_at"): a["occurred_at"] = a["occurred_at"].isoformat()
@@ -242,6 +288,99 @@ def get_account_context():
         # only layer that knows which client this is.
         "missing_legacy": _missing(acct),
     })
+
+def _auth_append_org():
+    """Resolve the org from an APPEND credential, server-side, or refuse.
+
+    Deliberately a separate function over a separate map rather than a flag on `_auth_org`: a
+    reader's token is not in the append map, so it cannot reach this at all. The caller still
+    cannot assert an org — `expected_org` is compared below, never selected on.
+    """
+    org = _append_identities().get(request.headers.get("X-Service-Token", ""))
+    if not org:
+        # Indistinguishable from an unknown token, on purpose. A reader who tries this learns
+        # only that it did not work, never that their token is real but read-only.
+        return None, (jsonify({"error": "unauthorized"}), 401)
+    return org, None
+
+
+@app.post("/append_activity")
+def append_activity():
+    """Append one promoted note as immutable, org-scoped, attributed activity evidence.
+
+    # The only writer of activities, and the narrowest one that can exist
+    #
+    # It writes one kind (`shared-note`), into one id namespace (`share-…`), for an account that
+    # must already exist in the resolved org, under a credential that resolves that org
+    # server-side. It never updates. `ON CONFLICT DO NOTHING` plus an explicit comparison is the
+    # whole idempotency story, and the reason it is not `DO UPDATE`: a replay must prove it is a
+    # replay, and anything else must be refused rather than absorbed.
+    #
+    # Contrast `seed.py`, which DOES use `DO UPDATE SET body` — correct for an importer
+    # re-running a file the team owns, and exactly wrong for evidence a person confirmed once.
+    """
+    org, err = _auth_append_org()
+    if err: return err
+    try:
+        wanted = parse_append_request(request.get_json(silent=True))
+    except AppendRequestError as e:
+        return jsonify({"error": e.code}), 400
+
+    # The confused-deputy guard, before any statement runs. `expected_org` is what the CALLER
+    # believed it was writing into; the org above is what its credential actually authorises.
+    # They must agree, and when they do not it is the caller that is wrong, never the token.
+    if wanted["expected_org"] != org:
+        return jsonify({"error": "org_mismatch", "org": org}), 409
+
+    with _conn() as c:
+        account = c.execute(
+            "SELECT account_id FROM accounts WHERE org_id = %s AND account_id = %s",
+            (org, wanted["account_id"])).fetchone()
+        if not account:
+            # Never "created it for you": an activity hanging off an account this org does not
+            # have is evidence about nothing, and the FK would refuse it anyway.
+            return jsonify({"error": "unknown_account", "org": org,
+                            "account_id": wanted["account_id"]}), 404
+
+        created = c.execute(
+            "INSERT INTO activities "
+            "(activity_id, account_id, org_id, occurred_at, kind, body, contributor) "
+            "VALUES (%s,%s,%s,%s,%s,%s,%s) "
+            "ON CONFLICT (org_id, activity_id) DO NOTHING "
+            "RETURNING activity_id",
+            (wanted["activity_id"], wanted["account_id"], org, wanted["occurred_at"],
+             SHARED_ACTIVITY_KIND, wanted["body"], wanted["contributor"])).fetchone()
+        if created:
+            return jsonify({"status": "created", "org": org,
+                            "activity_id": wanted["activity_id"],
+                            "account_id": wanted["account_id"],
+                            "kind": SHARED_ACTIVITY_KIND}), 201
+
+        # The row exists. Whether this is a replay or a collision is decided by comparing every
+        # immutable field, and nothing is written either way.
+        existing = c.execute(
+            "SELECT org_id, account_id, occurred_at, kind, body, contributor FROM activities "
+            "WHERE org_id = %s AND activity_id = %s",
+            (org, wanted["activity_id"])).fetchone()
+        if not existing:
+            # `DO NOTHING` returned no row and neither does the read: a concurrent delete, or a
+            # conflict on some other constraint. Neither is a replay, and guessing would be the
+            # one branch that could lose a person's words.
+            ref = new_ref()
+            print(f"append_activity: conflict with no visible row ref={ref} "
+                  f"org={org} activity={wanted['activity_id']}", flush=True)
+            body, status = safe_error("append_unresolved", ref)
+            return jsonify(body), 503
+        differing = append_conflict(existing, wanted, org)
+        if differing:
+            return jsonify({"error": "conflict", "org": org,
+                            "activity_id": wanted["activity_id"],
+                            "differing_field": differing}), 409
+        return jsonify({"status": "replayed", "org": org,
+                        "activity_id": wanted["activity_id"],
+                        "account_id": wanted["account_id"],
+                        "kind": SHARED_ACTIVITY_KIND}), 200
+
 
 if __name__ == "__main__":
     # Plain HTTP on the private network only (reached by the trusted backend over localhost).

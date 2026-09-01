@@ -62,8 +62,13 @@ CREATE TABLE IF NOT EXISTS activities (
     account_id  TEXT NOT NULL,
     org_id      TEXT NOT NULL REFERENCES organizations(org_id),
     occurred_at DATE,
-    kind        TEXT,                          -- call | note | email ...
+    kind        TEXT,                          -- call | note | email | shared-note ...
     body        TEXT NOT NULL,                 -- the interaction text (evidence)
+    -- Who contributed this, when one named person did (migration 004). NULL for everything the
+    -- client's team recorded through the seeding path — which is most rows, and is the honest
+    -- value: the team wrote it and nobody individual claimed it. A reader renders NULL as
+    -- unattributed rather than inventing an author.
+    contributor TEXT,
     PRIMARY KEY (org_id, activity_id),
     FOREIGN KEY (org_id, account_id) REFERENCES accounts(org_id, account_id)
 );

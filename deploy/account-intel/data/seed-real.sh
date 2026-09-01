@@ -17,6 +17,23 @@ set -euo pipefail
 cd "$(dirname "$0")"
 . ../../lib/fleet.sh    # curl_header (org token off argv) + fleet_json/fleet_require_container
 . ./smoke.sh            # smoke_matches/smoke_code — the checks below must be able to FAIL
+# `set -a` AND REQUIRED, exactly as prod-up.sh and dev-up.sh load it: the `docker compose`
+# invocations below interpolate POSTGRES_PASSWORD and ACCOUNT_DB_DSN from the ENVIRONMENT, so
+# ACCOUNT_DB_PASSWORD has to be exported rather than merely set as a shell variable. (Contrast
+# the plain `. "$CFG"` further down, whose REAL_* values are passed explicitly with `-e` and
+# must NOT leak into every child.)
+#
+# THIS LINE WAS MISSING, and the shape of the failure is why it lasted. Run by hand it worked,
+# because the operator had usually just run prod-up.sh in the same shell and inherited the
+# export. Called from provision.sh step 2 it inherits nothing, so compose refused with
+# "required variable ACCOUNT_DB_PASSWORD is missing a value" — AFTER step 1 had already minted
+# and registered an org token, which then had to be compensated and re-verified revoked.
+# Measured on the serve host 2026-09-01: a missing `set -a` turned a data-seeding step into a
+# half-provisioned tenant.
+[ -f "$FLEET_AGENCY_DIR/account-db.env" ] || {
+  echo "!! no $FLEET_AGENCY_DIR/account-db.env — the DB password lives there; run prod-up.sh" >&2
+  exit 1; }
+set -a; . "$FLEET_AGENCY_DIR/account-db.env"; set +a
 SLUG="${1:?usage: seed-real.sh <slug>  (real data under ~/.agency/account-data/<slug>/)}"
 # Validate before $SLUG reaches a path or an in-container `sh -c "rm -rf /tmp/real-$SLUG"`:
 # an unconstrained slug allows `../` traversal and shell-metacharacter injection into the

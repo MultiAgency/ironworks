@@ -43,8 +43,13 @@ def load_service(identity_file):
         def get(self, *_args, **_kwargs):
             return lambda function: function
 
+        # The append route is a POST. The double has to know the verb or importing `service.py`
+        # fails before any test runs — which is the honest signal that a new route exists.
+        def post(self, *_args, **_kwargs):
+            return lambda function: function
+
     flask.Flask = FakeFlask
-    flask.request = types.SimpleNamespace(headers={}, args={})
+    flask.request = types.SimpleNamespace(headers={}, args={}, get_json=lambda **_k: None)
     flask.jsonify = lambda body: body
     psycopg = types.ModuleType("psycopg")
     rows = types.ModuleType("psycopg.rows")

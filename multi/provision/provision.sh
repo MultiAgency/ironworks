@@ -289,7 +289,25 @@ PY
   else pf 1 "guidance validates and composes against service '$SERVICE'" "$_pf_out"; fi
   # Guidance is that tenant's own data. A group- or world-readable file beside the tokens is a
   # finding here, where it is cheap to fix, not after it has been read.
-  gmode=$(stat -f '%Lp' "$GUIDANCE_FILE" 2>/dev/null || stat -c '%a' "$GUIDANCE_FILE" 2>/dev/null || echo "")
+  # GNU FIRST, AND ASSIGN ONLY ON SUCCESS. Both halves of that are load-bearing, and the
+  # previous form — `$(stat -f '%Lp' … || stat -c '%a' … || echo "")` — got both wrong on Linux:
+  #
+  #   * `-f` is BSD's "format" and GNU's "--file-system". On GNU it is not an unknown option, so
+  #     it does not fail cleanly: it PRINTS FIVE LINES OF FILESYSTEM STATISTICS TO STDOUT and
+  #     then exits 1.
+  #   * because the whole chain sits in ONE command substitution, that stdout is captured even
+  #     though the command failed. The `||` fallback then appends the real mode, so `gmode`
+  #     became "<filesystem blob>\n600" — which matches neither `600|400` nor `""`, so it fell
+  #     through to the failure arm and reported a correctly-chmod-600 file as world-readable.
+  #
+  # Measured 2026-09-01: this failed preflight for a mode-600 file on the serve host, with the
+  # remedy line telling the operator to `chmod 600` a file that already was. Ordering GNU first
+  # is not enough on its own — a failing probe that writes to stdout would still poison a shared
+  # substitution — so each probe assigns separately and only when it exits 0. macOS `stat -c`
+  # writes nothing to stdout before failing, so the fallback is clean there. Verified on both.
+  gmode="$(stat -c '%a' "$GUIDANCE_FILE" 2>/dev/null)" \
+    || gmode="$(stat -f '%Lp' "$GUIDANCE_FILE" 2>/dev/null)" \
+    || gmode=""
   case "$gmode" in
     600|400) pf 0 "guidance file is not group/world readable (mode $gmode)" ;;
     "") pf 0 "guidance file mode not checkable on this platform (skipped)" ;;

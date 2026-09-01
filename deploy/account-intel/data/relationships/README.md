@@ -100,3 +100,49 @@ Both establish what reaches the model. Neither establishes that the model reason
 correctly: `relationship-intelligence@1` declares `"evaluation": null` on purpose, and nothing
 here changes that. The reasoning rules live in `agent/identity/RELATIONSHIP_INTELLIGENCE.md` and
 `skills/relationship-record/SKILL.md`.
+
+## Measured limits
+
+Observations from running the book, not a score. They are recorded because the alternative is
+that whoever demos this next rediscovers them live. **Re-measure on any `MODEL_PIN` change** — a
+pin is a behavioural claim, and everything below is a statement about one.
+
+**2026-09-01, `MODEL_PIN qwen/qwen3.5-397b-a17b`, `relationship-intelligence@1`.**
+
+*LARK-001's recurring obligation is found only when asked for directly.* The book plants two
+missed occurrences of a monthly reporting obligation (July and August; four earlier reports
+delivered). Three probes, whole book supplied each time (`accounts_supplied 8` of 8):
+
+| question | result |
+|---|---|
+| "What needs attention?" | not surfaced |
+| "What do we owe Larkspur, and what are they waiting on us for?" | not surfaced |
+| "Has every monthly operating report to Larkspur been delivered?" | surfaced, completely and correctly |
+
+So the limit is **salience, not reasoning**: asked the specific question it enumerates every due
+date, names both gaps, and gets the epistemics right without prompting — *"no delivery record
+exists"*, and a follow-up to establish whether the reports were undelivered or merely
+unrecorded. The failure is that it does not reach for that enumeration unprompted, including at
+"what do we owe X?", which is one of the six questions this desk exists to answer.
+
+Worth stating plainly: the second reply was not merely incomplete. By presenting September's
+report as the next thing due, it implied the cadence was in good standing when it was two months
+behind. An omission that shifts the reader's conclusion is worse than silence.
+
+**Do not answer this by adding guidance.** The instruction is already present in both layers —
+`GUIDANCE.demo.md` § Cadences we operate to ("a missed occurrence of an agreed cadence is a
+finding and should be reported as one") and `SKILL.md` step 5 ("check each occurrence against the
+calendar rather than checking whether it ever happened") — and neither fired. A fourth restatement is the shape
+there is already evidence against.
+
+*The close is rendered as a task list.* All three replies ended with action items carrying
+`(owner: MultiAgency)`. `SKILL.md` step 7 forbids exactly this: "Never present this as a task
+list, a workflow, or a set of next actions to be executed. You are naming judgement calls, not
+assigning work." Three for three is a behaviour, not a slip.
+
+*What did hold, in the same runs:* the same-day contradiction reported with both sides and no
+winner picked; staleness measured against the record's own 23-day precedent rather than a
+threshold; the closed engagement correctly left out of "needs attention"; the not-yet-due
+acceptance review not called overdue; supersession read forward to the amendment effective on
+the snapshot date; and both directions of the start-of-business boundary — "due today, not yet
+late" and "effective today".

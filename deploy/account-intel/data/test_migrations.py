@@ -47,9 +47,19 @@ class FakeConnection:
                 ("activities", ["org_id", "activity_id"]),
             ])
         if "information_schema.columns" in compact:
-            cols = ["account_id", "org_id"]
-            if self.current:
-                cols += ["owner", "stage", "value_band", "facts"]
+            # Two tables are probed now, and the fake has to tell them apart: 004 lives on
+            # `activities` while 002 and 003 live on `accounts`. Answering one column list for
+            # both would let a migration signature pass by reading another table's shape.
+            if "table_name = 'activities'" in compact:
+                cols = ["activity_id", "org_id", "account_id", "body"]
+                if self.current:
+                    cols += ["contributor"]
+            elif "table_name = 'accounts'" in compact:
+                cols = ["account_id", "org_id"]
+                if self.current:
+                    cols += ["owner", "stage", "value_band", "facts"]
+            else:
+                raise AssertionError(f"unexpected column probe: {compact}")
             return Result([(c,) for c in cols])
         if "FROM ironworks_schema_migrations" in compact:
             rows = []
@@ -83,7 +93,7 @@ class DictRowConnection(FakeConnection):
 class MigrationContract(unittest.TestCase):
     def test_committed_files_have_stable_unique_versions_and_checksums(self):
         expected = migrations.expected()
-        self.assertEqual([x["version"] for x in expected], ["001", "002", "003"])
+        self.assertEqual([x["version"] for x in expected], ["001", "002", "003", "004"])
         self.assertEqual(len({x["checksum"] for x in expected}), len(expected))
         self.assertTrue(all(len(x["checksum"]) == 64 for x in expected))
 
@@ -100,7 +110,7 @@ class MigrationContract(unittest.TestCase):
     def test_current_but_unrecorded_schema_requires_reconciliation(self):
         result = migrations.status(FakeConnection(tracked=False))
         self.assertFalse(result["ready"])
-        self.assertEqual(len(result["problems"]), 3)
+        self.assertEqual(len(result["problems"]), 4)
         self.assertTrue(all("not recorded" in p for p in result["problems"]))
 
     def test_recorded_but_legacy_schema_fails_readiness(self):
@@ -111,7 +121,7 @@ class MigrationContract(unittest.TestCase):
     def test_changed_migration_file_is_detected(self):
         result = migrations.status(FakeConnection(checksum_override="0" * 64))
         self.assertFalse(result["ready"])
-        self.assertEqual(sum("checksum differs" in p for p in result["problems"]), 3)
+        self.assertEqual(sum("checksum differs" in p for p in result["problems"]), 4)
 
     def test_the_pk_query_casts_the_identifier_to_text(self):
         """The cast is the fix; this pins it at the query. `sql_identifier[]` has no psycopg
@@ -228,11 +238,21 @@ class StatefulConnection:
                            ("contacts", ["org_id", "contact_id"]),
                            ("activities", ["org_id", "activity_id"])])
         if "information_schema.columns" in compact:
-            cols = ["account_id", "org_id"]
-            if "002" in self.signatures:
-                cols += ["owner", "stage", "value_band"]
-            if "003" in self.signatures:
-                cols += ["facts"]
+            # Per table, for the reason the read-only fake next door gives: 004 is a column on
+            # `activities`, and answering the accounts shape for both probes would let its
+            # signature pass by reading a table it never touched.
+            if "table_name = 'activities'" in compact:
+                cols = ["activity_id", "org_id", "account_id", "body"]
+                if "004" in self.signatures:
+                    cols += ["contributor"]
+            elif "table_name = 'accounts'" in compact:
+                cols = ["account_id", "org_id"]
+                if "002" in self.signatures:
+                    cols += ["owner", "stage", "value_band"]
+                if "003" in self.signatures:
+                    cols += ["facts"]
+            else:
+                raise AssertionError(f"unexpected column probe: {compact}")
             return Result([(c,) for c in cols])
         if "FROM ironworks_schema_migrations" in compact:
             by_version = {x["version"]: x for x in migrations.expected()}
@@ -252,10 +272,10 @@ class Apply(unittest.TestCase):
         conn = StatefulConnection()
         result = migrations.apply(conn)
         self.assertTrue(result["ready"], result)
-        self.assertEqual([a["action"] for a in result["actions"]], ["applied"] * 3)
-        self.assertEqual(conn.ddl_applied, ["001", "002", "003"])
-        self.assertEqual(sorted(conn.rows), ["001", "002", "003"])
-        self.assertEqual(conn.transactions, 3, "the DDL and its tracking row are one commit")
+        self.assertEqual([a["action"] for a in result["actions"]], ["applied"] * 4)
+        self.assertEqual(conn.ddl_applied, ["001", "002", "003", "004"])
+        self.assertEqual(sorted(conn.rows), ["001", "002", "003", "004"])
+        self.assertEqual(conn.transactions, 4, "the DDL and its tracking row are one commit")
         self.assertEqual(conn.locks, ["lock", "unlock"])
 
     def test_a_second_run_changes_nothing(self):
@@ -263,8 +283,8 @@ class Apply(unittest.TestCase):
         migrations.apply(conn)
         before = dict(conn.rows)
         result = migrations.apply(conn)
-        self.assertEqual([a["action"] for a in result["actions"]], ["already-applied"] * 3)
-        self.assertEqual(conn.ddl_applied, ["001", "002", "003"], "DDL was re-run")
+        self.assertEqual([a["action"] for a in result["actions"]], ["already-applied"] * 4)
+        self.assertEqual(conn.ddl_applied, ["001", "002", "003", "004"], "DDL was re-run")
         self.assertEqual(conn.rows, before)
 
     def test_a_schema_that_already_has_the_shape_is_RECONCILED_not_reapplied(self):
@@ -272,15 +292,15 @@ class Apply(unittest.TestCase):
         migration) but nothing was recorded. Re-running the DDL there fails on Postgres —
         `constraint "accounts_pkey" of relation "accounts" does not exist` — so the distinction
         is the difference between converging and erroring out."""
-        conn = StatefulConnection(signatures=("001", "002", "003"))
+        conn = StatefulConnection(signatures=("001", "002", "003", "004"))
         result = migrations.apply(conn)
         self.assertTrue(result["ready"], result)
-        self.assertEqual([a["action"] for a in result["actions"]], ["reconciled"] * 3)
+        self.assertEqual([a["action"] for a in result["actions"]], ["reconciled"] * 4)
         self.assertEqual(conn.ddl_applied, [], "a reconciled schema had its DDL re-run")
-        self.assertEqual(sorted(conn.rows), ["001", "002", "003"])
+        self.assertEqual(sorted(conn.rows), ["001", "002", "003", "004"])
 
     def test_a_migration_edited_after_application_is_refused(self):
-        conn = StatefulConnection(signatures=("001", "002", "003"),
+        conn = StatefulConnection(signatures=("001", "002", "003", "004"),
                                   rows={"001": "0" * 64, "002": "0" * 64, "003": "0" * 64})
         with self.assertRaises(migrations.MigrationError) as caught:
             migrations.apply(conn)

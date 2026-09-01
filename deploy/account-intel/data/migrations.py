@@ -21,6 +21,7 @@ MIGRATIONS = (
     ("001", "org-scoped-keys", HERE / "migrate-001-org-scoped-keys.sql"),
     ("002", "handoff-fields", HERE / "migrate-002-handoff-fields.sql"),
     ("003", "facts", HERE / "migrate-003-facts.sql"),
+    ("004", "activity-contributor", HERE / "migrate-004-activity-contributor.sql"),
 )
 TRACKING_TABLE = "ironworks_schema_migrations"
 
@@ -89,9 +90,21 @@ def _primary_keys(conn):
 
 
 def _account_columns(conn):
-    return {row[0] for row in _rows(conn, """
+    return _columns_of(conn, "accounts")
+
+
+def _activity_columns(conn):
+    return _columns_of(conn, "activities")
+
+
+def _columns_of(conn, table):
+    # The table name is a module constant at every call site, never caller input; it is
+    # interpolated because `information_schema` filters on a literal and psycopg would bind it
+    # as a parameter of the wrong shape. Keep it that way: a caller-supplied table here would be
+    # an injection point in the one module that reads the catalogue.
+    return {row[0] for row in _rows(conn, f"""
         SELECT column_name FROM information_schema.columns
-         WHERE table_schema = 'public' AND table_name = 'accounts'
+         WHERE table_schema = 'public' AND table_name = '{table}'
     """)}
 
 
@@ -104,6 +117,7 @@ def schema_signatures(conn):
             ("activities", "activity_id"))),
         "002": {"owner", "stage", "value_band"}.issubset(cols),
         "003": "facts" in cols,
+        "004": "contributor" in _activity_columns(conn),
     }
 
 

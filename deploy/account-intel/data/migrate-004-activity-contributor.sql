@@ -1,0 +1,46 @@
+-- Migration 004: contributor attribution on activities (matches schema.sql as of 2026-09-01).
+-- Additive and nullable — no rewrite, no lock beyond the catalog update, and no behaviour change
+-- for existing callers or existing rows.
+--
+-- Why: until now every activity was written by the client's own team through the seeding path,
+-- so "who recorded this" was answered by the fact that it was in the book at all. A promoted
+-- note is different — one named person chose those exact bytes and asked for them to be shared —
+-- and evidence that cannot say who contributed it is evidence a reader cannot weigh.
+--
+-- NULL is the honest value for every row that already exists: the team recorded it, and nobody
+-- individual claimed it. A reader must render that as unattributed rather than inventing an
+-- author, which is why the column is nullable rather than defaulted.
+--
+-- This does NOT make the table writable by anything new. Whether an activity may be appended at
+-- all is decided by `POST /append_activity` and its separate append-authority identity map; this
+-- migration only gives that route somewhere truthful to record attribution.
+--
+-- Apply once per live DB:
+--   docker exec -i <account-db-container> psql -U postgres -d accounts < migrate-004-activity-contributor.sql
+BEGIN;
+ALTER TABLE activities ADD COLUMN IF NOT EXISTS contributor TEXT;
+COMMIT;
+
+-- Verify:
+--   \d activities                                              -- contributor present, nullable
+--   SELECT count(*) FROM activities WHERE contributor IS NOT NULL;  -- 0 until a note is promoted
+--
+-- ROLLBACK — AND WHY THE COLUMN IS NOT THE THING TO ROLL BACK.
+--
+-- Once any note has been promoted, `contributor` holds the only record of who chose those words.
+-- Dropping it does not undo the promotion; it strips the attribution off evidence that stays in
+-- the book, leaving a shared note nobody is accountable for. That is worse than the state the
+-- rollback was reaching for.
+--
+-- So a rollback removes the AUTHORITY, not the column:
+--
+--   1. remove the append token from the append identity map (hot-reloaded; no restart), which
+--      makes every POST /append_activity 401 immediately;
+--   2. revert `service.py` and restart, if the route itself must go;
+--   3. leave this column in place. It is additive and nullable, every existing reader ignores an
+--      unknown field, and no code path requires it to be populated.
+--
+-- Drop it ONLY if an operator has proved there is nothing to lose and accepts the schema change:
+--
+--   SELECT count(*) FROM activities WHERE contributor IS NOT NULL;   -- must be 0
+--   ALTER TABLE activities DROP COLUMN contributor;                  -- destroys attribution

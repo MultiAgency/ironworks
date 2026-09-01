@@ -12,6 +12,7 @@ Both are small, both are security-relevant, and both used to be one line each in
 
 Import from `service.py`; test with `python3 test_service_guards.py`, which needs nothing.
 """
+import datetime
 import uuid
 
 
@@ -111,3 +112,121 @@ def insecure_mode(st_mode):
     outage of every tenant at once."""
     bad = st_mode & 0o077
     return st_mode & 0o777 if bad else None
+
+
+# ── the shared-note append boundary (#promotion) ────────────────────────────────────────────
+#
+# Every rule below is here rather than inside the Flask handler for the reason this module
+# exists: a rule that cannot be tested without flask, psycopg and a database is a rule nothing
+# tests. The route is wiring; these are the decisions.
+
+#: Promoted activities live in their own id namespace so an append can never land on, or collide
+#: with, an id the client's team authored (`NW-INT-01`, `HF-A1`, `FL-107-A1`). The append route is
+#: the only writer of activities and it may only write here, which means a bug in the caller's id
+#: derivation cannot reach a team-recorded row.
+SHARED_ACTIVITY_PREFIX = "share-"
+
+#: The one `kind` this route writes. Fixed server-side, never taken from the request: a caller
+#: choosing the kind could disguise a promoted note as a call the team logged.
+SHARED_ACTIVITY_KIND = "shared-note"
+
+#: A transport bound, not a content rule. The seam caps a note far shorter (2000 bytes); this
+#: exists only so an unbounded body cannot be pushed into a column, and it deliberately says
+#: nothing about what the note may contain.
+MAX_SHARED_BODY_BYTES = 8000
+MAX_ID_BYTES = 128
+
+
+class AppendRequestError(ValueError):
+    """The request cannot be turned into an append. Carries the caller-facing reason code."""
+
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+def valid_contributor(value):
+    """The same controlled-principal grammar Rust's `ContributorId` enforces.
+
+    Lowercase ASCII, digits and `-`. Deliberately narrow and deliberately NOT applied to the
+    body: a contributor is an identifier this system mints and renders as attribution, while the
+    body is a person's own words and is not ours to constrain.
+    """
+    return (isinstance(value, str) and value != ""
+            and all(c.islower() and c.isascii() or c.isdigit() or c == "-" for c in value))
+
+
+def valid_date(value):
+    """`YYYY-MM-DD`, and a real calendar date. Rejects `2026-02-31` as well as `not-a-date`."""
+    if not isinstance(value, str) or len(value) != 10:
+        return False
+    try:
+        datetime.date.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _bounded_text(value, limit):
+    return isinstance(value, str) and value != "" and len(value.encode("utf-8")) <= limit
+
+
+def parse_append_request(payload):
+    """Validate one append request and return the fields the route will bind.
+
+    Raises [`AppendRequestError`] with a stable code. `expected_org` is validated for SHAPE here
+    and compared against the credential-resolved org by the caller — this function never sees a
+    token and so can never be the thing that decides an organization.
+    """
+    if not isinstance(payload, dict):
+        raise AppendRequestError("invalid_body")
+    activity_id = payload.get("activity_id")
+    account_id = payload.get("account_id")
+    occurred_at = payload.get("occurred_at")
+    body = payload.get("body")
+    contributor = payload.get("contributor")
+    expected_org = payload.get("expected_org")
+
+    if not _bounded_text(activity_id, MAX_ID_BYTES):
+        raise AppendRequestError("invalid_activity_id")
+    if not activity_id.startswith(SHARED_ACTIVITY_PREFIX):
+        # The namespace guard. This route is the only writer of activities, and confining it to
+        # ids it minted is what keeps a caller-side derivation bug away from a team-authored row.
+        raise AppendRequestError("activity_id_outside_shared_namespace")
+    if not _bounded_text(account_id, MAX_ID_BYTES):
+        raise AppendRequestError("invalid_account_id")
+    if not valid_date(occurred_at):
+        raise AppendRequestError("invalid_occurred_at")
+    if not _bounded_text(body, MAX_SHARED_BODY_BYTES):
+        raise AppendRequestError("invalid_body")
+    if not valid_contributor(contributor):
+        raise AppendRequestError("invalid_contributor")
+    if not _bounded_text(expected_org, MAX_ID_BYTES):
+        raise AppendRequestError("invalid_expected_org")
+    return {"activity_id": activity_id, "account_id": account_id, "occurred_at": occurred_at,
+            "body": body, "contributor": contributor, "expected_org": expected_org}
+
+
+def append_conflict(existing, wanted, resolved_org):
+    """The immutable-field comparison, as the name of the first field that differs or `None`.
+
+    Order is deliberate and stable, so a conflict names one reason rather than whichever the
+    dict happened to yield first. `kind` is included even though the route fixes it: a row whose
+    kind differs was written by something other than this route, and silently agreeing with it
+    would be the one case where a replay is not a replay.
+    """
+    for field, want in (
+        ("org_id", resolved_org),
+        ("account_id", wanted["account_id"]),
+        ("occurred_at", wanted["occurred_at"]),
+        ("kind", SHARED_ACTIVITY_KIND),
+        ("body", wanted["body"]),
+        ("contributor", wanted["contributor"]),
+    ):
+        got = existing.get(field)
+        # `occurred_at` arrives as a `datetime.date` from psycopg and as a string from a fake.
+        if isinstance(got, datetime.date):
+            got = got.isoformat()
+        if got != want:
+            return field
+    return None

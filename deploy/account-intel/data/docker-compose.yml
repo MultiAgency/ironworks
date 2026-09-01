@@ -50,6 +50,16 @@ services:
       # The DIRECTORY is mounted (not the file): atomic tmp+rename replaces the inode, and a
       # single-file bind would pin the old one.
       ACCOUNT_IDENTITIES_FILE: /identities/identities.json
+      # APPEND authority, in its OWN map. A token here may call POST /append_activity and
+      # nothing else; a token in the map above may read and NOT write. Purpose is separated by
+      # which file a token is in, never by a field inside one — the read map's validator refuses
+      # nested values, and that refusal is worth keeping.
+      #
+      # DELIBERATELY UNSET BY DEFAULT. No append map authorizes nobody, the service stays
+      # read-only, and readiness is unaffected. An operator opts in by creating this file; until
+      # they do, this deployment behaves exactly as it did before the route existed.
+      ACCOUNT_APPEND_IDENTITIES: '${ACCOUNT_APPEND_IDENTITIES:-}'
+      ACCOUNT_APPEND_IDENTITIES_FILE: '${ACCOUNT_APPEND_IDENTITIES_FILE:-}'
       PORT: "8443"
     volumes:
       # SCOPED mount: only deploy/account-intel — never the whole repo. This is the
