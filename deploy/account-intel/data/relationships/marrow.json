@@ -1,0 +1,29 @@
+{
+  "_synthetic": "SYNTHETIC RELATIONSHIP BOOK — invented organizations, people, dates and agreements, written from MultiAgency's own side of the table. Not a record of any real counterparty. The snapshot is taken at start of business on 2026-09-01. See relationships/README.md.",
+  "record_id": "MARROW-001",
+  "account": {
+    "name": "Marrow Bay Collective",
+    "domain": "marrow-bay.example",
+    "industry": "Supply-chain tooling",
+    "owner": "Ines Bardem",
+    "facts": {
+      "relationship_type": "introduction"
+    }
+  },
+  "contacts": [
+    {
+      "name": "Nell Achterberg",
+      "title": "Founder",
+      "engaged": false,
+      "notes": "The only named contact at Marrow Bay."
+    }
+  ],
+  "activities": [
+    {
+      "activity_id": "MARROW-A01",
+      "occurred_at": "2026-08-24",
+      "kind": "note",
+      "body": "Introduction from a mutual contact. Nell Achterberg (Founder) exchanged one message: Marrow Bay builds supply-chain tooling for small producers, and she asked what MultiAgency does. Nothing further is recorded and no call is booked."
+    }
+  ]
+}

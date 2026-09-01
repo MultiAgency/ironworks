@@ -1,0 +1,47 @@
+{
+  "_synthetic": "SYNTHETIC RELATIONSHIP BOOK — invented organizations, people, dates and agreements, written from MultiAgency's own side of the table. Not a record of any real counterparty. The snapshot is taken at start of business on 2026-09-01. See relationships/README.md.",
+  "record_id": "OSTARA-001",
+  "account": {
+    "name": "Ostara Foundation",
+    "domain": "ostara-foundation.example",
+    "industry": "Grantmaking",
+    "owner": "Ines Bardem",
+    "facts": {
+      "relationship_type": "allocation partner"
+    }
+  },
+  "contacts": [
+    {
+      "name": "Yusuf Nabil",
+      "title": "Programme Director",
+      "engaged": true,
+      "notes": "MultiAgency's counterpart for the allocation cycles."
+    }
+  ],
+  "activities": [
+    {
+      "activity_id": "OSTARA-A01",
+      "occurred_at": "2026-02-18",
+      "kind": "agreement",
+      "body": "Allocation framework agreed with Ostara Foundation. MultiAgency triages incoming proposals and submits a recommended allocation each quarter; Ostara reviews, confirms and funds. Cycles run quarterly."
+    },
+    {
+      "activity_id": "OSTARA-A02",
+      "occurred_at": "2026-03-30",
+      "kind": "decision",
+      "body": "Cycle 1 recommendations submitted to Yusuf Nabil."
+    },
+    {
+      "activity_id": "OSTARA-A03",
+      "occurred_at": "2026-04-22",
+      "kind": "note",
+      "body": "Ostara confirmed cycle 1 funding, 23 days after the recommendations were submitted. Yusuf Nabil noted that the review had been straightforward."
+    },
+    {
+      "activity_id": "OSTARA-A04",
+      "occurred_at": "2026-06-27",
+      "kind": "decision",
+      "body": "Cycle 2 recommendations submitted to Yusuf Nabil. No confirmation has been received."
+    }
+  ]
+}

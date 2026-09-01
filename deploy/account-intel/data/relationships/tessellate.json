@@ -1,0 +1,47 @@
+{
+  "_synthetic": "SYNTHETIC RELATIONSHIP BOOK — invented organizations, people, dates and agreements, written from MultiAgency's own side of the table. Not a record of any real counterparty. The snapshot is taken at start of business on 2026-09-01. See relationships/README.md.",
+  "record_id": "TESS-001",
+  "account": {
+    "name": "Tessellate Works",
+    "domain": "tessellate-works.example",
+    "industry": "Print and packaging",
+    "owner": "Ines Bardem",
+    "facts": {
+      "relationship_type": "build engagement"
+    }
+  },
+  "contacts": [
+    {
+      "name": "Owen Rask",
+      "title": "Engineering Lead",
+      "engaged": true,
+      "notes": "MultiAgency's technical counterpart on the build."
+    }
+  ],
+  "activities": [
+    {
+      "activity_id": "TESS-A01",
+      "occurred_at": "2026-05-30",
+      "kind": "agreement",
+      "body": "Build engagement signed. Single deliverable: one agent serving Tessellate's support group. An acceptance review is scheduled for 2026-09-15, at which the deliverable is accepted or returned for rework."
+    },
+    {
+      "activity_id": "TESS-A02",
+      "occurred_at": "2026-06-18",
+      "kind": "decision",
+      "body": "Architecture agreed at a working session with Owen Rask."
+    },
+    {
+      "activity_id": "TESS-A03",
+      "occurred_at": "2026-07-21",
+      "kind": "note",
+      "body": "Staging instance running. Tessellate's support team is testing against it."
+    },
+    {
+      "activity_id": "TESS-A04",
+      "occurred_at": "2026-08-28",
+      "kind": "call",
+      "body": "Owen Rask reports that testing is going well and asked whether the acceptance review could be moved a week earlier. No answer was given on the call; the scheduled date is unchanged."
+    }
+  ]
+}

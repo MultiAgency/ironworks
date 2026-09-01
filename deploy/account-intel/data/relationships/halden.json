@@ -1,0 +1,59 @@
+{
+  "_synthetic": "SYNTHETIC RELATIONSHIP BOOK — invented organizations, people, dates and agreements, written from MultiAgency's own side of the table. Not a record of any real counterparty. The snapshot is taken at start of business on 2026-09-01. See relationships/README.md.",
+  "record_id": "HALDEN-001",
+  "account": {
+    "name": "Halden & Roe",
+    "domain": "halden-roe.example",
+    "industry": "Professional services",
+    "owner": "Ines Bardem",
+    "facts": {
+      "relationship_type": "running engagement"
+    }
+  },
+  "contacts": [
+    {
+      "name": "Marta Okonjo",
+      "title": "Head of Delivery",
+      "engaged": true,
+      "notes": "Owns Halden & Roe's side of delivery."
+    },
+    {
+      "name": "Tomas Brandt",
+      "title": "Platform Lead",
+      "engaged": true,
+      "notes": "Responsible for the platform the agent runs on."
+    }
+  ],
+  "activities": [
+    {
+      "activity_id": "HALDEN-A01",
+      "occurred_at": "2026-03-05",
+      "kind": "meeting",
+      "body": "Kickoff with Halden & Roe. Marta Okonjo (Head of Delivery) was named as the person who signs off each release of the agent before it reaches their staff."
+    },
+    {
+      "activity_id": "HALDEN-A02",
+      "occurred_at": "2026-05-21",
+      "kind": "note",
+      "body": "Note taken by Ines Bardem on the delivery call: release sign-off has moved to Tomas Brandt (Platform Lead), 'per Marta'."
+    },
+    {
+      "activity_id": "HALDEN-A03",
+      "occurred_at": "2026-05-21",
+      "kind": "email",
+      "body": "Forwarded message from Marta Okonjo's office: release sign-off remains with Marta until the platform team is fully staffed, and Tomas Brandt is not authorised to approve releases in the interim."
+    },
+    {
+      "activity_id": "HALDEN-A04",
+      "occurred_at": "2026-07-02",
+      "kind": "note",
+      "body": "A release reached Halden & Roe staff after being marked approved in their own ticket system. The ticket records no approver name."
+    },
+    {
+      "activity_id": "HALDEN-A05",
+      "occurred_at": "2026-08-15",
+      "kind": "meeting",
+      "body": "Quarterly check-in with Marta Okonjo and Tomas Brandt. Delivery is on track. Release sign-off was not discussed."
+    }
+  ]
+}

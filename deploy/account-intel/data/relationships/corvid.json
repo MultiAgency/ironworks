@@ -1,0 +1,41 @@
+{
+  "_synthetic": "SYNTHETIC RELATIONSHIP BOOK — invented organizations, people, dates and agreements, written from MultiAgency's own side of the table. Not a record of any real counterparty. The snapshot is taken at start of business on 2026-09-01. See relationships/README.md.",
+  "record_id": "CORVID-001",
+  "account": {
+    "name": "Corvid Systems",
+    "domain": "corvid-systems.example",
+    "industry": "Industrial automation",
+    "owner": "Rosa Whitfield",
+    "facts": {
+      "relationship_type": "closed engagement"
+    }
+  },
+  "contacts": [
+    {
+      "name": "Aled Ferris",
+      "title": "Chief Technology Officer",
+      "engaged": false,
+      "notes": "Commissioned the discovery engagement."
+    }
+  ],
+  "activities": [
+    {
+      "activity_id": "CORVID-A01",
+      "occurred_at": "2026-01-14",
+      "kind": "agreement",
+      "body": "One-off discovery engagement agreed with Aled Ferris (Chief Technology Officer). Single deliverable: a written assessment of where an agent would and would not help Corvid's maintenance desk. No ongoing operation and no further deliverables."
+    },
+    {
+      "activity_id": "CORVID-A02",
+      "occurred_at": "2026-02-06",
+      "kind": "report",
+      "body": "Discovery assessment delivered to Aled Ferris."
+    },
+    {
+      "activity_id": "CORVID-A03",
+      "occurred_at": "2026-02-27",
+      "kind": "note",
+      "body": "Aled Ferris confirmed the engagement is complete and closed by agreement. Nothing is outstanding on either side. Both sides agreed there is no scheduled follow-up and that Corvid will make contact if a build follows."
+    }
+  ]
+}

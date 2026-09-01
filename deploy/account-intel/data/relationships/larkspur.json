@@ -1,0 +1,71 @@
+{
+  "_synthetic": "SYNTHETIC RELATIONSHIP BOOK — invented organizations, people, dates and agreements, written from MultiAgency's own side of the table. Not a record of any real counterparty. The snapshot is taken at start of business on 2026-09-01. See relationships/README.md.",
+  "record_id": "LARK-001",
+  "account": {
+    "name": "Larkspur Provisioning Co.",
+    "domain": "larkspur-provisioning.example",
+    "industry": "Logistics software",
+    "owner": "Rosa Whitfield",
+    "facts": {
+      "relationship_type": "running engagement"
+    }
+  },
+  "contacts": [
+    {
+      "name": "Priya Anand",
+      "title": "Chief Operating Officer",
+      "engaged": true,
+      "notes": "The sponsor for scope questions."
+    },
+    {
+      "name": "Del Moreau",
+      "title": "Support Lead",
+      "engaged": true,
+      "notes": "Day-to-day operational contact."
+    }
+  ],
+  "activities": [
+    {
+      "activity_id": "LARK-A01",
+      "occurred_at": "2026-02-10",
+      "kind": "agreement",
+      "body": "Engagement letter signed by Priya Anand (Chief Operating Officer). Scope: one agent serving one Larkspur channel, operated by MultiAgency. Reporting: an operating report is due by close of business on the first day of each month, beginning 2026-03-01. No other deliverables are named."
+    },
+    {
+      "activity_id": "LARK-A02",
+      "occurred_at": "2026-03-02",
+      "kind": "report",
+      "body": "Operating report for the first period delivered to Priya Anand and Del Moreau. Covered availability, message volume and two configuration changes."
+    },
+    {
+      "activity_id": "LARK-A03",
+      "occurred_at": "2026-04-01",
+      "kind": "report",
+      "body": "Second monthly operating report delivered on the due date."
+    },
+    {
+      "activity_id": "LARK-A04",
+      "occurred_at": "2026-05-04",
+      "kind": "report",
+      "body": "Third monthly operating report delivered three days after the due date. Del Moreau acknowledged receipt and raised no issue with the delay."
+    },
+    {
+      "activity_id": "LARK-A05",
+      "occurred_at": "2026-06-02",
+      "kind": "report",
+      "body": "Fourth monthly operating report delivered."
+    },
+    {
+      "activity_id": "LARK-A06",
+      "occurred_at": "2026-07-14",
+      "kind": "call",
+      "body": "Call with Priya Anand. She said Larkspur wants a second channel added for the warehouse team and that this is agreed on their side: 'go ahead and stand it up, we'll square the paperwork.' No amendment to the engagement letter has been received."
+    },
+    {
+      "activity_id": "LARK-A07",
+      "occurred_at": "2026-08-06",
+      "kind": "note",
+      "body": "The second channel is live for the warehouse team. Standing it up followed the 14 July call; the signed engagement letter still describes one channel."
+    }
+  ]
+}

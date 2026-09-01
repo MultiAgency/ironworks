@@ -1,0 +1,53 @@
+{
+  "_synthetic": "SYNTHETIC RELATIONSHIP BOOK — invented organizations, people, dates and agreements, written from MultiAgency's own side of the table. Not a record of any real counterparty. The snapshot is taken at start of business on 2026-09-01. See relationships/README.md.",
+  "record_id": "VIREO-001",
+  "account": {
+    "name": "Vireo Grid",
+    "domain": "vireo-grid.example",
+    "industry": "Energy data services",
+    "owner": "Rosa Whitfield",
+    "facts": {
+      "relationship_type": "running engagement"
+    }
+  },
+  "contacts": [
+    {
+      "name": "Sam Delacroix",
+      "title": "Director of Operations",
+      "engaged": true,
+      "notes": "Leads Vireo's side of the engagement and of the quarterly review."
+    }
+  ],
+  "activities": [
+    {
+      "activity_id": "VIREO-A01",
+      "occurred_at": "2026-01-20",
+      "kind": "agreement",
+      "body": "Services agreement signed by Sam Delacroix (Director of Operations). Scope: two agents — an operations desk agent and a field reporting agent — each in its own channel. Governance: a quarterly review with MultiAgency."
+    },
+    {
+      "activity_id": "VIREO-A02",
+      "occurred_at": "2026-04-08",
+      "kind": "meeting",
+      "body": "Q1 review held with Sam Delacroix. Both agents in production. No scope change was requested and no actions were recorded."
+    },
+    {
+      "activity_id": "VIREO-A03",
+      "occurred_at": "2026-06-11",
+      "kind": "decision",
+      "body": "Signed amendment received. Scope reduced from two agents to one: the field reporting agent is retired, effective 2026-07-01. Reason recorded by Vireo: the field team was reorganised."
+    },
+    {
+      "activity_id": "VIREO-A04",
+      "occurred_at": "2026-07-09",
+      "kind": "meeting",
+      "body": "Q2 review held. One agent in production. Sam Delacroix asked whether the field reporting agent could be restored later in the year. No decision was taken at the review."
+    },
+    {
+      "activity_id": "VIREO-A05",
+      "occurred_at": "2026-08-19",
+      "kind": "decision",
+      "body": "Signed amendment received restoring the field reporting agent, effective 2026-09-01. Scope returns to two agents."
+    }
+  ]
+}

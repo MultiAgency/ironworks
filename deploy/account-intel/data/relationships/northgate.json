@@ -1,0 +1,53 @@
+{
+  "_synthetic": "SYNTHETIC RELATIONSHIP BOOK — invented organizations, people, dates and agreements, written from MultiAgency's own side of the table. Not a record of any real counterparty. The snapshot is taken at start of business on 2026-09-01. See relationships/README.md.",
+  "record_id": "NORTH-001",
+  "account": {
+    "name": "Northgate Mutual",
+    "domain": "northgate-mutual.example",
+    "industry": "Mutual insurance",
+    "owner": "Rosa Whitfield",
+    "facts": {
+      "relationship_type": "prospective partner"
+    }
+  },
+  "contacts": [
+    {
+      "name": "Dana Iyer",
+      "title": "Head of Operations",
+      "engaged": false,
+      "notes": "The original sponsor for the pilot proposal."
+    }
+  ],
+  "activities": [
+    {
+      "activity_id": "NORTH-A01",
+      "occurred_at": "2026-04-02",
+      "kind": "call",
+      "body": "Exploratory call with Dana Iyer (Head of Operations). She described an internal approvals bottleneck: claims adjustments wait on a small number of named approvers."
+    },
+    {
+      "activity_id": "NORTH-A02",
+      "occurred_at": "2026-04-29",
+      "kind": "note",
+      "body": "Proposal sent for a single-agent pilot on the approvals queue."
+    },
+    {
+      "activity_id": "NORTH-A03",
+      "occurred_at": "2026-05-15",
+      "kind": "meeting",
+      "body": "Dana Iyer presented the proposal to Northgate's operations committee. She reported the feedback as positive. No decision was recorded at the committee and none has reached us in writing."
+    },
+    {
+      "activity_id": "NORTH-A04",
+      "occurred_at": "2026-06-24",
+      "kind": "call",
+      "body": "Dana Iyer said budget for the pilot 'should land next cycle'. She did not name a cycle or a date."
+    },
+    {
+      "activity_id": "NORTH-A05",
+      "occurred_at": "2026-07-30",
+      "kind": "note",
+      "body": "Dana Iyer has left Northgate Mutual. No successor sponsor has been named to us."
+    }
+  ]
+}
