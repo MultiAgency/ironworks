@@ -105,6 +105,30 @@ fleet_json() { python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 # `shlex.quote` for the same reason `fleet_json` exists: escaping rules belong in one place.
 fleet_sh_quote() { python3 -c 'import shlex,sys;print(shlex.quote(sys.argv[1]))' "$1"; }
 
+# fleet_bot_token_file <slug> — where this agent's Telegram bot token lives.
+# fleet_bot_token      <slug> — that token, whitespace stripped. Non-zero when there is no file.
+#
+# TWO READERS DISAGREED ABOUT BOTH HALVES. `doctor.sh` honoured `MULTRON_TOKEN_DIR` and stripped
+# whitespace (`tr -d '[:space:]'`); `enable-device-link.sh` did neither — it hardcoded
+# `$FLEET_AGENCY_DIR/$SLUG.token` and `cat`-ed it raw. So on a host that relocates the token
+# directory the second one read a file that was not there, and a token file written with a
+# trailing newline (which is what `echo … > file` produces, and how these are made by hand)
+# built `https://api.telegram.org/bot<token>\n/setWebhook` — a URL that fails in a way that
+# looks like a bad token rather than a bad read.
+#
+# Stripping ALL whitespace, not just trailing: a Telegram bot token is `<digits>:<base64ish>` and
+# contains none, so anything whitespace-shaped in that file is an artefact of how it was written.
+fleet_bot_token_file() {
+  printf '%s\n' "${MULTRON_TOKEN_DIR:-$FLEET_AGENCY_DIR}/$1.token"
+}
+
+fleet_bot_token() {
+  local _f
+  _f="$(fleet_bot_token_file "$1")"
+  [ -f "$_f" ] || return 1
+  tr -d '[:space:]' < "$_f"
+}
+
 # fleet_slug <display-text> — the slug a display name derives to. Lowercased, every run of
 # non-alphanumerics collapsed to one `-`, no leading or trailing `-`.
 #

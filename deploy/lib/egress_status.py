@@ -38,6 +38,7 @@ import subprocess
 import time
 
 from agency_paths import agency_dir
+from compose_env import placeholder_env
 from private_state import write_private
 
 RUNNING, VERIFIED, FAILED, BLOCKED = "RUNNING", "VERIFIED", "FAILED", "BLOCKED"
@@ -521,8 +522,11 @@ def overlay_configured(repo_root):
     base = pathlib.Path(repo_root) / "multi" / "instance" / "docker-compose.yml"
     if not overlay.is_file():
         return False, f"{overlay} is missing"
-    env = {**os.environ, "PGPW": "x", "MASTER_KEY": "x", "WEBUI_TOKEN": "x",
-           "WEBUI_USER": "x", "NEARAI_API_KEY": "x"}
+    # DERIVED from the two files being validated, not listed here. The hand-written set this
+    # replaces named five variables where `run-quality.py`'s named nine, so a new `${VAR:?}` in
+    # the overlay would have made this report the boundary UNCONFIGURED while the quality gate
+    # went on passing.
+    env = placeholder_env(base, overlay, base=os.environ)
     try:
         p = subprocess.run(["docker", "compose", "-f", str(base), "-f", str(overlay),
                             "config", "-q"], capture_output=True, text=True, timeout=60, env=env)

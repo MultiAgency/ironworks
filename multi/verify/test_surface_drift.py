@@ -35,7 +35,7 @@ import re
 import sys
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-from common import Checks, get, post, text_of, model_pin  # noqa: E402
+from common import Checks, get, post, text_of, model_pin, members  # noqa: E402
 
 sys.path.insert(0, str(ROOT / "deploy/lib"))
 from tool_surface import parse_catalog  # noqa: E402  the same fail-closed reader confinement uses
@@ -80,12 +80,9 @@ def canon(name):
     return re.sub(r"[._]+", ".", name.strip()).strip(".")
 
 
-def a_member():
-    import context_ingress as ing
-    clients = ing.load_clients()
-    if not clients:
-        return None
-    return sorted(clients.values(), key=lambda c: c.slug)[0]
+def a_member(block=None):
+    picked = members(1, block, "surface drift")
+    return picked[0] if picked else None
 
 
 checks = Checks()

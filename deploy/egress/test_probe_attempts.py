@@ -12,8 +12,9 @@ Three entries in `forbidden-destinations.json` asserted a negative against an ad
 never have been reached from anywhere — two `127.0.0.1` legs that named the runtime's own
 loopback instead of the docker host, and a `host.docker.internal` leg that failed at DNS. Each
 returned "blocked" against a container with completely unrestricted egress and was counted into
-the assertion total written to the stamp. `measurable()` is the line those fell on the wrong
-side of.
+the assertion total written to the stamp. `classify()` is the line those fall on the wrong side
+of — it was called `measurable()` when this header was written, and the two-outcome design that
+name belonged to is gone.
 """
 import errno
 import json
@@ -24,7 +25,9 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
-import probe_attempts as pa  # noqa: E402
+import probe_attempts as pa
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "lib"))
+from egress_destinations import load_forbidden_destinations
 
 HERE = pathlib.Path(__file__).resolve().parent
 
@@ -82,10 +85,10 @@ class Classify(unittest.TestCase):
         requiring a handshake to assert at all would drop `10.0.0.1:8443` and `172.16.0.1:80` —
         which name ranges, not services — from the probe entirely on every ordinary host. They
         stay asserted, because a REACHED there is a genuine failure; they are not evidence."""
-        shell = (HERE / "probe-egress.sh").read_text()
-        self.assertIn("proves=pair in DISCRIMINATING", shell,
+        contained = (HERE / "probe_contained.py").read_text()
+        self.assertIn("proves=pair in DISCRIMINATING", contained,
                       "the contained probe no longer distinguishes evidence from corroboration")
-        self.assertIn("corroborating.append", shell,
+        self.assertIn("corroborating.append", contained,
                       "corroborating legs are not being retained as assertions")
 
     def test_a_name_that_does_not_resolve_is_UNMEASURABLE(self):
@@ -104,9 +107,31 @@ class Classify(unittest.TestCase):
     def test_the_run_refuses_to_stamp_when_nothing_discriminates(self):
         """A host whose own outbound is firewalled times out everywhere, so every forbidden leg
         passes for the wrong reason. That run has measured the gateway and nothing else."""
-        shell = (HERE / "probe-egress.sh").read_text()
-        self.assertIn("if not DISCRIMINATING:", shell,
+        contained = (HERE / "probe_contained.py").read_text()
+        self.assertIn("if not DISCRIMINATING:", contained,
                       "a run in which no forbidden leg can discriminate would still stamp")
+
+
+    def test_the_contained_probe_is_a_file_the_gates_can_see(self):
+        """WHY THE TWO ASSERTIONS ABOVE READ `probe_contained.py` AND NOT THE SHELL. That logic
+        was 157 lines inside `python3 -c '...'` in probe-egress.sh, so the only way to assert
+        anything about it was to grep the shell script — which is why they do. It is a file now:
+        ruff sees it, the whitespace gate sees it, and a stray apostrophe is a syntax error at
+        edit time rather than a shell parse error during a security probe.
+
+        These remain SOURCE greps rather than behavioural tests, and that is a real limit worth
+        stating: `probe_contained.py` runs at module scope, so importing it would run the probe.
+        Turning it into functions with a `main()` is the next step and was deliberately not taken
+        in the same change that moved it, because the move was verified by byte-diffing its
+        output against the inlined original across six input shapes — a restructure would have
+        given that diff nothing to compare."""
+        contained = HERE / "probe_contained.py"
+        self.assertTrue(contained.is_file(), "the contained probe went back inside the shell")
+        shell = (HERE / "probe-egress.sh").read_text()
+        self.assertIn('exec(os.environ["PROBE_SRC"])', shell,
+                      "the probe source no longer travels as env data")
+        self.assertNotIn("python3 -c '\nimport json", shell,
+                         "a python block is inlined in the shell again")
 
 
 class Manifest(unittest.TestCase):
@@ -125,12 +150,10 @@ class Manifest(unittest.TestCase):
             "runtime's own — it can never reach the docker host and the leg proves nothing")
 
     def test_every_destination_carries_a_label_and_a_port(self):
-        doc = json.loads((HERE / "forbidden-destinations.json").read_text())
-        self.assertTrue(doc["destinations"], "an empty forbidden list asserts nothing")
-        for d in doc["destinations"]:
-            self.assertTrue(d.get("label"), d)
-            self.assertIsInstance(d.get("port"), int, d)
-            self.assertTrue(d.get("host"), d)
+        """Through the shared reader — a third restatement of the schema is a third thing that
+        can drift from the loader the probes run."""
+        self.assertTrue(load_forbidden_destinations(HERE.parents[1]),
+                        "an empty forbidden list asserts nothing")
 
 
 if __name__ == "__main__":

@@ -9,3 +9,29 @@ After=docker.service
 Type=oneshot
 User=multi
 ExecStart=/opt/ironworks/multi/serve/multi-backup.sh
+
+# SANDBOXING. This unit had none at all, beside a sibling (bridge.service) that goes to some
+# length — a difference that was never a decision, just two files written at different times.
+# This process holds real authority: RESTIC_PASSWORD, and it reads every tenant's database and
+# ~/.agency wholesale
+#
+# NOT `ProtectSystem=strict` and NOT `ProtectHome`, and the difference from bridge.service is
+# the reason rather than an oversight. The bridge talks to an HTTP API and reads one directory;
+# this script needs the docker socket under /run, writes state under ~/.agency, and shells out to
+# restic, pg_dump and mktemp.
+# `strict` remounts everything read-only and `ProtectHome` hides the directory this reads its
+# own configuration from, so both would break it. `full` still makes /usr, /boot and /etc
+# read-only, which is what a shell script running as `multi` has no business writing to.
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+# AGENCY_DIR pinned the way bridge.service pins it, and for the same reason: systemd does not
+# inherit a login shell's environment, so without this the unit and an operator shell that has
+# relocated the state root disagree about where it is — silently, in the direction of backing up
+# or watching the wrong tree.
+Environment=AGENCY_DIR=/home/multi/.agency
+WorkingDirectory=/opt/ironworks

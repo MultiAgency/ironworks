@@ -128,9 +128,10 @@ def test_speaker_display_name_cannot_forge_envelope_lines():
 
 
 def test_recorded_team_fields_reach_the_model():
-    """owner/stage/value_band are RECORDED team facts (the handoff contract's source of truth,
-    added to the schema later) — if the envelope drops them the analyst re-derives, or
-    invents, what the team already wrote down. domain/updated_at likewise: identity and staleness."""
+    """owner/stage/value_band are RECORDED team facts (added to the schema by
+    migrate-002-handoff-fields.sql, which outlived the unwired module it was named for) — if the
+    envelope drops them the analyst re-derives, or invents, what the team already wrote down.
+    domain/updated_at likewise: identity and staleness."""
     ctx = {"record_id": "NW-001",
            "account": {"name": "Northwind", "domain": "nw.example", "owner": "Dana",
                        "stage": "discovery", "value_band": "mid", "budget": "approved",

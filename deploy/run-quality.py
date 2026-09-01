@@ -113,29 +113,80 @@ def pipefail_substitution_guard(shell_files):
     return hits, unreadable
 
 
-def tracked(*patterns):
-    """Paths matching `patterns`, from git — or `None` if git itself could not answer.
+def blocked_no_file_list(record, label):
+    """Record `label` as BLOCKED for the one condition all three sections can hit — `git
+    ls-files` did not answer — and SAY SO on stderr.
+
+    Three sibling sections handled this identically-shaped case three different ways: one printed
+    a diagnostic, two recorded BLOCKED silently. A bare `BLOCKED  JavaScript syntax` row with no
+    reason is exactly what `emit()`'s own comment argues against one screen further down ("a count
+    of blocked checks that does not say WHICH reads as a rounding error") — naming the check but
+    not the cause leaves the reader in the same place."""
+    print(f"\nBLOCKED: {label}: `git ls-files` failed — the file list could not be obtained, so "
+          "nothing was checked. Is this a git repository with a readable index?", file=sys.stderr)
+    record(label, BLOCKED)
+
+
+def _git_files(args, patterns):
+    """`git ls-files` for one argument set, or None if git itself could not answer.
 
     `check=True` made a git failure (not a repository, a broken index) a CalledProcessError out
-    of a helper every section calls, with the same consequence as the read above: no verdict at
-    all, where "the file list could not be obtained" is a perfectly reportable BLOCKED."""
+    of a helper every section calls, with the same consequence as an unguarded read: no verdict
+    at all, where "the file list could not be obtained" is a perfectly reportable BLOCKED."""
     try:
-        result = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard",
-                                 "-z", "--", *patterns], cwd=ROOT, capture_output=True,
-                                check=True)
+        result = subprocess.run(["git", "ls-files", *args, "-z", "--", *patterns],
+                                cwd=ROOT, capture_output=True, check=True)
     except (subprocess.CalledProcessError, FileNotFoundError):
         return None
     return [ROOT / p.decode() for p in result.stdout.split(b"\0") if p]
 
 
+def tracked(*patterns):
+    """What SHIPS: tracked plus untracked-and-not-ignored. The right set for repository hygiene."""
+    return _git_files(["--cached", "--others", "--exclude-standard"], patterns)
+
+
+def present(*patterns):
+    """What RUNS ON THIS MACHINE: `tracked()` plus the ignored files that are actually here.
+
+    THE TWO QUESTIONS ARE NOT THE SAME, and the linter was asking the wrong one. `.gitignore`
+    excludes operator-workstation tooling on a stated principle — "Fleet operation ships
+    (multi/serve/); tooling for one machine does not. The audience decides, not the content."
+    That is a sound rule about DISTRIBUTION, and it had quietly decided something else as well:
+    `shell_checks` enumerated with `tracked()`, so `deploy/repoint-hostname.sh` and
+    `deploy/backup-laptop-agency.sh` — live scripts that source `deploy/lib`, hold a Cloudflare
+    token and a bot token, and run against real infrastructure — were parsed, shellchecked and
+    pipefail-guarded by nothing at all, on the one machine that runs them.
+    "Do not ship it" and "do not check it" are different decisions and only the first was made.
+
+    Costs nothing in CI: a fresh checkout has no ignored files, so this returns exactly what
+    `tracked()` does there. The coverage appears precisely where the risk does.
+
+    NOT used for the whitespace guard, deliberately — that one is about the bytes this
+    repository publishes, which is `tracked()`'s question by definition.
+
+    NOT used for `js_checks` either, and that is a judgement rather than an oversight: the
+    ignored `*.sh` set is exactly two files, each named individually in `.gitignore`, while the
+    ignored `*.js` set on a machine that has ever run `npm install` is `node_modules` — thousands
+    of files nobody here wrote. `*.sh` is safe to widen because this repository ignores shell
+    scripts one at a time and for a stated reason; nothing else it ignores has that property.
+    """
+    shipped = tracked(*patterns)
+    ignored = _git_files(["--others", "--ignored", "--exclude-standard"], patterns)
+    if shipped is None or ignored is None:
+        return None
+    seen = {p: None for p in shipped}          # order-preserving union; git can list a path twice
+    seen.update({p: None for p in ignored})
+    return list(seen)
+
+
 # Placeholders, not secrets: `docker compose config` only has to interpolate, and every one of
-# these is a `${VAR:?}` the files refuse to start without.
-COMPOSE_ENV = {"PGPW": "quality-placeholder", "MASTER_KEY": "quality-placeholder",
-               "WEBUI_TOKEN": "quality-placeholder", "WEBUI_USER": "quality-placeholder",
-               "NEARAI_API_KEY": "quality-placeholder",
-               "ACCOUNT_DB_PASSWORD": "quality-placeholder",
-               "PROOF_PGPW": "quality-placeholder", "PROOF_MASTER_KEY": "quality-placeholder",
-               "PROOF_WEBUI_TOKEN": "quality-placeholder"}
+# these is a `${VAR:?}` the files refuse to start without. The SET is derived from the files
+# themselves (deploy/lib/compose_env.py) rather than listed twice — this list and
+# `egress_status.overlay_configured`'s had already drifted by four variables.
+sys.path.insert(0, str(ROOT / "deploy" / "lib"))
+from compose_env import placeholder_env  # noqa: E402
+
 COMPOSE_STACKS = (("multi/instance/docker-compose.yml",),
                   ("multi/instance/docker-compose.yml",
                    "deploy/egress/docker-compose.egress.yml"),
@@ -152,7 +203,8 @@ def compose_checks():
     if not shutil.which("docker"):
         print("\n== compose configuration ==\nBLOCKED: docker is not installed", file=sys.stderr)
         return [("compose configuration", BLOCKED)]
-    env = {**os.environ, **COMPOSE_ENV}
+    env = placeholder_env(*(ROOT / f for stack in COMPOSE_STACKS for f in stack),
+                          base=os.environ)
     rows = []
     for files in COMPOSE_STACKS:
         command = ["docker", "compose"]
@@ -195,11 +247,11 @@ def shell_checks(check, record):
     Split out of `main` with `js_checks` below because handling "git could not answer" and "the
     file is not on disk" as VERDICTS rather than as tracebacks is several branches, and `main`
     is a list of sections, not a place for them."""
-    shell_files = tracked("*.sh")
+    # `present`, not `tracked`: a linter's question is "what runs here", not "what ships".
+    # See that function for the two ignored operator scripts this brings into the gate.
+    shell_files = present("*.sh")
     if shell_files is None:
-        print("\nBLOCKED: `git ls-files` failed — the shell file list could not be obtained",
-              file=sys.stderr)
-        record("shell checks", BLOCKED)
+        blocked_no_file_list(record, "shell checks")
         return
     for path in shell_files:
         check(f"bash syntax: {_rel(path)}", ["bash", "-n", str(path)])
@@ -225,7 +277,7 @@ def js_checks(check, record):
     could-not-read rule as the shell files above."""
     js_files = tracked("*.js", "*.mjs")
     if js_files is None:
-        record("JavaScript syntax", BLOCKED)
+        blocked_no_file_list(record, "JavaScript syntax")
         return
     for path in js_files:
         try:
@@ -271,7 +323,7 @@ def whitespace_residue_guard(record):
     """
     files = tracked("*")
     if files is None:
-        record("whitespace residue", BLOCKED)
+        blocked_no_file_list(record, "whitespace residue")
         return
     hits, unreadable = [], []
     for path in files:

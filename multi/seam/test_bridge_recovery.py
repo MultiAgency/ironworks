@@ -323,10 +323,10 @@ def test_b12_a_RECOVERY_BLOCKED_row_survives_compaction():
     d, db = _tmp()
     st = bs.BridgeState(db)
     st.note_received(1000, GID, 1000)
-    st.note_terminal(1000, bs.RECOVERY_BLOCKED, 1001, "turn_outcome_unknown")
+    st.note_terminal(1000, bs.RECOVERY_BLOCKED, "turn_outcome_unknown")
     for uid in range(1001, 1600):
         st.note_received(uid, GID, uid)
-        st.note_terminal(uid, bs.IGNORED, uid + 1)
+        st.note_terminal(uid, bs.IGNORED)
     st.mark_cursor_acked()
     st.compact()
     row = st.update_row(1000)

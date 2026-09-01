@@ -42,8 +42,6 @@ try:
 except ImportError:  # direct-script compatibility
     from resources import resource_root
 
-_ROOT = resource_root()
-
 
 class PinError(RuntimeError):
     """A pin file is missing, unreadable, or names nothing."""

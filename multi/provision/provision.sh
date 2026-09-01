@@ -49,6 +49,9 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 . ../../deploy/lib/fleet.sh   # curl_header/curl_bearer (tokens off argv) + fleet_* helpers
+# The Account-Store smoke ASSERTIONS, shared with prod-up.sh / dev-up.sh / seed-real.sh.
+# `SMOKE_BASE` is bound below, once `ACCOUNT_BASE` is resolved.
+. ../../deploy/account-intel/data/smoke.sh
 
 REPO_ROOT="$FLEET_REPO_ROOT"
 LIFECYCLE="$REPO_ROOT/deploy/lib/lifecycle.py"
@@ -86,6 +89,8 @@ CANONICAL_GUIDANCE_FILE="$CLIENTS_DIR/$SLUG.guidance.md"
 GUIDANCE_FILE_OVERRIDE="${GUIDANCE_FILE:-}"
 GUIDANCE_FILE="${GUIDANCE_FILE_OVERRIDE:-$CANONICAL_GUIDANCE_FILE}"
 ACCOUNT_BASE="${ACCOUNT_BASE:-http://127.0.0.1:8443}"
+# shellcheck disable=SC2034  # read by the sourced smoke.sh, which shellcheck does not follow
+SMOKE_BASE="$ACCOUNT_BASE"   # smoke.sh asserts against the base this run provisions into
 # The default service is the SEAM's to declare (`services.DEFAULT_SERVICE`: "the service every
 # tenant gets unless it says otherwise"). A copy of the name here writes it into every registry
 # entry, so changing the default upstream would go on minting tenants pinned to the old one with
@@ -257,12 +262,19 @@ else pf 0 "telegram group $GROUP_ID is unused"; fi
 if [ ! -f "$GUIDANCE_FILE" ]; then
   pf 1 "client guidance exists" "copy multi/clients/GUIDANCE.template.md to $GUIDANCE_FILE, fill it with the client, chmod 600"
 else
-  # mktemp, not /tmp/...-$$: a PID-predictable name in a world-writable directory, and this
-  # file holds a composition error that can quote the tenant's guidance path. Every other
-  # temp in this repo (sync-vm.sh, multi-backup.sh, gate-coverage.sh) already uses mktemp.
-  _pf_out="$(mktemp)"
-  if PYTHONPATH="$(cd ../seam && pwd)" GF="$GUIDANCE_FILE" SLUG="$SLUG" SVC="$SERVICE" \
-     PERSONA_ROOT="$REPO_ROOT" python3 - >"$_pf_out" 2>&1 <<'PY'
+  # NO TEMP FILE AT ALL, where this used to write to `mktemp` and `rm` it on the happy path —
+  # so a Ctrl-C in between left a file quoting the tenant's guidance path in a world-writable
+  # directory.
+  #
+  # A `trap` is the reflex fix and it is WRONG HERE. Line 208 installs `trap compensate EXIT`,
+  # the handler that undoes partially-created authority, and bash REPLACES an EXIT trap rather
+  # than chaining it — so adding one for this temp file would have silently disarmed
+  # compensation for the rest of preflight. Capturing to a variable needs no trap at all.
+  #
+  # `if _pf_out=$(...)` preserves the exit status: an assignment takes the status of the command
+  # substitution, so the branch below still tests the composition, not the assignment.
+  if _pf_out=$(PYTHONPATH="$(cd ../seam && pwd)" GF="$GUIDANCE_FILE" SLUG="$SLUG" SVC="$SERVICE" \
+     PERSONA_ROOT="$REPO_ROOT" python3 - 2>&1 <<'PY'
 import os, sys
 from persona import compose_service_persona, GuidanceError
 from services import load_service, ServiceError
@@ -272,9 +284,9 @@ try:
 except (GuidanceError, ServiceError, FileNotFoundError) as e:
     sys.exit(str(e))
 PY
+  )
   then pf 0 "guidance validates and composes against service '$SERVICE'"
-  else pf 1 "guidance validates and composes against service '$SERVICE'" "$(cat "$_pf_out")"; fi
-  rm -f "$_pf_out"
+  else pf 1 "guidance validates and composes against service '$SERVICE'" "$_pf_out"; fi
   # Guidance is that tenant's own data. A group- or world-readable file beside the tokens is a
   # finding here, where it is cheap to fix, not after it has been read.
   gmode=$(stat -f '%Lp' "$GUIDANCE_FILE" 2>/dev/null || stat -c '%a' "$GUIDANCE_FILE" 2>/dev/null || echo "")
@@ -317,7 +329,9 @@ pf 0 "registry directory is writable ($CLIENTS_DIR)"
 if [ "$PF_FAIL" -ne 0 ]; then
   echo >&2
   echo "!! preflight FAILED — nothing was created. Fix the [!] lines above and re-run." >&2
-  CREATED_ORG=0 CREATED_MEMBER=0 CREATED_STAGED=0     # nothing to compensate
+  # No compensation reset here: preflight runs BEFORE anything is created, so the three
+  # CREATED_* flags are still 0 from their declaration and re-zeroing them one line before
+  # `exit 1` changed nothing.
   exit 1
 fi
 echo "   preflight clean."
@@ -488,10 +502,18 @@ sys.exit(0 if d.get('org') == os.environ['ORG'] else 1)" \
     || smoke_fail "the org token resolved to a DIFFERENT org than the one just created"
 fi
 
-echo -n "   unknown token -> 401 (fail closed): "
-code=$(curl -s -o /dev/null -w '%{http_code}' -H "X-Service-Token: not-a-real-token-$(openssl rand -hex 8)" "$ACCOUNT_BASE/list_accounts" || true)
-echo "$code"
-[ "$code" = 401 ] || smoke_fail "an unknown token got HTTP $code, expected 401 — the store is not failing closed"
+# `smoke_code`, the copy `smoke.sh` exists to be. Its header states the reason: "all three are
+# answering the same question and two copies can disagree about what a passing answer looks
+# like" — and this was the fourth copy, written before that file and never converted. It was
+# also the only place in the repository that passed a token through a raw `-H` rather than
+# `curl_header`, which puts it on argv where `ps` can read it. Fake token here, real pattern.
+#
+# `|| smoke_fail`, not a bare call: `smoke_code` returns non-zero on mismatch, and this block
+# ACCUMULATES failures rather than aborting — the comment above it explains why the whole smoke
+# section is a gate rather than a status report.
+smoke_code "unknown token -> 401 (fail closed)" 401 \
+  "X-Service-Token: not-a-real-token-$(openssl rand -hex 8)" /list_accounts \
+  || smoke_fail "the store is not failing closed on an unknown token"
 
 # isolation: every OTHER registered client token must resolve to its own org, never this one
 OTHER=$(python3 "$IDENTITIES" other "$ORG_ID")
@@ -535,22 +557,29 @@ sys.exit(0 if t else 1)" \
     || smoke_fail "the sealed member token produced no message text — the turn did not complete"
 fi
 
-echo -n "   the STAGED entry loads through the real registry loader: "
-if CLIENTS_DIR="$STAGING_DIR" PYTHONPATH="$(cd ../seam && pwd)" IRONCLAW_API="$API" \
-   PERSONA_ROOT="$REPO_ROOT" GF="$GUIDANCE_FILE" SLUG="$SLUG" python3 - <<'PY'
-# The staging dir holds only this tenant, so this exercises the SAME fail-closed validation the
-# bridge runs at startup — credential uniqueness, operator-token rejection, guidance binding —
-# against the real file, before it becomes servable.
-import os, sys, shutil, tempfile, pathlib
-import context_ingress as ing
-staging = pathlib.Path(os.environ["CLIENTS_DIR"])
-with tempfile.TemporaryDirectory() as d:
-    shutil.copy(staging / f"{os.environ['SLUG']}.env", pathlib.Path(d) / f"{os.environ['SLUG']}.env")
-    shutil.copy(os.environ["GF"], pathlib.Path(d) / f"{os.environ['SLUG']}.guidance.md")
-    c = ing.load_clients(d)[os.environ["SLUG"]]
-print(f"{c.slug} service={c.service_id} persona={c.persona_sha}")
-PY
-then :; else smoke_fail "the staged registry entry does not load — it would break the bridge at startup"; fi
+# THE LIVE REGISTRY PLUS THIS TENANT, not this tenant alone. `load_clients` finds a reused
+# ACCOUNT_TOKEN, IRONCLAW_TOKEN, group id or slug by comparing entries against EACH OTHER, so a
+# directory holding one entry satisfies every one of those rules vacuously — which is how a
+# second tenant on an org whose credential step 1 REUSED could pass this leg, activate, and then
+# refuse the whole registry at the next bridge start. Two phases, because "no" has two meanings
+# and only one of them is this tenant's fault; deploy/lib/registry_validation.py owns both.
+echo "   the live registry still loads WITH this tenant in it:"
+# `|| _rv=$?`, not `&& _rv=0 || _rv=$?`: the short-circuit form draws SC2015 and CI runs the
+# linter bare. No temp file either — the module writes its verdict to stdout on success and to
+# stderr otherwise, and neither carries a credential value (load_clients names the file and the
+# owning slug, never the token).
+_rv=0
+IRONCLAW_API="$API" PERSONA_ROOT="$REPO_ROOT" \
+  python3 "$REPO_ROOT/deploy/lib/registry_validation.py" \
+  "$CLIENTS_DIR" "$STAGED_FILE" "$GUIDANCE_FILE" || _rv=$?
+case "$_rv" in
+  0) : ;;
+  3) smoke_fail "the EXISTING registry does not load, with or without this tenant — fix that first.
+      This is NOT a defect in '$SLUG': its entry is still staged and uninvolved. Run
+      ./deploy/ironworks --offline doctor to see which tenant is broken." ;;
+  *) smoke_fail "adding '$SLUG' breaks the registry the bridge reads — it would refuse to start
+      for EVERY tenant, not just this one. The rule that refused it is named above." ;;
+esac
 
 echo
 if [ "$SMOKE_FAIL" -ne 0 ]; then

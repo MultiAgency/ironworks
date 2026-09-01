@@ -1,9 +1,38 @@
 # IronWorks
 
 IronWorks is MultiAgency's operator-run application layer around official, unmodified
-[IronClaw](https://github.com/nearai/ironclaw). It supplies organization scope, service
-composition, trusted business records, tenant lifecycle, answer-quality evaluation for the
+[IronClaw](https://github.com/nearai/ironclaw). It supplies organization scope, trusted business
+records, tenant lifecycle, per-tenant confinement, answer-quality evaluation for the
 account-analysis composition, and operational security.
+
+## Why this rather than the IronClaw CLI
+
+Because a Telegram group where several people talk to one agent, resolving to one durable
+organization-scoped conversation, is a thing the stock runtime does not do — and this repository
+does not fork it to get there.
+[`docs/upstream-proposals/`](docs/upstream-proposals/) records both gaps as measured against the
+pinned rev: shared-conversation admission and organizational conversation authority, each marked
+`UPSTREAM GAP — NO ACTION PLANNED` / `BRIDGE REMAINS REQUIRED`. The bridge is not a convenience
+over the CLI; it exists because that capability is absent.
+
+Three more things a caller does not get from a runtime it drives itself, all of them operator
+work rather than model work:
+
+- **Isolation that fails closed.** Multi-tenancy is per-USER inside one runtime tenant, so
+  anything tenant-scoped is shared. `registry.load_clients` refuses to start when two clients
+  share an `ACCOUNT_TOKEN` — one credential resolves to one org, so that is two rooms served the
+  same records.
+- **Confinement.** A fresh sealed member ships `builtin.http` with a compiled-in wildcard egress
+  policy. Unconfined, one prompt injection posts a client's book to an arbitrary host;
+  `multi/provision/confine-member.sh` plus a default-deny network boundary is what closes it.
+- **Delivery that survives a crash.** The bridge holds the conversation pointer and the update's
+  fate in one transaction, because a mid-batch crash once ran a second billed turn chained onto
+  an answer the client had already seen.
+
+For a single agent you run yourself, the CLI is the right tool and nothing here beats it —
+`deploy/provision-agent.sh` below is that shape, kept as a supported adjunct.
+
+## Services
 
 Two services currently share one multi-tenant path:
 
@@ -15,6 +44,18 @@ The product derives current commitments, obligations, relationship state, risk, 
 from durable account, contact, and activity records. Guidance carries policy; records carry facts.
 It is not a sales pipeline, workflow engine, general ontology, self-service platform, or IronClaw
 fork. New domain entities require a current use the existing record cannot represent.
+
+**What a service definition selects today is a reasoning objective and the guidance bound to it,
+not an infrastructure shape.** Both definitions declare the same frozen capability block
+(`account_records: read-only`, `writes: none`, `egress: none`, `outreach: none`), read the same
+Account Service under the same schema, are confined by the same script, and pin the same model.
+Service-specific connectors, tools, permissions and lifecycle are direction rather than current
+functionality, and a service needing a different capability shape would be a change to the frozen
+boundary — a product decision, not configuration.
+[`docs/PRODUCT_DIRECTION.md`](docs/PRODUCT_DIRECTION.md) § "Current maturity of the service model"
+owns that distinction; [`multi/services/README.md`](multi/services/README.md) records which
+manifest fields are enforced and which only describe. This paragraph exists because the sentence
+above it can be read as a platform claim, and one shared shape is the honest version.
 
 ## Architecture
 

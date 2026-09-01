@@ -181,8 +181,17 @@ class LikePattern(unittest.TestCase):
         self.assertIn("ESCAPE '\\\\'", sql,
                       "find_account does not name the LIKE escape character explicitly")
         self.assertIn("like_contains(", sql, "find_account no longer escapes the query")
-        self.assertNotIn('f"%{q.lower()}%"', sql,
-                         "find_account still interpolates the raw query into a LIKE pattern")
+        # THE ABSENCE HALF MOVED, because it guarded a SPELLING rather than the defect. It was
+        # `assertNotIn('f"%{q.lower()}%"', sql)`, and the measurement that retired it: reintroduce
+        # the raw interpolation as f'%{q.lower()}%' — single quotes — while leaving a
+        # `like_contains(` call on the same line, and this test passes while `?query=%` is a
+        # listing of every row the org has again. A source-text absence check can only ever name
+        # the spellings someone thought of.
+        #
+        # `test_org_scoping.py::test_find_account_binds_an_escaped_pattern_not_the_raw_query`
+        # asserts the BOUND VALUE instead, which has no spelling to evade, and catches that
+        # mutation. The two `assertIn`s above stay: they are cheap, and they are the floor that
+        # makes a crude removal fail here rather than only there.
 
 
 class IdentityMap(unittest.TestCase):

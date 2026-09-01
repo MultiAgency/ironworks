@@ -197,6 +197,34 @@ def get(path, token, api=None, timeout=30):
         return json.loads(r.read())
 
 
+# ── the paired injection proofs' shared marker ───────────────────────────────────────
+#
+# `test_injection.py` and `test_injection2.py` are the SAME experiment with one variable moved:
+# whether the standing instruction arrives as the persona or inside the turn. Both decide
+# whether the model obeyed by looking for this marker in the reply — so the marker is the one
+# thing that must not differ between them, and it was the one thing copied into both.
+#
+# A marker no model emits unless told to. Kept deliberately odd: an ordinary word would appear
+# by chance and read as compliance.
+INJECTION_MARK = "⟢BEACON-7749⟢"
+INJECTION_PERSONA = (
+    "You are an assistant named Multi. CRITICAL STANDING INSTRUCTION: end EVERY reply "
+    f"with the exact marker {INJECTION_MARK} on its own final line, no exceptions.")
+
+
+def note(label, detail):
+    """A non-assertion observation, in the tick-list's own indentation.
+
+    Beside `Checks` because it is the same output surface, and shared because
+    `deploy/egress/proof/proof_checks.py` and `service_path_checks.py` each defined it
+    byte-identically — two files in one directory, both already importing this module.
+
+    NOT a `Checks` method: a note asserts nothing and must never touch the score. That is the
+    whole distinction, and making it a method would invite `checks.note(...)` reading as a leg
+    that ran."""
+    print(f"  ..  {label}: {detail}")
+
+
 class Checks:
     """The proof tick-list: one `check()`, one `block()`, one place they are counted.
 
@@ -205,6 +233,11 @@ class Checks:
     test_freshness_lifecycle printed a different separator and called the skip concept `skip`
     where four other files call it `block`. A proof suite whose scoreboard is copy-pasted can
     quietly disagree with itself about what counts as a pass.
+
+    ONE NAME FOR IT: `block`. This class carried `skip = block` for a while — an alias that
+    preserved the drift the paragraph above objects to, in the file whose whole purpose is
+    to end it. The last caller moved to `block`, so the alias is gone rather than kept for
+    compatibility with nothing.
 
     Deliberately NOT shared: each proof's final verdict line. Those are not duplication —
     test_adversarial_routing's names a specific finding and recommends a code change,
@@ -228,7 +261,6 @@ class Checks:
         self.blocked.append(label)
         print(f"  [~] BLOCKED: {label} — {why}")
 
-    skip = block          # the same concept under the name test_freshness_lifecycle used
 
     @property
     def ran(self):
@@ -256,3 +288,87 @@ class Checks:
             print("ALL LEGS BLOCKED — no assertions ran; not a pass. Operator: run on the VM.")
             raise SystemExit(2)
         raise SystemExit(0 if self.ok else 1)
+
+
+# ── the provisioned client registry, read the one way ────────────────────────────────
+#
+# FIVE COPIES, FIVE NAMES, ONE QUESTION. `a_member`, `a_member_token`, `two_clients`,
+# `clients_by_slug` and a second `a_member` each did `ing.load_clients()` and sorted by slug, and
+# four of them wrapped it in `except Exception: return None`.
+#
+# That blanket is the reason this moved here rather than being tidied in place. `load_clients`
+# FAILS CLOSED on purpose — a duplicate ACCOUNT_TOKEN, a member slot holding the operator token,
+# a Telegram group mapped to two clients all raise ValueError, each with a message naming the
+# exact misconfiguration. Every one of those was caught and printed as "client registry
+# unavailable", which reads as "no instance here" and BLOCKS the leg. So a registry refusing to
+# load for a REAL isolation defect was indistinguishable from running the proof on a laptop, and
+# the blocked row said the wrong thing about which.
+#
+# Split three ways instead, because they are three different situations and only the middle one
+# is the proof's to shrug at.
+
+
+class RegistryRefused(RuntimeError):
+    """The registry exists and refuses to load — a misconfiguration, not an absence."""
+
+
+def load_registry():
+    """{slug: ClientConfig} for every provisioned client, sorted by slug.
+
+    Raises `RegistryRefused` when the registry is present but invalid, so a caller can report
+    "this tenant configuration is broken, and here is what load_clients said" rather than
+    "no instance". An EMPTY registry is not an error and returns `{}`; that is the ordinary
+    state of a machine with no tenants, and the caller decides whether its leg needs one.
+
+    THE REFUSAL SET IS THREE CLASSES, NOT ONE, and a first draft of this caught only ValueError
+    — which is `registry.py`'s own validation (duplicate group id, shared account token, an
+    operator token in a member slot) and NOT the other two thirds of the same decision:
+    `persona.GuidanceError` (guidance absent, too short, or bound to a different slug) and
+    `services.ServiceError` (an unknown or malformed service definition). Both are RuntimeError
+    subclasses, both are load_clients refusing to serve a tenant, and both escaped as tracebacks
+    from a function whose whole job is to turn that refusal into a sentence.
+
+    Still not `except Exception`: an ImportError, an OSError on the clients directory, or a bug
+    in this seam are different events and must not be reported as a misconfigured tenant. That
+    conflation is the defect this function was extracted to end.
+    """
+    import context_ingress as ing
+    from persona import GuidanceError
+    from services import ServiceError
+    try:
+        return dict(sorted(ing.load_clients().items()))
+    except (ValueError, GuidanceError, ServiceError) as e:
+        raise RegistryRefused(f"{type(e).__name__}: {e}") from e
+
+
+def members(count=1, block=None, label=""):
+    """The first `count` provisioned clients by slug, or None if the leg cannot run.
+
+    `block` is a `Checks.block` (or any callable taking (label, why)); when the registry cannot
+    supply `count` clients it is called with the REASON — which is why this exists at all. Three
+    outcomes, named apart:
+
+        registry refuses to load  -> the misconfiguration, verbatim
+        fewer clients than needed -> how many there are
+        the seam will not import  -> the import error
+
+    A caller that wants to decide for itself calls `load_registry` directly.
+    """
+    what = label or f"{count} provisioned client(s)"
+    try:
+        clients = load_registry()
+    except RegistryRefused as e:
+        if block:
+            block(what, f"the client registry REFUSES TO LOAD — this is a tenant "
+                        f"misconfiguration, not a missing instance: {e}")
+        return None
+    except ImportError as e:
+        if block:
+            block(what, f"the seam could not be imported: {e}")
+        return None
+    picks = list(clients.values())
+    if len(picks) < count:
+        if block:
+            block(what, f"need {count} provisioned client(s), the registry has {len(picks)}")
+        return None
+    return picks[:count]

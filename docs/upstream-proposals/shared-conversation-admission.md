@@ -2,7 +2,14 @@
 
 - **Status:** `UPSTREAM GAP — NO ACTION PLANNED`
 - **Bridge status:** `BRIDGE REMAINS REQUIRED`
-- **Assessed runtime:** [`nearai/ironclaw`](https://github.com/nearai/ironclaw) official, unmodified Reborn
+- **Assessed runtime:** [`nearai/ironclaw`](https://github.com/nearai/ironclaw) official,
+  unmodified Reborn
+- **Re-checked:** 2026-08-31 against `nearai/ironclaw` main `24ff93f435` — **UNCHANGED, still
+  required.**
+  33 commits since the assessed rev (`8dc5958a`, an ancestor of main): notifications, tool
+  results, CI, memory, Slack payload handling, threads compaction, sandbox and docker. None
+  touches shared-conversation admission or conversation authority; the `contracts/` crates did
+  not change at all. Evidence in the "Verified at main" section below.
 
 This is an internal compatibility record, not an upstream issue draft or implementation plan. Do
 not submit it, contact maintainers about it, fork IronClaw, or implement against this hypothetical
@@ -31,8 +38,10 @@ At upstream `8dc5958a1d80c84531943e494b22bd233c81033f`:
 - `ChannelExtras.shared_admission` is injectable by tests or a custom host assembly, but the
   shipping composition provides no externally configurable implementation.
 
-The presence default was deliberately established by [PR #7397](https://github.com/nearai/ironclaw/pull/7397)
-after the owner/subject model was removed in [PR #7377](https://github.com/nearai/ironclaw/pull/7377).
+The presence default was deliberately established by [PR
+#7397](https://github.com/nearai/ironclaw/pull/7397)
+after the owner/subject model was removed in [PR
+#7377](https://github.com/nearai/ironclaw/pull/7377).
 That default remains authoritative unless a future official release changes it.
 
 ## Limitation
@@ -164,3 +173,22 @@ binding.
 
 The [S1/S2 reconnaissance](../adr/evidence/0001/2026-08-26-s1-s2-reconnaissance.md) classifies S1
 as `REQUIRES UPSTREAM CHANGE`.
+
+## Verified at main (2026-08-31, `24ff93f435`)
+
+The production composition still supplies no implementation, and upstream now states that as a
+decision rather than a gap:
+
+- `crates/app/ironclaw_composition/src/extension_host_assembly.rs:688` registers
+  `ChannelExtras { …, shared_admission: None, … }` for every channel extension binding.
+- `crates/extensions/ironclaw_extension_host/src/channel_host.rs:150` falls back to
+  `PresenceSharedAdmission::new(adapter_id, installation_id)` when it is `None`.
+- the `ironclaw_composition` crate's own CONTRACT document (upstream): "Shared-channel admission
+  is presence-based and
+  **needs no configuration** … the bot being in the channel is the admission".
+
+READ THAT LAST LINE AS A CLOSED DOOR, not a pending item. This document was written as "the
+minimum official behavior that would justify re-evaluating S1"; the contract now answers that an
+externally configurable admission port is not planned, because presence IS the intended answer.
+An operator-run host with its own authoritative registry — which tenant owns which Telegram group
+— still has nowhere to say so.

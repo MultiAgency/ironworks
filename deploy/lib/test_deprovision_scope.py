@@ -48,7 +48,18 @@ if is_account:
 elif "/api/webchat/v2/admin/users/" in url and "-X" in args:
     code = 204
 elif "/v1/responses/" in url:
-    code = 401
+    # THE REVOCATION PROBE. 401 means the deleted member's bearer is refused, which is the
+    # VERIFIED_REVOKED path and was the ONLY path this harness could reach. `FAKE_RESIDUAL=1`
+    # makes it answer 200 — the bearer still authenticates — which is what the pinned runtime
+    # actually does (no revoke route is mounted; multi/verify/test_session_revocation.py
+    # measures it) and therefore the branch every real deprovision on this pin takes.
+    #
+    # The negative control above it must keep failing: the script refuses to read the result
+    # at all unless a garbage bearer is rejected, so a stub that accepted everything would
+    # produce BLOCKED rather than RESIDUAL. `-K` config carries the real bearer; the control
+    # request carries a literal garbage one.
+    code = 200 if (os.environ.get("FAKE_RESIDUAL") == "1"
+                   and "not-a-real-token" not in cfg) else 401
 if out and out != "/dev/null":
     pathlib.Path(out).write_text(body)
 elif not out:
@@ -111,7 +122,7 @@ printf '%s\n' "${FAKE_PROCESS_STARTED:-Thu Aug 27 12:00:00 2026}"
     def _run(self, *args, auth_fail=False, revocation_unverified=False, interrupt_file=None,
              rm_fail_path=None, service_state="inactive", service_pid=0,
              service_unavailable=False, process_started="Thu Aug 27 12:00:00 2026",
-             ps_unavailable=False):
+             ps_unavailable=False, residual=False, ledger=None):
         env = dict(os.environ)
         env.update({
             "HOME": str(self.home),
@@ -142,9 +153,14 @@ printf '%s\n' "${FAKE_PROCESS_STARTED:-Thu Aug 27 12:00:00 2026}"
             "FAKE_SERVICE_UNAVAILABLE": "1" if service_unavailable else "0",
             "FAKE_PROCESS_STARTED": process_started,
             "FAKE_PS_UNAVAILABLE": "1" if ps_unavailable else "0",
+            # The deleted member's bearer still authenticates — the branch the pinned runtime
+            # actually takes. See the curl stub's comment for why it was unreachable before.
+            "FAKE_RESIDUAL": "1" if residual else "0",
             "WEBUI_TOKEN": "operator-token",
             "PATH": str(self.bin) + os.pathsep + env["PATH"],
         })
+        if ledger is not None:
+            env["RESIDUAL_LEDGER"] = str(ledger)
         return subprocess.run(["bash", str(SCRIPT), "acme", *args], cwd=ROOT, env=env,
                               capture_output=True, text=True)
 
@@ -403,6 +419,21 @@ printf '%s\n' "${FAKE_PROCESS_STARTED:-Thu Aug 27 12:00:00 2026}"
                          "identity state changed before scope authentication")
         self.assertFalse(self.log.exists(), "database inventory/destruction ran before authentication")
 
+    def test_authenticated_response_cleanup_does_not_swallow_stop_signals(self):
+        """A cleanup-only INT/TERM trap returns and lets destructive teardown continue.
+
+        The sensitive response needs an EXIT cleanup, while both signal handlers must terminate;
+        once the response has been read and removed, all three traps must be restored so normal
+        signal behaviour governs the destructive phase.
+        """
+        source = SCRIPT.read_text()
+        self.assertIn("trap cleanup_auth_body EXIT", source)
+        self.assertIn("trap 'exit 130' INT", source)
+        self.assertIn("trap 'exit 143' TERM", source)
+        self.assertIn("trap - EXIT INT TERM", source)
+        self.assertNotIn("trap 'rm -f \"$AUTH_BODY\"' EXIT INT TERM", source,
+                         "INT/TERM clean up and then return, ignoring the requested stop")
+
     def test_dry_run_over_historical_v2_is_filesystem_observational(self):
         import sqlite3
         import sys
@@ -530,6 +561,73 @@ printf '%s\n' "${FAKE_PROCESS_STARTED:-Thu Aug 27 12:00:00 2026}"
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("no authenticating ACCOUNT_TOKEN", result.stderr)
         self.assertEqual(self.identities.read_text(), before)
+
+    # ── RESIDUAL AUTHORITY: the branch this pin actually takes ────────────────────────────
+    # Until these existed, the fake `curl` answered 401 on `/v1/responses/` unconditionally, so
+    # every test here drove VERIFIED_REVOKED and exit 0. On the pinned runtime that is the branch
+    # that NEVER happens: deleting a member does not revoke its signed session and no revoke route
+    # is mounted (`multi/verify/test_session_revocation.py` measures it, SECURITY.md states it), so
+    # a real deprovision exits 3 every time. Measured before writing these: neutering both
+    # `REVOCATION="RESIDUAL"` assignments in deprovision.sh left all 22 tests green.
+
+    def _ledger(self):
+        return json.loads((self.home / ".agency" / "residual-authority.json").read_text())
+
+    def test_a_still_authenticating_member_is_recorded_and_exits_3(self):
+        """Exit 3 is defined as 'deprovisioned, but recorded in the ledger with its expiry'. Both
+        halves, because the exit code alone would be satisfied by a run that recorded nothing."""
+        self._registry()
+        result = self._run("--execute", "--confirm", "acme", residual=True)
+        self.assertEqual(3, result.returncode, result.stdout + result.stderr)
+        self.assertIn("RESIDUAL AUTHORITY", result.stdout + result.stderr)
+
+        entry = self._ledger()["acme"]
+        self.assertEqual("user-7", entry["uid"], "the ledger does not name the member it tracks")
+        self.assertTrue(entry.get("expires_at"), "recorded without an expiry — the one field the "
+                                                 "entry exists to carry")
+        self.assertEqual("authenticated-org", entry["org_id"],
+                         "the AUTHENTICATED org, not the registry's ORG_ID metadata")
+        # No token material, ever: the ledger is read by an operator and by `ironworks doctor`.
+        blob = json.dumps(entry)
+        for secret in ("member-token", "account-token", "operator-token"):
+            self.assertNotIn(secret, blob, f"the ledger entry carries {secret!r}")
+
+    def test_a_converged_rerun_does_not_push_the_recorded_expiry_forward(self):
+        """The second run has no token left to probe and reaches RESIDUAL through `residual has`.
+        It must REUSE the entry: re-adding would move the recorded expiry a further year out every
+        time anyone re-ran the script, turning an audit record into a moving target."""
+        self._registry()
+        first = self._run("--execute", "--confirm", "acme", residual=True)
+        self.assertEqual(3, first.returncode, first.stdout + first.stderr)
+        recorded = self._ledger()["acme"]["expires_at"]
+
+        second = self._run("--execute", "--confirm", "acme", residual=True)
+        self.assertEqual(3, second.returncode, second.stdout + second.stderr)
+        self.assertIn("already removed", second.stdout + second.stderr)
+        self.assertEqual(recorded, self._ledger()["acme"]["expires_at"],
+                         "a converged re-run re-stamped the expiry")
+
+    def test_a_failed_ledger_write_degrades_to_1_rather_than_claiming_exit_3(self):
+        """Exit 3 asserts the entry EXISTS. A run whose write failed and still exited 3 would
+        claim a record for the one token nothing else remembers — and `ironworks doctor` passes
+        when no entry is outstanding, so the session would go on authenticating untracked."""
+        self._registry()
+        # A ledger path whose parent is a regular file: `write_private`'s mkdir raises, so
+        # `residual add` exits non-zero. Nothing else in the run is disturbed.
+        blocker = self.home / "not-a-directory"
+        blocker.write_text("")
+        result = self._run("--execute", "--confirm", "acme", residual=True,
+                           ledger=blocker / "ledger.json")
+        self.assertEqual(1, result.returncode,
+                         "a failed ledger write still reported exit 3's guarantee\n"
+                         + result.stdout + result.stderr)
+        self.assertIn("could NOT be written", result.stderr)
+        # ...and the finding itself still reaches the operator. A failed WRITE must not swallow
+        # the fact being written: the session authenticates whether or not the ledger recorded it.
+        self.assertIn("STILL AUTHENTICATES", result.stderr)
+        # The operator must be handed the command to record it by hand before the terminal is
+        # gone — that instruction IS the fallback when the ledger is unavailable.
+        self.assertIn("residual add acme", result.stderr)
 
 
 if __name__ == "__main__":

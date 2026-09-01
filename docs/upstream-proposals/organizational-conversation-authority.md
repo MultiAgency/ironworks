@@ -2,7 +2,14 @@
 
 - **Status:** `UPSTREAM GAP — NO ACTION PLANNED`
 - **Bridge status:** `BRIDGE REMAINS REQUIRED`
-- **Assessed runtime:** [`nearai/ironclaw`](https://github.com/nearai/ironclaw) official, unmodified Reborn
+- **Assessed runtime:** [`nearai/ironclaw`](https://github.com/nearai/ironclaw) official,
+  unmodified Reborn
+- **Re-checked:** 2026-08-31 against `nearai/ironclaw` main `24ff93f435` — **UNCHANGED, still
+  required.**
+  33 commits since the assessed rev (`8dc5958a`, an ancestor of main): notifications, tool
+  results, CI, memory, Slack payload handling, threads compaction, sandbox and docker. None
+  touches shared-conversation admission or conversation authority; the `contracts/` crates did
+  not change at all. Evidence in the "Verified at main" section below.
 
 This is an internal compatibility record, not an upstream issue draft or implementation plan. Do
 not submit it, contact maintainers about it, fork IronClaw, or implement against this hypothetical
@@ -11,7 +18,8 @@ authority semantics.
 
 ## Problem
 
-S2 would require an opt-in authority mode in which an admitted shared channel route resolves to one durable
+S2 would require an opt-in authority mode in which an admitted shared channel route resolves to
+one durable
 canonical thread under a non-human managed authority. Each accepted message still records and
 acts as its authenticated human `TurnActor`; participants never inherit one another's personal
 credentials, capabilities, approvals, memory, resources, or authority.
@@ -26,7 +34,8 @@ event-keyed ephemeral thread per ping, owned by its pinger. Redelivery of that e
 reuses its event binding, but another event—even from the same actor in the same group—creates
 another thread. There is no canonical shared thread or shared participant set.
 
-This deliberate `owner == actor` model was established by [PR #7377](https://github.com/nearai/ironclaw/pull/7377)
+This deliberate `owner == actor` model was established by [PR
+#7377](https://github.com/nearai/ironclaw/pull/7377)
 and [PR #7397](https://github.com/nearai/ironclaw/pull/7397) to prevent one human's resource scope
 from becoming another human's authority. It remains the default unless a future official release
 adds a separate opt-in model that preserves the same isolation by construction.
@@ -75,7 +84,8 @@ accepted turn:
   actor                     = TurnActor(authenticated UserId)
 ```
 
-An official implementation could extend `TurnOwner`/`TurnThreadOwner`, or reuse `SharedAgent` if it can satisfy every
+An official implementation could extend `TurnOwner`/`TurnThreadOwner`, or reuse `SharedAgent` if
+it can satisfy every
 invariant below without manufacturing a human identity. The essential contract is one typed,
 non-login conversation authority distinct from `TurnActor`.
 
@@ -212,3 +222,24 @@ No current issue or PR found in the duplicate search provides this opt-in author
 
 The [S1/S2 reconnaissance](../adr/evidence/0001/2026-08-26-s1-s2-reconnaissance.md) classifies S2
 as `BLOCKED / BRIDGE MUST REMAIN`.
+
+## Verified at main (2026-08-31, `24ff93f435`)
+
+The ephemeral-per-ping model is unchanged and is named as such in the contracts:
+
+- `crates/contracts/ironclaw_product_contracts/src/binding.rs:53-58`: "Shared (channel) routes
+  resolve each inbound event onto its OWN ephemeral thread with its own refs … instead of a
+  per-conversation ref pinned to the first event's thread. Direct (DM) routes carry their
+  persistent per-user thread's refs."
+- `crates/contracts/ironclaw_loop_contracts/src/host/run_context.rs:321` and
+  `crates/contracts/ironclaw_product_contracts/src/approval_prompt.rs:68` both call it "the
+  ephemeral-per-ping remodel", and state `owner == actor` as its consequence.
+
+ONE THING TO RESOLVE, and it is upstream's prose against upstream's code rather than ours. The
+`ironclaw_composition` crate's CONTRACT document describes "a shared Slack conversation is one
+canonical thread its paired participants share, each message running as its sender" — which reads
+as the very thing this document says is absent. `binding.rs` is the contract the resolution actually
+implements and it says per-event ephemeral threads; it is unchanged since before this
+assessment, so it is not a new capability, and the two have simply drifted. Code outranks prose,
+so the gap stands — but anyone re-reading that contract alone would conclude otherwise, which is
+worth knowing before the next re-check.

@@ -19,7 +19,7 @@ SCOPE. The deterministic halves are tested where they live and with no instance 
 The bridge owns `test_telegram_bridge.py` (routing and state) and the behavior-focused
 `test_bridge_*` suites (delivery, recovery, operations, and concurrency).
 """
-import os, json, urllib.request
+import contextlib, io, os, json, urllib.request
 # This suite drives the seam against a FAKE instance, so it configures one outright.
 # Not an import prop: `context_ingress` resolves IRONCLAW_API on use, so this is the
 # value under test. Assigned, not `setdefault`, so a configured box cannot leak a real
@@ -331,7 +331,7 @@ def test_failed_turn_does_not_mark_context_supplied():
         th = ing.Thread(CL)
         try:
             ing.turn(th, "tell me about Northwind")
-            assert False, "expected the failed post to raise"
+            raise AssertionError("expected the failed post to raise")
         except RuntimeError:
             pass
         assert th.supplied == {}, f"failed turn must not mark supplied: {th.supplied}"
@@ -505,7 +505,7 @@ def test_turn_failed_status_leaves_no_bookkeeping():
         th = ing.Thread(CL)
         try:
             ing.turn(th, "tell me about Northwind")
-            assert False, "terminal-'failed' status must raise"
+            raise AssertionError("terminal-'failed' status must raise")
         except RuntimeError as e:
             assert "did not complete" in str(e), e
         assert th.supplied == {}, f"failed-status turn must not mark supplied: {th.supplied}"
@@ -538,7 +538,7 @@ def test_turn_poll_timeout_leaves_no_bookkeeping():
         th = ing.Thread(CL)
         try:
             ing.turn(th, "tell me about Northwind")
-            assert False, "poll-timeout (still in_progress) must raise"
+            raise AssertionError("poll-timeout (still in_progress) must raise")
         except ing.TurnOutcomeUnknown as e:
             assert "r_slow" in str(e), "the recoverable response id was not named"
             assert e.request_sent is True, (
@@ -552,9 +552,10 @@ def test_turn_poll_timeout_leaves_no_bookkeeping():
         th2 = ing.Thread(CL)
         try:
             ing.turn(th2, "tell me about Northwind")
-            assert False, "a failed response must raise"
-        except ing.TurnOutcomeUnknown:
-            raise AssertionError("a FAILED turn was misreported as an unknown outcome")
+            raise AssertionError("a failed response must raise")
+        except ing.TurnOutcomeUnknown as e:
+            raise AssertionError(
+                "a FAILED turn was misreported as an unknown outcome") from e
         except RuntimeError as e:
             assert "did not complete" in str(e), e
     finally:
@@ -564,17 +565,17 @@ def test_turn_poll_timeout_leaves_no_bookkeeping():
 
 def test_client_without_persona_refuses_to_serve():
     """There is no usable default persona. A hand-built ClientConfig that never composed
-    one must refuse to serve — at Thread creation and at the handoff receiving entry."""
+    one must refuse to serve, at Thread creation."""
     bare = ing.ClientConfig(slug="bare", ironclaw_token="t", account_token="a")
     assert bare.persona == "", "ClientConfig grew a usable persona default again"
     try:
         ing.Thread(bare)
-        assert False, "personaless client served a Thread"
+        raise AssertionError("personaless client served a Thread")
     except RuntimeError as e:
         assert "persona" in str(e) and "bare" in str(e)
     try:
         ing.Thread(None)
-        assert False, "Thread with no client must fail closed"
+        raise AssertionError("Thread with no client must fail closed")
     except RuntimeError as e:
         assert "no client" in str(e)
     print("  PASS no-default-persona: personaless config and clientless Thread both refuse")
@@ -590,7 +591,18 @@ def test_client_without_persona_refuses_to_serve():
 # blocks differ in shape, and rewriting control flow to save two lines each is how a mechanical
 # edit lands a restore inside a docstring. This names the tuple without touching structure.
 def _save_seam():
-    """The stubbable seam surface, as it is right now."""
+    """The stubbable seam surface, as it is right now.
+
+    TWO PATCHING IDIOMS LIVE IN THIS FILE AND THEY ARE NOT REDUNDANT — recorded here because a
+    review filed them as duplication and the reading is easy to repeat. This one replaces the
+    SEAM's own functions (`_svc`, `_get_context`, `_post_ironclaw`) for tests about what a turn
+    does. The hand-rolled `urllib.request.urlopen` swaps replace the TRANSPORT UNDERNEATH
+    `_post_ironclaw`, for the tests that are about `_post_ironclaw` itself — retries, idempotency
+    keys, how a refused connection is classified. A test asserting on both layers uses both, and
+    that is the shape rather than a mistake.
+
+    All six transport swaps restore in a `finally`; checked, because a `urlopen` left patched
+    would corrupt every later test in the process rather than failing its own."""
     return (asvc._svc, ing._get_context, ing._post_ironclaw)
 
 
@@ -599,14 +611,20 @@ def _restore_seam(saved):
     asvc._svc, ing._get_context, ing._post_ironclaw = saved
 
 
-def _stub_turn(accts, contexts=None, post=None, svc_raises=None):
-    """Install seam stubs and return a restore() — shared by the product-behavior tests below."""
+def _stub_turn(accts, contexts=None, post=None, svc_raises=None, svc=None):
+    """Install seam stubs and return a restore() — shared by the product-behavior tests below.
+
+    `svc` overrides the whole /list_accounts document, for the cases that need a shape the
+    healthy path never produces (a catalog this seam cannot read is a DEFECT, not an outage, and
+    the two are asserted apart)."""
     saved = _save_seam()
 
     def fake_svc(p, client=None):
         if svc_raises and "list_accounts" in p:
             raise svc_raises
-        return {"accounts": accts, "org": "o"} if "list_accounts" in p else {}
+        if "list_accounts" not in p:
+            return {}
+        return svc if svc is not None else {"accounts": accts, "org": "o"}
 
     asvc._svc = fake_svc
     ing._get_context = lambda aid, client=None: (contexts or {}).get(aid)
@@ -711,6 +729,40 @@ def test_store_outage_degrades_instead_of_killing_the_turn():
     assert text == "ok" and supplied == [], (text, supplied)
     assert "temporarily unavailable" in posts[0]["input"], posts[0]["input"]
     print("  PASS store outage: turn still answers, model told records are briefly unavailable")
+
+
+def test_a_seam_defect_degrades_like_an_outage_but_is_not_reported_as_one():
+    """THE CLIENT CANNOT TELL; THE OPERATOR MUST.
+
+    `except Exception` covered both branches, so a KeyError on `catalog["accounts"]` or any bug
+    in `_usable_catalog_rows` printed "account store unreachable" — sending whoever read that
+    line to look at the network for a bug in this file. The module's own header says it exists to
+    stop exactly that misdiagnosis.
+
+    Both halves are asserted. The turn must still answer with the same caveat, because a bug here
+    must not kill a conversation any more than an outage does; and the operator line must say
+    `[defect]`, not `[degraded]`, and must not claim the store was unreachable."""
+    posts, log = [], io.StringIO()
+    # A catalog the real service would never send: no `accounts` key at all, so the
+    # `catalog["accounts"]` lookup inside the try raises KeyError — a defect in this seam's
+    # reading of a response it DID receive, which is the case that used to be misreported.
+    restore = _stub_turn([], svc={"org": "testco"},
+                         post=lambda body, client=None: (posts.append(body), {
+                             "id": "r1", "output": [{"type": "message",
+                                                     "content": [{"type": "output_text",
+                                                                  "text": "ok"}]}]})[1])
+    try:
+        with contextlib.redirect_stdout(log), contextlib.redirect_stderr(io.StringIO()):
+            text, supplied = ing.turn(ing.Thread(CL), "thanks, that helps")
+    finally:
+        restore()
+    assert text == "ok" and supplied == [], (text, supplied)
+    assert "temporarily unavailable" in posts[0]["input"], posts[0]["input"]
+    out = log.getvalue()
+    assert "[defect]" in out, f"a seam bug was not reported as one:\n{out}"
+    assert "account store unreachable" not in out, (
+        f"a bug in this file was reported to the operator as a network outage:\n{out}")
+    print("  PASS seam defect: client sees the same degraded turn, operator is told it is a bug")
 
 
 def test_lost_previous_response_id_self_heals():

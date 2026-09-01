@@ -71,8 +71,9 @@ def _code_only(src):
         for tok in tokenize.generate_tokens(io.StringIO(textwrap.dedent(src)).readline):
             if tok.type not in (tokenize.COMMENT, tokenize.STRING):
                 out.append(tok.string)
-    except (tokenize.TokenError, IndentationError):     # never let the guard fail open
-        raise AssertionError("could not tokenize the serving-path source to check it")
+    except (tokenize.TokenError, IndentationError) as e:  # never let the guard fail open
+        raise AssertionError(
+            f"could not tokenize the serving-path source to check it: {e}") from e
     return " ".join(out)
 
 
@@ -348,17 +349,38 @@ def test_the_internal_service_reasons_about_relationship_state_not_qualification
     `relationship-intelligence@1` replaced `account-intelligence@1` to change the internal
     service's reasoning OBJECTIVE, not its name. A rename that left a prospect qualifier behind
     would satisfy every other test in this file — service loads, guidance binds, capabilities
-    are frozen, the digest is stable — and still be the old product. So this asserts on the
-    composed text, which is the only place the objective actually lives.
+    are frozen, the digest is stable — and still be the old product.
+
+    THE DECLARATION IS THE THING UNDER TEST NOW. This used to assert a hardcoded list of phrases
+    against the composed text, under a docstring saying the composition was "the only place the
+    objective actually lives". That was true and was the defect: the one artifact meant to carry
+    the service's meaning carried a file list, so a test that wanted the meaning had to grep a
+    prompt for it. `responsibility` now carries it, and the anchors below are asserted against
+    BOTH — present in the declaration, and addressed by the composition. Change the declaration
+    to drop an anchor and this fails; change the persona to stop addressing one and this fails.
+    Neither can drift from the other quietly.
 
     Deliberately NOT an answer-quality suite: that is `multi/eval/`, it needs a live instance,
     and it measures the account-analysis claim. This is the offline floor — it cannot tell you
     the persona reasons well, only that it is not aimed at the wrong question."""
     composed = per.compose_persona(ROOT)
+    declared = svc.load_service(per._INTERNAL_SERVICE, ROOT)["responsibility"]
 
-    # The objective it MUST state.
-    for phrase in ("what is committed", "what is outstanding",
-                   "supersedes", "contradict", "stale", "needs a person"):
+    # The load-bearing terms of THIS service's responsibility. Curated rather than tokenised on
+    # purpose: extracting keywords from a sentence is a guess about which words matter, and a
+    # guess is what makes a gate noisy enough to be switched off. These are checked against the
+    # declaration first, so the declaration cannot quietly stop meaning them.
+    for anchor in ("committed", "outstanding", "stale", "needs a person"):
+        assert anchor in declared.lower(), \
+            f"the declared responsibility no longer states {anchor!r} — if the objective really " \
+            "changed, that is a product decision to make in the definition, not a test to edit"
+        assert anchor in composed.lower(), \
+            f"the composition never addresses {anchor!r}, which its own service definition " \
+            "declares this service is answerable for"
+
+    # Carried over: terms the composition must state that the one-line declaration does not have
+    # room for. These remain persona assertions and are honest about it.
+    for phrase in ("what is committed", "what is outstanding", "supersedes", "contradict"):
         assert phrase.lower() in composed.lower(), \
             f"the internal composition never mentions {phrase!r} — it is not stating the " \
             "relationship-state objective D-090 records"
@@ -380,6 +402,34 @@ def test_the_internal_service_reasons_about_relationship_state_not_qualification
     assert "relationship_id" not in composed.lower(), \
         "the composition names a relationship_id — there is no such entity (PRODUCT_DIRECTION §4)"
     print("  PASS the internal service states the relationship-state objective and refuses qualification")
+
+
+def test_every_service_declares_its_own_distinct_responsibility():
+    """A service is answerable for something, and it says so in its own words.
+
+    Two failures this closes, both of which every other test in this file would pass. A new
+    definition copy-pasted from an existing one inherits its responsibility and declares itself
+    answerable for the wrong thing — which is exactly the mistake the two-agreeing-edits rule
+    exists to make hard elsewhere. And a responsibility that merely restates `title` carries no
+    information: the field would be ceremony, and the next reader would rightly ignore it.
+
+    Nothing branches on this value at serve time and nothing should. It is checked, not consumed.
+    """
+    seen = {}
+    for name in svc.available():
+        d = svc.load_service(name, ROOT)
+        r = d["responsibility"].strip()
+        assert len(r) > 40, \
+            f"{name}: responsibility {r!r} is too short to state what the service is answerable for"
+        assert r.lower() != d["title"].strip().lower(), \
+            f"{name}: responsibility merely restates the title — it carries no information"
+        if r.lower() in seen:
+            raise AssertionError(
+                f"{name} and {seen[r.lower()]} declare the SAME responsibility — one of them is "
+                "answerable for something it has not stated")
+        seen[r.lower()] = name
+    assert seen, "no service definitions were checked"
+    print(f"  PASS {len(seen)} service(s) each declare a distinct responsibility")
 
 
 def test_the_internal_service_output_contract_is_closed_and_channel_safe():

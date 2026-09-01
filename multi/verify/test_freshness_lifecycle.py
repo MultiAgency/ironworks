@@ -18,7 +18,6 @@ import subprocess
 import sys
 import tempfile
 
-os.environ["CATALOG_TTL_SECONDS"] = "0"       # must precede context_ingress import
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
 
@@ -187,26 +186,49 @@ def run_live_freshness(st):
         container = os.environ.get("ACCOUNT_DB_CONTAINER", "multiagency-data-account-db-1")
         db_name = os.environ.get("ACCOUNT_DB_NAME", "accounts")
 
-        def sql(query):
-            p = subprocess.run(["docker", "exec", container, "psql", "-U", "postgres",
-                                "-d", db_name, "-tAc", query], capture_output=True, text=True)
+        def sql(query, **params):
+            """psql with SERVER-SIDE quoting: values as `-v name=value`, referenced as `:'name'`.
+
+            NOT f-strings, and the restore below is why. `org`, `aid` and `original` all come from
+            live data — the catalog and the database itself — so one apostrophe in a real account
+            id turned the `finally` into a syntax error and left a REAL row carrying
+            `updated_at=now()` with nothing recording what it had been. A proof that mutates a
+            production row must be at least as careful restoring it as it was changing it.
+
+            THE QUERY GOES ON STDIN, not `-c`. Measured against the live container: psql does not
+            perform variable interpolation on `-c`/`-tAc` — it sends that string straight to the
+            server, so `:'name'` arrives as a literal colon and errors. On stdin it is processed,
+            and `:'name'` renders the value as a correctly-escaped SQL literal. Verified with an
+            apostrophe, a double quote, a backslash, and `x'; DROP TABLE accounts; --`, all of
+            which come back as data.
+            """
+            argv = ["docker", "exec", "-i", container, "psql", "-U", "postgres", "-d", db_name]
+            for key, value in params.items():
+                argv += ["-v", f"{key}={value}"]
+            argv += ["-tA"]
+            p = subprocess.run(argv, input=query, capture_output=True, text=True)
             return p.stdout.strip() if p.returncode == 0 else None
 
-        original = sql(f"SELECT updated_at FROM accounts WHERE org_id='{org}' AND account_id='{aid}';")
+        original = sql("SELECT updated_at FROM accounts "
+                       "WHERE org_id=:'org' AND account_id=:'aid';", org=org, aid=aid)
         if original is None:
             for label in ("live moved record re-fetches", "live new version is recorded",
                           "live edit settles"):
                 block(label, f"Account database unavailable via {container}")
             return
         try:
-            sql(f"UPDATE accounts SET updated_at=now() WHERE org_id='{org}' AND account_id='{aid}';")
+            sql("UPDATE accounts SET updated_at=now() "
+                "WHERE org_id=:'org' AND account_id=:'aid';", org=org, aid=aid)
             got = turn(f"anything new on {name}?")
             check("live moved record re-fetches", got == [aid], f"fetched={got}")
             check("live new version is recorded", thread.supplied.get(aid) not in (None, healed))
             check("live edit settles", turn(f"again on {name}?") == [])
         finally:
-            sql(f"UPDATE accounts SET updated_at='{original}' "
-                f"WHERE org_id='{org}' AND account_id='{aid}';")
+            # The RESTORE. `original` is a timestamp psql itself printed, so it round-trips
+            # exactly through `:'orig'` — verified against the live container.
+            sql("UPDATE accounts SET updated_at=:'orig' "
+                "WHERE org_id=:'org' AND account_id=:'aid';",
+                orig=original, org=org, aid=aid)
     finally:
         ing._get_context = saved_get
 

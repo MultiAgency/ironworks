@@ -1647,10 +1647,20 @@ def cmd_release_verify(args):
     # rule a new file cannot fall outside of. multi/verify is NOT one of them: it mixes offline
     # suites with ones that need a provisioned instance, so its offline members are named
     # individually below and the rest are declared unrun under `live.*`.
+    #
+    # `deploy/egress` WAS MISSING FROM THIS TUPLE while being collected by pytest. Its comment in
+    # `pyproject.toml` records that `test_connect_proxy.py` — the forty lines the network
+    # guarantee rests on, driving the real gateway over real sockets — "was tracked and collected
+    # by NOTHING" until it was added to `testpaths`. That fixed `ironworks test`; it did not fix
+    # this. So the release readiness artifact, the thing an operator reads to decide whether a
+    # build is promotable, computed `release.promotable` without ever running the egress suites.
+    # Exactly the hand-maintained-list omission the paragraph above describes, in the list that
+    # paragraph is attached to.
     seam = ROOT / "multi" / "seam"
     offline_dirs = ((seam, "seam", "seam suite"),
                     (ROOT / "deploy" / "lib", "lib", "operator library"),
-                    (ROOT / "deploy" / "account-intel" / "data", "accountdb", "Account Store"))
+                    (ROOT / "deploy" / "account-intel" / "data", "accountdb", "Account Store"),
+                    (ROOT / "deploy" / "egress", "egress", "egress boundary"))
     gates = [
         (f"gate.{tag}.{p.stem[5:]}", ["python3", p.name], f"{label}: {p.stem}", d)
         for d, tag, label in offline_dirs for p in sorted(d.glob("test_*.py"))

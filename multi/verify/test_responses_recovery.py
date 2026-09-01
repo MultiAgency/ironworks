@@ -36,7 +36,6 @@ import pathlib
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.request
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "seam"))

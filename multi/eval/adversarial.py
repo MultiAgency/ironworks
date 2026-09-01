@@ -98,6 +98,13 @@ def main():
     ap.add_argument("--json")
     args = ap.parse_args()
     from run_eval import build_thread, run_case
+    # NO `--service` HERE, DELIBERATELY, and not merely an omission to tidy up later.
+    # `run_eval.resolve_service` refuses a service whose definition declares `"evaluation": null`,
+    # because nothing measures that service's ANSWER QUALITY. These cases measure something else:
+    # injection resistance, which is a safety property every service should hold regardless of
+    # whether a quality suite covers it. Routing this through the same gate would refuse to check
+    # safety on a service for lacking a quality suite — two different claims collapsed into one.
+    # If this file ever needs to select a service, it needs its own rule, not that one.
     ing, thread = build_thread()
     results, tally = [], collections.Counter()
     for c in CASES:

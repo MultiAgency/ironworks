@@ -21,10 +21,11 @@ in one transaction, so a crash between them can produce an identical duplicate.
 ```text
 RECEIVED -> TURN_STARTED -> TURN_COMPLETED -> DELIVERY_STARTED -> DELIVERED -> ACKED
     |             |                |
-    |             +--------------> RECOVERY_BLOCKED
-    +----------------------------> IGNORED
-                  +--------------> FAILED_TERMINAL
-                                  DELIVERY_RECONCILE
+    |             |                +--> DELIVERY_RETRY      (answer retained; first chunk rejected)
+    |             |                +--> DELIVERY_RECONCILE  (answer retained; delivery uncertain)
+    |             +--> RECOVERY_BLOCKED   (a turn may have run and cannot be recovered)
+    |             +--> FAILED_TERMINAL    (a stable pre-model failure)
+    +--> IGNORED                          (not addressed to us, or not a registered group)
 ```
 
 The mode-`0600` SQLite store at `BRIDGE_STATE` holds routing and delivery identifiers, response
@@ -92,12 +93,24 @@ delivery state it does not understand. Rollback is safe only when the current SQ
 mechanically proves that it has processed no updates and has no cursor; uncertainty means roll
 forward.
 
-Schema v2 adds compatibility columns to v1 without rewriting thread or delivery rows. Before that
-recognized migration, the store creates a mode-`0600` SQLite backup beside the database named
-`<db>.v1.bak-<UTC timestamp>` and records its path in `schema_v1_backup`. Active migrated rows keep
-NULL compatibility identity and refuse continuation until explicitly reset; nothing guesses what
-created them. Old code refuses schema v2, so a code rollback requires restoring that v1 backup.
-There is no reverse migration.
+The current schema is **v3**. Two upgrades are recognized and both only add compatibility columns,
+never rewriting thread or delivery rows: v1 gains all seven identity columns, and a *complete*
+historical v2 gains the two v3 ones (`organization_id`, `account_service_base`). Before either,
+the store writes a mode-`0600` SQLite backup beside the database named for the version being
+**left** — `<db>.v1.bak-<UTC timestamp>` or `<db>.v2.bak-<UTC timestamp>` — and records its path
+in `schema_v1_backup` or `schema_v2_backup`. Active migrated rows keep NULL compatibility identity
+and refuse continuation until explicitly reset; nothing guesses what created them. Old code
+refuses a newer schema, so a code rollback requires restoring the backup for the version that code
+understands. There is no reverse migration.
+
+**"v2" named two different shapes, and the difference is operational.** `organization_id` and
+`account_service_base` were added without bumping the version, so a database written by that
+earlier code is a legitimate `schema_version=2` carrying only five identity columns. It is
+upgradeable and migrates normally. A database stamped `2` with *fewer* than v2's five columns is
+not a v2 at all whatever its stamp says: it is refused as internally inconsistent rather than
+repaired into a shape nothing ever wrote. That refusal used to advise restoring a v1 backup — which
+a database born at v2 does not have — so read the refusal's own text, which names the version the
+file claims and the backup it actually recorded.
 
 ## Operations
 

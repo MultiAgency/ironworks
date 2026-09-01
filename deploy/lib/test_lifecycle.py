@@ -7,6 +7,8 @@ The journal and the ledger both exist to make a partial or finished lifecycle st
 disk rather than something in an operator's head. Two properties matter more than the rest and
 have a test each: they never hold a credential, and they are never briefly world-readable.
 """
+import contextlib
+import io
 import json
 import os
 import stat
@@ -281,6 +283,63 @@ class CLI(Base):
 
     def test_a_credential_field_from_the_shell_is_refused_with_64(self):
         self.assertEqual(lc.main(["journal", "set", "acme", "org_registered", "token=abc"]), 64)
+
+    def test_exit_1_means_FALSE_and_only_false(self):
+        """THE CONTRACT THE SHELL CALLERS READ. `deprovision.sh` runs `residual has <slug>` and
+        branches on the code; `provision.sh` runs `journal reached <slug> <stage>` three times to
+        decide whether to SKIP creating authority it already created.
+
+        Exit 1 used to mean three different things: this boolean, every usage error ("unknown
+        group", "expected key=value"), and six uncaught `IndexError` tracebacks from a missing
+        positional. So `if lifecycle.py residual has "$SLUG"; then` could not distinguish "no
+        residual authority" from "you typo'd the subcommand" — and the typo took the FALSE branch
+        silently, which for `journal reached org_registered` means minting a second live org
+        token.
+
+        Asserted as a partition, not case by case: every usage shape must be 64, and the only
+        things allowed to be 1 are the two queries."""
+        lc.journal_set("acme", "member_minted")
+        lc.residual_add("acme", {"uid": "u", "lifetime_days": "365"})
+
+        # The two genuine booleans — 0 for true, 1 for false, and no output either way.
+        self.assertEqual(lc.main(["residual", "has", "acme"]), 0)
+        self.assertEqual(lc.main(["residual", "has", "nosuch"]), 1)
+        self.assertEqual(lc.main(["journal", "reached", "acme", "org_registered"]), 0)
+        self.assertEqual(lc.main(["journal", "reached", "acme", "activated"]), 1)
+
+        # Everything a caller can get wrong is 64. A traceback here is also a failure: these all
+        # used to reach `rest[0]` on an empty list.
+        usage = [
+            ["bogus"], ["journal"], ["journal", "bogus"], ["teardown", "bogus"],
+            ["residual", "bogus"], ["journal", "get"], ["journal", "stage"],
+            ["journal", "clear"], ["journal", "set"], ["journal", "set", "acme"],
+            ["journal", "reached", "acme"], ["journal", "reached", "acme", "not_a_stage"],
+            ["teardown", "get"], ["teardown", "set", "acme"],
+            ["residual", "has"], ["residual", "drop"], ["residual", "add"],
+            ["residual", "classify", "acme"],
+            ["journal", "set", "acme", "member_minted", "novalue"],
+            ["journal", "stage", "acme", "extra"], ["residual", "has", "acme", "extra"],
+        ]
+        for argv in usage:
+            with self.subTest(argv=argv):
+                buf = io.StringIO()
+                with contextlib.redirect_stderr(buf), contextlib.redirect_stdout(io.StringIO()):
+                    try:
+                        code = lc.main(argv)
+                    except SystemExit as e:            # argparse's own exit path
+                        code = e.code
+                self.assertEqual(code, 64, f"{argv} exited {code}, not 64: {buf.getvalue()[:120]}")
+                self.assertNotIn("Traceback", buf.getvalue(), f"{argv} produced a traceback")
+
+    def test_residual_list_keeps_exit_2_for_outstanding_authority(self):
+        """2 is the release gate's signal and must not collide with argparse's own error exit —
+        which is why `_Usage.error` overrides it to 64."""
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(lc.main(["residual", "list"]), 0)
+            lc.residual_add("acme", {"uid": "u", "lifetime_days": "365"})
+            self.assertEqual(lc.main(["residual", "list"]), 2)
+            lc.residual_classify("acme", "TEST_RESIDUAL", "synthetic")
+            self.assertEqual(lc.main(["residual", "list"]), 0, "a waived entry still blocked")
 
 
 if __name__ == "__main__":

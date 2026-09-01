@@ -37,7 +37,6 @@ try:
 except ImportError:  # direct-script compatibility
     from resources import resource_root
 
-_ROOT = resource_root()
 
 # The service every tenant gets unless it says otherwise. Existing registry files predate
 # service definitions and must keep composing byte-for-byte what they composed before, so the
@@ -46,7 +45,7 @@ DEFAULT_SERVICE = "account-analysis"
 
 _REQUIRED_KEYS = ("service", "version", "audience", "persona_parts", "guidance",
                   "guidance_heading", "safety_tail", "capabilities", "model_policy",
-                  "evaluation")
+                  "evaluation", "responsibility")
 _AUDIENCES = ("internal", "external")
 
 _cache = {}
@@ -116,6 +115,20 @@ def load_service(name, root=None):
             raise ServiceError(f"service {name!r}: persona part {rel!r} is not a file under {base}")
     if not isinstance(d["version"], int) or d["version"] < 1:
         raise ServiceError(f"service {name!r}: version must be a positive integer")
+    # PRESENT, A STRING, NON-EMPTY — AND DELIBERATELY NOTHING MORE. `responsibility` states what
+    # this service is answerable for, in the organization's vocabulary rather than the
+    # composition's. It exists because three separate things reached around the definition to
+    # find that: the structural test grepped persona prose for it, the evaluation claim is bound
+    # to persona wording, and this README described it as "a reasoning objective" that the data
+    # did not carry.
+    #
+    # Resist making it structured. A responsibility that is PARSED becomes a specification, and a
+    # specification for one service is a workflow engine for two — which is on the explicit
+    # non-goal list. Nothing branches on this value and nothing should; it is a declaration a
+    # human reviews and a test can anchor on.
+    if not isinstance(d["responsibility"], str) or not d["responsibility"].strip():
+        raise ServiceError(f"service {name!r}: responsibility must be a non-empty string stating "
+                           "what this service is answerable for, in the organization's vocabulary")
     _cache[key] = d
     return d
 

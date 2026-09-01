@@ -28,12 +28,18 @@ import pathlib
 import re
 import subprocess
 import sys
+import tempfile
 import unittest
+
+from egress_destinations import load_forbidden_destinations
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 LIST = ROOT / "deploy" / "egress" / "forbidden-destinations.json"
 SHELL_PROBE = ROOT / "deploy" / "egress" / "probe-egress.sh"
 STACK_PROBE = ROOT / "deploy" / "egress" / "proof" / "proof_checks.py"
+# The CONTAINED leg of the shell probe. It was 157 lines inlined in probe-egress.sh, so the
+# assertions below read it out of the shell text; it is a file now and they read the file.
+CONTAINED_PROBE = ROOT / "deploy" / "egress" / "probe_contained.py"
 OVERLAY = ROOT / "deploy" / "egress" / "docker-compose.egress.yml"
 PROOF_COMPOSE = ROOT / "deploy" / "egress" / "proof" / "docker-compose.proof.yml"
 
@@ -44,12 +50,30 @@ class ForbiddenDestinations(unittest.TestCase):
         self.dests = self.doc["destinations"]
 
     def test_the_list_is_well_formed_and_not_empty(self):
-        """An empty or malformed list would make both probes assert nothing and both pass."""
+        """An empty or malformed list would make both probes assert nothing and both pass.
+
+        ASSERTED THROUGH THE PRODUCTION READER, not beside it. This test used to restate the
+        schema — `set(d) == {label, host, port}`, port is an int — which meant it could agree with
+        the file while disagreeing with the loader the probes actually run. Calling
+        `load_forbidden_destinations` makes the two impossible to separate."""
+        self.assertEqual(load_forbidden_destinations(ROOT), self.dests)
         self.assertGreater(len(self.dests), 0)
-        for d in self.dests:
-            self.assertEqual({"label", "host", "port"}, set(d), d)
-            self.assertIsInstance(d["port"], int)
-            self.assertTrue(d["host"] and d["label"], d)
+
+    def test_the_reader_refuses_every_shape_that_would_make_a_probe_vacuous(self):
+        """The negative half, which neither restatement had: a schema check that only ever sees
+        the valid committed file cannot show that it would REJECT anything."""
+        for bad in ({}, {"destinations": []}, {"destinations": [{"label": "x", "host": "h"}]},
+                    {"destinations": [{"label": "x", "host": "h", "port": "443"}]},
+                    {"destinations": [{"label": "", "host": "h", "port": 443}]},
+                    {"destinations": [{"label": "x", "host": "", "port": 443}]},
+                    {"destinations": [{"label": "x", "host": "h", "port": 443, "extra": 1}]}):
+            with tempfile.TemporaryDirectory() as d:
+                root = pathlib.Path(d)
+                (root / "deploy" / "egress").mkdir(parents=True)
+                (root / "deploy" / "egress" / "forbidden-destinations.json").write_text(
+                    json.dumps(bad))
+                with self.assertRaises(ValueError, msg=bad):
+                    load_forbidden_destinations(root)
 
     def test_it_still_covers_the_destinations_that_hold_client_data(self):
         """The six the stamping probe used to miss. Named explicitly, because losing one again
@@ -113,12 +137,12 @@ class ForbiddenDestinations(unittest.TestCase):
         live contained runtime, even `example.com` does not resolve inside `multi_inner`, so
         special-casing resolution failure marked five correct assertions BLOCKED and refused to
         stamp a boundary that was demonstrably working."""
-        shell = SHELL_PROBE.read_text()
-        contained = shell.split("def direct(", 1)[1].split("\ndef ", 1)[0]
-        self.assertNotIn("gaierror", contained,
+        source = CONTAINED_PROBE.read_text()
+        direct = source.split("def direct(", 1)[1].split("\ndef ", 1)[0]
+        self.assertNotIn("gaierror", direct,
                          "direct() special-cases DNS failure again — that marks the boundary's "
                          "own lack of a resolver path as an unmeasured leg")
-        self.assertIn("MEASURABLE", shell,
+        self.assertIn("MEASURABLE", source,
                       "the control run is what decides whether a leg means anything")
 
     def test_a_forbidden_leg_is_only_counted_if_it_could_be_measured(self):
@@ -128,8 +152,8 @@ class ForbiddenDestinations(unittest.TestCase):
         self.assertIn("REACHABLE_FROM_UNCONTAINED", shell,
                       "probe-egress.sh no longer runs the uncontained control")
         self.assertIn("probe_attempts.py", shell)
-        self.assertIn("unmeasured", shell,
-                      "probe-egress.sh does not separate UNMEASURED from passed")
+        self.assertIn("unmeasured", CONTAINED_PROBE.read_text(),
+                      "the contained probe does not separate UNMEASURED from passed")
 
     def test_both_probes_read_the_shared_list(self):
         """Neither may go back to its own literals. Checked by source inspection because one
@@ -138,8 +162,8 @@ class ForbiddenDestinations(unittest.TestCase):
         shell = SHELL_PROBE.read_text()
         self.assertIn("forbidden-destinations.json", shell,
                       "probe-egress.sh no longer reads the shared list")
-        self.assertIn('json.loads(os.environ["FORBIDDEN_JSON"])', shell,
-                      "probe-egress.sh does not iterate the shared list")
+        self.assertIn('json.loads(os.environ["FORBIDDEN_JSON"])', CONTAINED_PROBE.read_text(),
+                      "the contained probe does not iterate the shared list")
 
         stack = STACK_PROBE.read_text()
         self.assertIn("forbidden-destinations.json", stack,
@@ -150,7 +174,15 @@ class ForbiddenDestinations(unittest.TestCase):
         provider host is the exception: it is the one destination that must be REACHABLE, and it
         is configuration (PROVIDER_HOST), not part of the forbidden set."""
         addr = re.compile(r'direct\([^)]*["\'](\d{1,3}(?:\.\d{1,3}){3}|[a-z0-9.-]+\.(?:com|example|internal))["\']')
-        for probe in (SHELL_PROBE, STACK_PROBE):
+        # CONTAINED_PROBE is in this tuple because every `direct(` call moved into it. Scanning
+        # only the shell would still pass — over a file that no longer contains a single call
+        # this pattern could match. A scan whose subject has moved is a scan of nothing.
+        probes = (SHELL_PROBE, STACK_PROBE, CONTAINED_PROBE)
+        calls = sum(p.read_text().count("direct(") for p in probes)
+        self.assertGreater(calls, 3,
+                           f"only {calls} `direct(` call(s) across {[p.name for p in probes]} — "
+                           "this scan has lost its subject and would pass over anything")
+        for probe in probes:
             for m in addr.finditer(probe.read_text()):
                 self.fail(f"{probe.name} hardcodes destination {m.group(1)!r} outside the "
                           "shared list — add it to forbidden-destinations.json instead")

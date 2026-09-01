@@ -83,6 +83,17 @@ def like_contains(term):
 def duplicate_orgs(doc):
     """Orgs holding more than one live token, sorted.
 
+    A DELIBERATE SECOND COPY of the counting in `deploy/lib/identities.org_token_counts`, and it
+    must stay one. That module is OPERATOR-side; this one is imported by `service.py` and runs
+    INSIDE the Account Service container, which mounts this directory and nothing else. There is
+    no import path between them at runtime, so the choice is a duplicated four-line count or a
+    shared module that cannot be shared. Same reasoning as `multi/seam/operator_paths.py`, which
+    says so in its own header, and as this file's neighbour `service._now`.
+
+    The two answer different questions from the same count — `org_token_counts` returns the whole
+    map for the console, this returns only the offenders for a startup guard — so a future change
+    to one is unlikely to silently need the other.
+
     NOT an error: this is what a credential rotation looks like mid-flight, and what a re-run
     of provisioning leaves behind after a failed first pass. It IS authority nobody is
     tracking, so it is reported rather than tolerated silently."""

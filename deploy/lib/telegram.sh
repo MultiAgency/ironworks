@@ -88,3 +88,24 @@ tg_webhook_info() {
   if [ -n "$_url" ]; then printf 'registered | last_error: %s\n' "$_err"
   else printf 'NOT-registered | last_error: %s\n' "$_err"; fi
 }
+
+# tg_send <bot-token> <chat-id> <text> — one Bot API sendMessage.
+#
+# TWO COPIES, ONE LINE APART IN SPIRIT: `multi/serve/multi-watchdog.sh` alerted the team chat and
+# `multi/serve/multi-backup.sh` alerted on a failed backup, in the same directory, with the same
+# flags — and they had ALREADY diverged on the thing that matters, which is what a failed SEND
+# means.
+#
+# THIS RETURNS CURL'S EXIT STATUS AND SWALLOWS NOTHING, because the two callers need opposite
+# things and both are right. The watchdog must know: a failed alert has to be retried on the next
+# tick rather than recorded as delivered, so it calls this bare. The backup calls it from an EXIT
+# trap where a non-zero would overwrite the run's real exit code, so it appends `|| true` — at
+# the call site, where a reader can see the decision instead of inheriting it from a helper.
+#
+# `--data-urlencode` for both fields: an alert body carries a hostname, a return code and a
+# timestamp, and an unencoded `&` in any of them would silently truncate the message. `-f` so an
+# HTTP error is a non-zero exit rather than a 200-shaped success.
+tg_send() {
+  curl_tg "$1" sendMessage -sf -m 15 \
+    --data-urlencode "chat_id=$2" --data-urlencode "text=$3" >/dev/null
+}

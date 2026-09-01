@@ -26,8 +26,8 @@ Env:
   NO ambient single-client fallback: a client that wasn't composed explicitly (registry
   guidance, or the internal composition requested by name) must not be servable.
 """
-import contextvars, errno, os, json, datetime, hashlib, socket, time
-import urllib.parse, urllib.request, urllib.error
+import contextvars, errno, os, json, hashlib, socket, time, traceback
+import urllib.request, urllib.error
 # Re-exported deliberately: the proof and verify suites reach for these through
 # `context_ingress`, because what the PRODUCT calls is the thing they mean to assert on. Each
 # name has exactly one implementation, in the module named here. registry.py owns who may be
@@ -43,16 +43,23 @@ import urllib.parse, urllib.request, urllib.error
 try:
     from .persona import compose_persona
     from .registry import ClientConfig, _client
-    from .registry import ACCOUNT_BASE, MODEL, load_clients  # noqa: F401 — re-export only
-    from .envelope import build_envelope, resolve_targets
-    from .account_service import (AccountScopeChanged, AccountScopeError,  # noqa: F401
+    from .registry import ACCOUNT_BASE, MODEL, load_clients   # re-export only
+    from .envelope import build_envelope, now_iso, resolve_targets
+    from .account_service import (AccountScopeChanged, AccountScopeError,
                                   _catalog, _get_context, resolve_account_scopes)
     from .responses import BROWSER_UA, output_text
+# Only the EXCEPT branch carries an F401 suppression, and the asymmetry is ruff's rather than an
+# oversight: it treats the first arm of a try/except-ImportError as a conditional import and does
+# not raise F401 there. RUF100 is selected now, so restoring the marker on the try arm to make
+# the two look alike fails the gate as an unused directive.
+#
+# (Do not write the literal directive spelling in a comment here — ruff parses it wherever it
+# appears, and a `# noq' + 'a` inside prose becomes a malformed directive warning on every run.)
 except ImportError:  # direct-script compatibility during service-unit rollout
     from persona import compose_persona
     from registry import ClientConfig, _client
     from registry import ACCOUNT_BASE, MODEL, load_clients  # noqa: F401 — re-export only
-    from envelope import build_envelope, resolve_targets
+    from envelope import build_envelope, now_iso, resolve_targets
     from account_service import (AccountScopeChanged, AccountScopeError,  # noqa: F401
                                  _catalog, _get_context, resolve_account_scopes)
     from responses import BROWSER_UA, output_text
@@ -80,7 +87,10 @@ except ImportError:  # direct-script compatibility during service-unit rollout
 # A setting that is neither — external, but wanted early — is the shape to argue about before
 # adding. `CATALOG_TTL_SECONDS` was one: nine files set it before their imports, one with the
 # comment "must precede the import", after the cache it configured had already been removed.
-# Nothing read it. Ceremony outlives the thing it was for unless the rule is written down.
+# Nothing read it. Ceremony outlives the thing it was for unless the rule is written down — and
+# it outlived this paragraph too: the ninth file was still setting it, comment and all, for as
+# long as this comment sat here describing the practice in the past tense. Writing the rule down
+# is not the same as deleting the last instance of it.
 
 
 class SeamNotConfigured(RuntimeError):
@@ -196,10 +206,6 @@ def _proved_unsent(exc):
         if isinstance(e, OSError) and e.errno in _NEVER_CONNECTED_ERRNOS:
             return True
     return False
-
-
-def _now():
-    return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
 ADMIN_PROBE_PATH = "/api/webchat/v2/admin/users"
@@ -512,13 +518,40 @@ def _catalog_or_degraded(cl):
         return accounts, catalog["org"], None
     except AccountScopeChanged:
         raise
-    except Exception as e:
-        print(f"[degraded] {cl.slug}: account store unreachable ({type(e).__name__}) — "
+    # TRANSPORT AND SERVICE FAILURES — the case this degraded mode was written for. OSError
+    # covers urllib's URLError/HTTPError and timeouts; ValueError is a body that would not parse;
+    # AccountScopeError is the service answering in a shape we refuse to trust.
+    except (AccountScopeError, OSError, ValueError) as e:
+        print(f"[degraded] {cl.slug}: account store unreachable ({type(e).__name__}: {e}) — "
               "serving turn without records", flush=True)
-        return [], cl.slug, (
-            "temporarily unavailable — the records store could not be reached just now; "
-            "answer from conversation history and say records are briefly unavailable "
-            "if the question needs them")
+        return _degraded(cl)
+    # A DEFECT HERE, REPORTED AS ONE. `except Exception` used to cover this branch too, so a
+    # KeyError on `catalog["accounts"]`, a TypeError from a non-dict payload, or any bug in
+    # `_usable_catalog_rows` reached the operator as "account store unreachable" and the model as
+    # "records are briefly unavailable" — sending an engineer to look at the network for a bug in
+    # this file. That is precisely the misdiagnosis the block comment at the head of this module
+    # says it exists to prevent, reintroduced one level up.
+    #
+    # The CLIENT-facing behaviour is deliberately identical: a bug here must not kill the
+    # conversation any more than an outage does, and the model cannot act on the difference. The
+    # operator can, so the operator is told, with a traceback because a defect needs a location.
+    except Exception as e:
+        traceback.print_exc()
+        print(f"[defect] {cl.slug}: the account store answered, but this seam could not read its "
+              f"response ({type(e).__name__}: {e}) — serving turn without records. This is a bug "
+              "in context_ingress, NOT an outage; the traceback above is where.", flush=True)
+        return _degraded(cl)
+
+
+def _degraded(cl):
+    """The no-records turn, shared by both failure paths above so they cannot drift.
+
+    The org falls back to the id, NOT the display name — see `_catalog_or_degraded`'s docstring.
+    """
+    return [], cl.slug, (
+        "temporarily unavailable — the records store could not be reached just now; "
+        "answer from conversation history and say records are briefly unavailable "
+        "if the question needs them")
 
 
 # How many times one thread will re-ask for an account the catalog lists but whose context
@@ -751,7 +784,7 @@ def _turn_inner(thread, user_text, speaker=None):
     if contexts:
         thread.ever_supplied = True
     thread.prev = d.get("id")
-    thread.last_turn_at = _now()      # same rule as thread.prev: only after a confirmed turn
+    thread.last_turn_at = now_iso()      # same rule as thread.prev: only after a confirmed turn
     return output_text(d), [c["record_id"] for c in contexts]
 
 

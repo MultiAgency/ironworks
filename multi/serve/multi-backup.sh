@@ -48,10 +48,11 @@ _on_exit() {
   local rc=$?
   rm -rf "$WORK"
   if [ "$rc" -ne 0 ] && [ -n "${BACKUP_ALERT_BOT_TOKEN:-}" ] && [ -n "${BACKUP_ALERT_CHAT_ID:-}" ]; then
-    curl_tg "$BACKUP_ALERT_BOT_TOKEN" sendMessage -sf -m 15 \
-      --data-urlencode "chat_id=${BACKUP_ALERT_CHAT_ID}" \
-      --data-urlencode "text=🔴 multi-serve BACKUP FAILED (rc=$rc) on $(hostname) $(date -u +%FT%TZ)" \
-      >/dev/null 2>&1 || true
+    # `|| true` HERE, not inside tg_send: this runs from the EXIT trap, where a non-zero would
+    # overwrite the run's real exit code. The watchdog calls the same helper bare because it
+    # must know whether its alert sent.
+    tg_send "$BACKUP_ALERT_BOT_TOKEN" "$BACKUP_ALERT_CHAT_ID" \
+      "🔴 multi-serve BACKUP FAILED (rc=$rc) on $(hostname) $(date -u +%FT%TZ)" 2>/dev/null || true
   fi
 }
 trap _on_exit EXIT

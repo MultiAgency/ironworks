@@ -33,7 +33,7 @@
 import os, sys, pathlib
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-from common import Checks, request  # noqa: E402
+from common import Checks, request, members  # noqa: E402
 
 # (method, path, body) with WELL-FORMED bodies so service-layer authz actually runs. Member MUST
 # be denied on every one (401/403). Owner id `reborn-cli` is the instance default_owner.
@@ -64,22 +64,17 @@ def req(method, path, token, body=None):
     """
     return request(method, path, token, body=body, timeout=30)
 
-def clients_by_slug():
-    try:
-        import context_ingress as ing
-        return dict(sorted(ing.load_clients().items()))
-    except Exception as e:
-        print(f"     (client registry unavailable: {e})"); return {}
-
-cl = clients_by_slug()
-picks = list(cl.values())
+# One read of the registry, two legs with different needs: the admin leg wants ONE client, the
+# isolation leg wants two. `members()` reports the reason it could not supply them — a registry
+# that REFUSES to load (a duplicate account token, an operator token in a member slot) says so
+# instead of being reported as "no instance", which is what the five local copies of this lookup
+# all did.
+picks = members(1, block, "admin-deny suite") or []
 member = picks[0] if picks else None
 
 # ---- 1. admin / operator routes deny the member ----
 print("== member token vs admin / operator routes (deny 401/403) ==")
-if member is None:
-    block("admin-deny suite", "no provisioned client / instance unreachable")
-else:
+if member is not None:
     for method, path, body in ADMIN_ROUTES:
         try:
             st, _ = req(method, path, member.ironclaw_token, body)
@@ -110,10 +105,9 @@ else:
 
 # ---- 2. projects are member-reachable but per-user isolated (the correction above) ----
 print("== projects: member-reachable, per-user isolated ==")
-if len(picks) < 2:
-    block("project cross-user isolation", "need two provisioned clients (e.g. proof-a/proof-b)")
-else:
-    A, B = picks[0], picks[1]
+pair = members(2, block, "project cross-user isolation")
+if pair is not None:
+    A, B = pair
     pid = None
     try:
         st, raw = req("POST", "/api/webchat/v2/projects", A.ironclaw_token,

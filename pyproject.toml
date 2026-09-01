@@ -55,14 +55,49 @@ line-length = 100
 # TEXT file rather than just Python — the same edit leaves the same residue in a shell script.
 # `deploy/lib/test_ci_contracts.py` asserts that nothing selected here is inert, because a rule
 # that is configured and silently does nothing is worse than one that is absent.
-select = ["F", "E9", "B", "C90", "W"]
+#
+# E402 + RUF100 together are what STOPS the inert-suppression class rather than just cleaning up
+# after it. Thirty-seven `# noqa: E402` directives sat in this tree suppressing a rule that was
+# never selected: every one was decoration, and a new module-level import after `sys.path` setup
+# was gated by nothing. Selecting E402 produced ZERO new findings — the sites were all already
+# annotated — so it costs no cleanup and makes the next one an error. RUF100 then fails any
+# directive that has stopped doing anything, which is the property that keeps the first thirty-
+# seven from coming back one at a time.
+select = ["F", "E9", "B", "C90", "W", "E402", "RUF100"]
 
+# EVERY ENTRY HERE IS NAMED, AND EVERY ONE WAS MEASURED. `"**/test_*.py" = ["B", "C901"]` used to
+# head this table, which disabled all of flake8-bugbear across every test file in the tree — and
+# a file-glob ignore exempts not just today's code but every function anyone adds to a matching
+# file afterwards. Removing it surfaced 26 findings, of which 15 were real and are now fixed:
+# eleven `assert False` (which `python -O` DELETES, so a test that should fail would pass), three
+# missing `raise ... from`, and one `zip()` without `strict=` in a parity check that would have
+# compared only the shorter prefix. Four of the file entries below were dead on top of that —
+# suppressing codes their files no longer raise.
+#
+# What remains is listed per file so a new one has to be added deliberately. RUF100 is selected,
+# so an entry that stops being needed does not sit here unnoticed the way those four did.
 [tool.ruff.lint.per-file-ignores]
-"**/test_*.py" = ["B", "C901"]
-"multi/seam/test_bridge_delivery.py" = ["B", "C901", "F403", "F405"]
-"multi/seam/test_bridge_operations.py" = ["B", "C901", "F403", "F405"]
-"multi/seam/test_bridge_recovery.py" = ["B", "C901", "F403", "F405"]
+# The three star-importers of `_bridge_delivery_support`, which is a fixture module, not a
+# package: F403/F405 are the star import itself and every name that comes through it.
+#
+# B023 (a closure over a loop variable) is also raised in `test_bridge_delivery.py`, and it is a
+# FALSE POSITIVE at all five sites there, checked by hand: each closure is invoked inside the
+# iteration that binds it, before the next rebind. Kept as a named per-file entry rather than
+# five inline suppressions because the whole file uses that fixture shape.
+"multi/seam/test_bridge_delivery.py" = ["F403", "F405", "B023"]
+"multi/seam/test_bridge_operations.py" = ["F403", "F405"]
+"multi/seam/test_bridge_recovery.py" = ["F403", "F405"]
+# Same B023 shape, one site: `retry(lambda: post(..., tok))` is called immediately.
+"multi/verify/test_egress_closed.py" = ["B023"]
+# Every import in this module is an EXPORT — `__all__` is built from `globals()` and three suites
+# star-import it. See the note at the top of the file.
 "multi/seam/_bridge_delivery_support.py" = ["F401"]
+# Complex TEST HELPERS: fake_docker/_d are table-driven stubs, `execute` is a fake DB cursor,
+# `_bindings` walks an AST, `main` is a proof's top-level sequence. Named individually so a new
+# complex test function is a finding rather than pre-exempted by a glob.
+"deploy/account-intel/data/test_migrations.py" = ["C901"]
+"deploy/lib/test_egress_status.py" = ["C901"]
+"deploy/lib/test_shadowed_binding.py" = ["C901"]
 "deploy/ironworks" = ["C901"]
 "deploy/lib/compose-persona" = ["C901"]
 "deploy/lib/egress_status.py" = ["C901"]

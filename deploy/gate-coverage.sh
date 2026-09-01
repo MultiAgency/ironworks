@@ -11,6 +11,18 @@
 #
 # The escape hatch is .gitignore, which is the right place for it: "we deliberately do not
 # ship this" belongs in a reviewed file, not in whoever-remembered's head.
+#
+# PRE-COMMIT ONLY, AND THAT IS NOT AN OVERSIGHT TO FIX. It looks like a gap that this runs from
+# .pre-commit-config.yaml and not from seam-ci, and the obvious "improvement" is to add a step
+# there. Measured in a fresh clone: `git ls-files --others --exclude-standard` returns ZERO,
+# because a CI checkout contains committed content and nothing else. The third state this
+# refuses cannot exist there — anything that reached CI is tracked by definition, and anything
+# untracked never left the developer's disk. In CI this is a check that cannot fail, which is
+# the same as no check while looking like one.
+#
+# So its home is the only place the property is real: a worktree a human is editing. If it ever
+# belongs in CI it would be for a different reason — catching a BUILD step that emits unignored
+# artifacts — and that is a different assertion deserving its own wording.
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
 

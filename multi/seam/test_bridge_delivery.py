@@ -12,7 +12,7 @@ def _completed_delivery_fixture():
     st.note_turn_started(1, GID, "key", None)
     th = tb._load_threads(GROUPS, st)[GID]
     th.prev = "resp_existing"
-    st.commit_turn(1, th.prev, GID, th)
+    st.commit_turn(1, GID, th)
     ic = FakeIronclaw()
     ic.responses[th.prev] = "stored answer"
     return d, db, st, th, ic
@@ -189,11 +189,11 @@ def test_delivery_reconciliation_handles_are_never_compacted():
         st.note_turn_started(1, GID, "key", None)
         th = tb._load_threads(GROUPS, st)[GID]
         th.prev = "resp_existing"
-        st.commit_turn(1, th.prev, GID, th)
-        st.note_terminal(1, delivery_state, 2, "delivery_evidence")
+        st.commit_turn(1, GID, th)
+        st.note_terminal(1, delivery_state, "delivery_evidence")
         for uid in range(2, 12):
             st.note_received(uid, GID, uid)
-            st.note_terminal(uid, bs.IGNORED, uid + 1)
+            st.note_terminal(uid, bs.IGNORED)
         st.meta_set("cursor_acked", 12)
         st.compact(retain=1)
         row = st.update_row(1)
@@ -230,7 +230,7 @@ def test_chunk_transport_preserves_acknowledgement_evidence():
     try:
         try:
             tb.send(GID, "a" * 3800 + "\n" + "b" * 20)
-            assert False, "partial chunk failure was reported as complete"
+            raise AssertionError("partial chunk failure was reported as complete")
         except bridge_core.DeliveryAttemptError as e:
             assert e.acknowledged_chunks == 1 and not e.known_not_sent
     finally:

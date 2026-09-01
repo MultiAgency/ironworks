@@ -117,8 +117,7 @@ prev_fails=""; prev_alert=0
 # Returns curl's exit status (NOT `|| true`): the caller must know whether the alert actually SENT,
 # so a failed send is retried next tick instead of being silently marked as delivered.
 alert() {
-  curl_tg "$WATCHDOG_BOT_TOKEN" sendMessage -sf -m 15 \
-    --data-urlencode "chat_id=${TEAM_CHAT_ID}" --data-urlencode "text=$1" >/dev/null
+  tg_send "$WATCHDOG_BOT_TOKEN" "$TEAM_CHAT_ID" "$1"
 }
 
 if [ -n "$fails" ]; then

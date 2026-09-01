@@ -41,10 +41,6 @@ checks = common.Checks()
 check = checks.check
 
 
-def note(label, detail):
-    print(f"  ..  {label}: {detail}")
-
-
 src_env = CLIENTS / f"{SLUG}.env"
 src_guide = CLIENTS / f"{SLUG}.guidance.md"
 if not src_env.exists() or not src_guide.exists():
@@ -93,11 +89,10 @@ with tempfile.TemporaryDirectory() as d:
         check("the SEAM (on the host) reaches the private Account Service",
               catalog.get("org") is not None,
               f"got {str(catalog)[:80]}")
-        note("book", f"org={catalog.get('org')} accounts={len(catalog.get('accounts', []))}")
+        common.note("book", f"org={catalog.get('org')} accounts={len(catalog.get('accounts', []))}")
     except Exception as e:
         check("the SEAM (on the host) reaches the private Account Service", False,
               f"{type(e).__name__}: {e}")
-        catalog = {"accounts": []}
 
     print()
     print("== a real account-analysis turn, end to end, through the boundary ==")
@@ -108,7 +103,7 @@ with tempfile.TemporaryDirectory() as d:
           f"text={text[:90]!r}")
     check("the turn was GROUNDED in the tenant's own book (records were supplied)",
           bool(supplied), f"supplied={supplied}")
-    note("answer", " ".join(text.split())[:160])
+    common.note("answer", " ".join(text.split())[:160])
     first_prev = thread.prev
 
     # Guidance governs: the eval guidance names its own vocabulary, and the analyst is told to
@@ -212,8 +207,8 @@ with tempfile.TemporaryDirectory() as d:
     # A NOTE, not a check: this leg has no assertion behind it — the evidence is the gateway's
     # own decision log, read by proof_checks.py. Scored as a check it added one to both sides
     # of the score line and could never fail, which is an unfalsifiable claim dressed as proof.
-    note("IronClaw reached ONLY the model provider", "see the gateway decision log")
-    note("split", "trusted seam -> private business data; IronClaw -> model provider only")
+    common.note("IronClaw reached ONLY the model provider", "see the gateway decision log")
+    common.note("split", "trusted seam -> private business data; IronClaw -> model provider only")
 
 print()
 checks.finish("SERVICE PATH PASSES UNDER CONTAINMENT — the product works, not just the runtime.")

@@ -30,9 +30,15 @@ That is exactly the line the three broken legs fell on the wrong side of, and it
 contained runtime falls on the wrong side of on purpose — inside the boundary those same
 addresses raise ENETUNREACH, which is the containment being observed rather than a defect.
 
-Stdout contract — the last line the caller parses:
+Stdout contract — two PREFIX-ANCHORED lines, in this order:
 
     REACHABLE_FROM_UNCONTAINED=<host:port>[,<host:port>...]
+    DISCRIMINATING=<host:port>[,<host:port>...]
+
+Both are stated because the caller reads by prefix (`probe-egress.sh` uses
+`sed -n 's/^…//p' | tail -1`), not by position. This block used to call the first one "the last
+line the caller parses" while `main()` printed the second one after it — harmless only by
+accident, and the accident was that no caller ever did what the contract described.
 
 Empty is a legitimate answer and produces an empty value rather than a missing line, so the
 caller can tell "nothing is measurable" from "the control did not run".

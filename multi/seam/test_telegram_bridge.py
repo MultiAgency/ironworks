@@ -21,8 +21,13 @@ import dataclasses, json, os
 os.environ["IRONCLAW_API"] = "http://test.invalid"
 try:
     from . import context_ingress as ing
+    # The registry suite owns the synthetic guidance fixture: it is the file that tests
+    # what guidance must contain, so the minimal VALID example belongs beside those rules
+    # rather than byte-copied here. Through the shim, per test_suite_contract's rule.
+    from .test_registry import _synthetic_guidance
 except ImportError:
     import context_ingress as ing
+    from test_registry import _synthetic_guidance
 
 
 def _seam(name):
@@ -48,24 +53,10 @@ def _seam(name):
 # The one explicit test client: there is no ambient default client or persona any more
 # (the env-pair fallback was removed) — every thread names its client.
 CL = ing.ClientConfig(slug="testco", ironclaw_token="test-token",
-                      account_token="test-account-token", persona="TEST PERSONA (fixture)")
-
-
-def _synthetic_guidance(slug):
-    """Minimal valid slug-bound guidance for registry fixtures (client guidance is
-    mandatory and fail-closed since the pre-sale readiness round)."""
-    return (f"<!-- client-guidance v1 slug: {slug} -->\n"
-            "> **SYNTHETIC GUIDANCE — test fixture, not a real business.**\n"
-            f"# Client guidance — {slug.title()} Test Co (synthetic)\n"
-            "## Company & offer\nTest fixture organization; sells fixture widgets.\n"
-            "## Target customer\nFixture buyers.\n"
-            "## Qualification criteria\n- fixture pain\n- fixture budget\n"
-            "## Disqualification criteria\n- not a fixture\n"
-            "## Account stages\nnew -> qualified. Recommend only these, continue discovery, or deprioritize.\n"
-            "## Supported evidence sources\nThe loaded fixture book only.\n"
-            "## Desired decisions\nWhich fixture accounts to focus on.\n"
-            "## Terminology\nNone.\n"
-            "## Prohibited claims & actions\nRead-only always.\n")
+                      account_token="test-account-token", persona="TEST PERSONA (fixture)",
+                      # Stands in for a tenant already through `resolve_account_scopes`; the flag
+                      # defaults to False so that omitting it fails closed rather than open.
+                      organization_verified=True)
 
 
 def test_bridge_dispatch_and_state():
@@ -133,13 +124,50 @@ def test_bridge_empty_registry_fails_closed():
     tb = _seam("telegram_bridge")
     try:
         tb.load_groups()
-        assert False, "empty registry served groups — the removed fallback is back?"
+        raise AssertionError("empty registry served groups — the removed fallback is back?")
     except RuntimeError as e:
         assert "no client groups" in str(e)
     finally:
         for k in ("SALES_GROUP_ID", "IRONCLAW_TOKEN", "ACCOUNT_TOKEN"):
             os.environ.pop(k, None)
     print("  PASS empty-registry fails closed: SALES_GROUP_ID fallback removed, env ignored")
+
+
+def test_an_unverified_tenant_cannot_load_threads():
+    """The enforcement half of the org-scope guarantee: `_load_threads` refuses a tenant whose
+    organization the Account Service never authenticated.
+
+    `registry.ClientConfig.organization_verified` defaults to False and only
+    `account_service.resolve_account_scopes` may set it. This asserts what that default BUYS —
+    without it the bridge loads the conversation and serves on registry `ORG_ID` metadata, which
+    `SECURITY.md` states is operator metadata and never authoritative.
+
+    It belongs here rather than in `test_registry.py`, which contracts itself to import
+    `registry` alone; the registry-side property is pinned there.
+    """
+    import tempfile, pathlib
+    bstate = _seam("bridge_state")
+    tb = _seam("telegram_bridge")
+    unverified = dataclasses.replace(CL, organization_verified=False)
+    with tempfile.TemporaryDirectory() as d:
+        st = bstate.BridgeState(pathlib.Path(d) / "state.db")
+        try:
+            try:
+                tb._load_threads({"-100999": unverified}, state=st)
+            except Exception as e:
+                assert type(e).__name__ == "AccountScopeError", f"wrong refusal: {type(e).__name__}: {e}"
+                # The message has to name the tenant: one unverified entry stops bridge startup
+                # for everyone, and an operator reading the failure needs to know which.
+                assert "testco" in str(e), f"the refusal does not name the tenant: {e}"
+            else:
+                raise AssertionError(
+                    "_load_threads accepted a tenant the Account Service never authenticated")
+            # Positive control: the SAME call with the flag set must succeed, or the assertion
+            # above would also pass on a `_load_threads` that refused everything.
+            assert tb._load_threads({"-100999": CL}, state=st)["-100999"].client.slug == "testco"
+        finally:
+            st.close()
+    print("  PASS an unverified tenant is refused at thread load, a verified one is not")
 
 
 def test_bridge_persists_ever_supplied_across_restart():

@@ -55,7 +55,6 @@ def test_canonical_pytest_discovery_includes_every_intended_offline_location():
         "multi/verify/test_output_text_visibility.py",
     } <= testpaths
     assert "--ignore" not in config.get("addopts", "")
-    assert (ROOT / "multi/seam/test_handoff_2b.py").is_file()
     assert (ROOT / "multi/verify/test_output_text_visibility.py").is_file()
 
 
@@ -140,19 +139,118 @@ def test_a_tracked_but_deleted_file_is_a_verdict_not_a_traceback():
     assert rq.emit([("a", rq.PASS), ("b", rq.BLOCKED)]) == 3
 
 
+# The directories `release verify` runs as scripts, and the minimum number of runnable
+# suites each must hold. Read by two tests below; see the second for why they compare.
+_GATED_DIRS = {"deploy/lib": 12, "deploy/account-intel/data": 2, "multi/eval": 1,
+               "deploy/egress": 2}
+
+
+def test_the_shell_gate_covers_what_runs_here_not_only_what_ships():
+    """`.gitignore` decides DISTRIBUTION. It was also deciding what gets linted.
+
+    Two live operator scripts — `deploy/repoint-hostname.sh` and `deploy/backup-laptop-agency.sh`
+    — source `deploy/lib`, hold a Cloudflare token and a bot token, and run against real
+    infrastructure. `shell_checks` enumerated with `tracked()`, which excludes ignored files, so
+    on the one machine that runs them they were parsed, shellchecked and pipefail-guarded by
+    nothing. "Do not ship it" and "do not check it" are separate decisions and only the first was
+    ever made.
+
+    ASSERTED IN BOTH ENVIRONMENTS, which is the awkward half. A fresh CI checkout has no ignored
+    files, so `present()` and `tracked()` are equal there and any assertion about the difference
+    would pass for the wrong reason. So: the superset relation and the enumerator in use are
+    asserted always, and the disjointness of the ignored set is asserted only when there IS one —
+    with the empty case reported rather than silently skipped."""
+    import subprocess
+    gate = _load("deploy/run-quality.py", "quality_gate")
+    shipped, here = set(gate.tracked("*.sh")), set(gate.present("*.sh"))
+    assert shipped and here, "no shell scripts found at all — the enumerator is looking wrong"
+    assert shipped <= here, (
+        f"`present()` lost files `tracked()` had: {sorted(p.name for p in shipped - here)}")
+
+    src = (ROOT / "deploy" / "run-quality.py").read_text()
+    assert 'shell_files = present("*.sh")' in src, (
+        "the shell gate went back to `tracked()`, which does not see the ignored operator "
+        "scripts that run on this machine")
+    # js_checks stays on `tracked()` on purpose — see present()'s docstring (node_modules).
+    assert 'js_files = tracked(' in src
+
+    ignored = {ROOT / p for p in subprocess.run(
+        ["git", "ls-files", "--others", "--ignored", "--exclude-standard", "--", "*.sh"],
+        cwd=ROOT, capture_output=True, text=True).stdout.split()}
+    if not ignored:
+        print("  (no ignored *.sh present — the superset relation is all this can assert here)")
+        return
+    assert not (ignored & shipped), "a file is both ignored and shipped; git disagrees with itself"
+    assert ignored <= here, (
+        "these run here and no gate sees them: "
+        f"{sorted(p.name for p in ignored - here)}")
+
+
+def test_ruff_reports_no_warnings_of_its_own():
+    """A CONFIGURED RULE THAT DOES NOTHING IS WORSE THAN AN ABSENT ONE, because the config reads
+    as coverage. `pyproject.toml` selected `E303` for months; it is preview-only in the pinned
+    ruff, so it never ran. Ruff announced this on EVERY invocation —
+
+        warning: Selection `E303` has no effect because preview is not enabled
+
+    — and every gate discarded it, because the check only ever looked at the exit code. Meanwhile
+    the comment beside the selection went on citing a triple blank line as the reason it was
+    there, and the tree accumulated twelve of them, the worst twenty-one lines long.
+
+    THE ASSERTION IS ON STDERR, NOT ON A KNOWN STRING. A first draft matched only "has no effect"
+    and would have missed the second instance found minutes later — `warning: Invalid # noqa
+    directive`, raised because a comment mentioned the directive spelling in prose and ruff parses
+    it wherever it appears. Both are the same defect: a suppression or selection that looks like
+    configuration and does nothing. Ruff is quiet when it is happy, so anything on stderr is a
+    finding and this needs no list of which rules are preview-only in this release."""
+    import subprocess
+    result = subprocess.run(
+        ["ruff", "check", ".", "deploy/lib/compose-persona", "deploy/ironworks"],
+        cwd=ROOT, capture_output=True, text=True)
+    if result.returncode == 2 and "No such file" in (result.stderr + result.stdout):
+        return                                     # ruff not installed; the gate blocks on that
+    noise = [ln for ln in result.stderr.splitlines() if ln.strip()]
+    assert not noise, (
+        "ruff emitted warnings, which means part of this configuration is not doing what it "
+        f"looks like it does: {noise}. A selection with no effect gates nothing; a malformed "
+        "suppression suppresses nothing.")
+
+
+def test_the_whitespace_residue_guard_catches_what_ruff_cannot():
+    """The rules E303 and W391 used to nominally cover, asserted against real bytes.
+
+    Watch the empty case first: `_residue_in(b"")` must be silent, because a guard that reports
+    a finding for every file is as useless as one that reports none."""
+    gate = _load("deploy/run-quality.py", "quality_gate")
+    assert gate._residue_in(b"") == []
+    assert gate._residue_in(b"\x00\x01binary") == []
+    assert gate._residue_in(b"fine\n\nstill fine\n") == []
+    assert gate._residue_in(b"a\n\n\n\nb\n") == [(":2", "more than 2 consecutive blank lines")]
+    assert gate._residue_in(b"a\n\n") == [("", "blank line at end of file")]
+    assert gate._residue_in(b"a") == [("", "no newline at end of file")]
+    # Not Python-only: the class is an editing residue, not a language feature.
+    assert gate._residue_in(b"#!/bin/sh\necho a\n\n\n\necho b\n")
+
+
 def test_every_gated_suite_runs_its_own_tests():
     """`release verify` runs each gate suite as a SCRIPT, so a file with no `__main__` block
     exits 0 having run nothing and is scored PASS.
 
     `multi/seam/test_suite_contract.py` asserts exactly this property, and the seam check above
-    asserts it again — but both glob SEAM alone, so the three OTHER directories `release verify`
+    asserts it again — but both glob SEAM alone, so the other directories `release verify`
     discovers were never covered. This file had no runner itself, which is how eight of its own
     assertions went unexecuted behind a green `gate.lib.ci_contracts` row. Seam is deliberately
     absent from the map below: it already has two guards, and a third would only drift from them.
 
     The floor is asserted PER DIRECTORY. A single total would let one populated directory satisfy
-    it while another had silently emptied out."""
-    gated = {"deploy/lib": 12, "deploy/account-intel/data": 2, "multi/eval": 1}
+    it while another had silently emptied out.
+
+    `deploy/egress` is in this map because it is in `offline_dirs` — and it was in NEITHER until
+    the two were compared. pytest collected its suites (`pyproject.toml` testpaths) while the
+    readiness artifact did not run them, so the boundary suites were gated by the aggregate run
+    alone. `test_release_verify_discovers_the_same_directories_this_map_floors` below is what
+    keeps the two lists from drifting again, since that is exactly what happened here."""
+    gated = _GATED_DIRS
     no_runner, hand_listed = [], []
     for rel, floor in gated.items():
         checked = 0
@@ -175,6 +273,36 @@ def test_every_gated_suite_runs_its_own_tests():
         f"scores them PASS while running none of them: {no_runner}")
     assert not hand_listed, (
         f"these suites run a HAND-MAINTAINED list instead of discovering: {hand_listed}")
+
+
+def test_release_verify_discovers_the_same_directories_this_map_floors():
+    """TWO HAND-MAINTAINED LISTS OF THE SAME DIRECTORIES, AND THEY HAD DIVERGED. `release
+    verify`'s `offline_dirs` decides which suites run for the readiness artifact; the `gated` map
+    above decides which are floor-checked for having a runner. `deploy/egress` was in neither
+    while pytest collected it, so its two suites — including the one driving the real gateway over
+    real sockets — never contributed to `release.promotable`.
+
+    Adding it to both fixes today. Comparing them fixes tomorrow: neither list can gain or lose a
+    directory alone. Seam is the one deliberate asymmetry (it has two guards of its own), so it is
+    named here rather than silently tolerated."""
+    source = (ROOT / "deploy" / "ironworks").read_text()
+    block = source.split("offline_dirs = (", 1)[1].split("\n    gates = [", 1)[0]
+    discovered = set()
+    for name in ("seam", "deploy/lib", "deploy/account-intel/data", "deploy/egress",
+                 "multi/eval", "multi/verify"):
+        parts = name.split("/")
+        needle = " / ".join(f'"{p}"' for p in parts)
+        if needle in block or (name == "seam" and "seam," in block):
+            discovered.add(name)
+    floored = set(_GATED_DIRS) | {"seam"}          # seam: guarded by test_suite_contract instead
+    # `multi/eval` is floored but NOT discovered — its one suite is named individually in the
+    # `gates` list below `offline_dirs`, because the directory also holds non-test modules.
+    assert discovered - floored == set(), (
+        f"`release verify` discovers {sorted(discovered - floored)}, which nothing floors for "
+        "having a runner — a suite there could score PASS while executing nothing")
+    assert "deploy/egress" in discovered, (
+        "deploy/egress fell out of offline_dirs; pytest still collects it, so the release "
+        "artifact would go green without ever running the egress boundary suites")
 
 
 def _defines_tests(tree):

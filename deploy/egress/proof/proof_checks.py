@@ -14,7 +14,6 @@ THREE GROUPS:
              forwarding somewhere else
 """
 import atexit
-import json
 import os
 import re
 import subprocess
@@ -41,32 +40,16 @@ sys.path.insert(0, os.path.join(REPO, "multi", "verify"))
 # the product does, which is the one thing line 25 says it must not get wrong.
 sys.path.append(os.path.join(REPO, "deploy", "lib"))
 import pins  # noqa: E402
-from common import Checks, delete_user, request  # noqa: E402
+from common import Checks, delete_user, note, request  # noqa: E402
 from egress_status import decision_lines  # noqa: E402
+# The destination SCHEMA, from the one fail-closed reader — this file used to own it
+# while two gate tests restated it independently.
+from egress_destinations import load_forbidden_destinations  # noqa: E402
 # Same rule for the answer text as for the model: read it the way the product
 # does. The local copy this replaces had no item-type filter, so it included
 # model reasoning the client never sees.
 from responses import output_text as text_of  # noqa: E402
 MODEL = pins.model_pin(REPO)
-
-
-def load_forbidden_destinations():
-    """Load and validate the one policy consumed by both egress probes."""
-    path = os.path.join(REPO, "deploy", "egress", "forbidden-destinations.json")
-    with open(path) as fh:
-        doc = json.load(fh)
-    destinations = doc.get("destinations") if isinstance(doc, dict) else None
-    if not isinstance(destinations, list) or not destinations:
-        raise ValueError(f"{path}: destinations must be a non-empty list")
-    for destination in destinations:
-        if (not isinstance(destination, dict)
-                or set(destination) != {"label", "host", "port"}
-                or not isinstance(destination["label"], str)
-                or not isinstance(destination["host"], str)
-                or not isinstance(destination["port"], int)
-                or not destination["label"] or not destination["host"]):
-            raise ValueError(f"{path}: invalid destination {destination!r}")
-    return destinations
 
 
 FORBIDDEN_DESTINATIONS = load_forbidden_destinations()
@@ -96,10 +79,6 @@ ALLOW_PORT = ALLOW_PORT or "443"
 # run was scored as a pass or as a hard failure, never as "nothing was measured".
 checks = Checks()
 check = checks.check
-
-
-def note(label, detail):
-    print(f"  ..  {label}: {detail}")
 
 
 def api(method, path, token, body=None, key=None, timeout=180):

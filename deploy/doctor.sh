@@ -27,10 +27,22 @@ LIB_DIR="$(cd "$(dirname "$0")" && pwd)/lib"
 . "$LIB_DIR/fleet.sh"
 SECRETS_DIR="${MULTRON_SECRETS_DIR:-$FLEET_AGENCY_DIR/agents}"
 CF_CONFIG="${CLOUDFLARED_CONFIG:-$HOME/.cloudflared/config.yml}"
-TOKEN_DIR="${MULTRON_TOKEN_DIR:-$FLEET_AGENCY_DIR}"
 
+# UNKNOWN FLAGS ARE REFUSED, like the four siblings that already do it (probe-egress.sh:48,
+# run-proof.sh:44, provision.sh:70, deprovision.sh:53 — the third of those records the lesson in
+# a comment). `-*) ;;` silently discarded them, so `./doctor.sh plex --dep` ran the SHALLOW check
+# and reported all-green under a flag the operator believed had selected the deep one. A second
+# positional silently overwrote the first for the same reason.
 DEEP=0; TARGET=""
-for a in "$@"; do case "$a" in --deep) DEEP=1 ;; -*) ;; *) TARGET="$a" ;; esac; done
+for a in "$@"; do
+  case "$a" in
+    --deep) DEEP=1 ;;
+    -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -*) echo "!! unknown flag: $a (usage: $0 [<slug>] [--deep])" >&2; exit 2 ;;
+    *)  [ -z "$TARGET" ] || { echo "!! two targets given: '$TARGET' and '$a'" >&2; exit 2; }
+        TARGET="$a" ;;
+  esac
+done
 
 c_grn=$'\033[32m'; c_red=$'\033[31m'; c_yel=$'\033[33m'; c_off=$'\033[0m'
 AGENT_RC=0
@@ -115,10 +127,11 @@ check_agent() {
   else fail "cloudflared ingress rule" "add '  - hostname: $HOST / service: http://localhost:$port' to $CF_CONFIG and SIGHUP cloudflared"; fi
 
   # 7) bot-token checks (optional): getMe + getWebhookInfo
-  local tf="$TOKEN_DIR/$slug.token"
-  if [ -f "$tf" ]; then
-    local BT me wh
-    BT=$(tr -d '[:space:]' < "$tf")
+  local tf BT me wh
+  tf="$(fleet_bot_token_file "$slug")"
+  # `fleet_bot_token`, not a local read: its twin in enable-device-link.sh honoured neither
+  # MULTRON_TOKEN_DIR nor the whitespace strip this line has always had.
+  if BT="$(fleet_bot_token "$slug")"; then
     me=$(curl_tg "$BT" getMe -s --max-time 10 | fleet_json "d['result']['username'] if d.get('ok') else 'ERR'" 2>/dev/null)
     if [ "$me" = "$BOTU" ]; then pass "bot token valid (@$me)"; else fail "bot token" "getMe='$me' (expected @$BOTU) — wrong/revoked token"; fi
     wh=$(curl_tg "$BT" getWebhookInfo -s --max-time 12 | fleet_json "('registered' if d['result'].get('url') else 'NONE')+' pending='+str(d['result'].get('pending_update_count'))+' err='+str(d['result'].get('last_error_message'))" 2>/dev/null)

@@ -85,6 +85,17 @@ services:
     cpus: 0.5
     pids_limit: 64
     security_opt: [no-new-privileges:true]
+    # THE ONLY SERVICE IN A CONTAINMENT OVERLAY WITHOUT THESE. `egress` next door has
+    # `cap_drop: [ALL]` and `read_only: true`; this one had neither, in the file whose entire
+    # purpose is confinement. nginx cannot drop ALL outright — its master starts as root and
+    # needs CHOWN/SETGID/SETUID to hand the worker processes to the `nginx` user — so the three
+    # it genuinely uses are added back and nothing else is. It binds :3000, so
+    # NET_BIND_SERVICE is deliberately not among them.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    # read_only with tmpfs for the two paths nginx writes: its cache tree and the pid file.
+    read_only: true
+    tmpfs: ["/var/cache/nginx", "/var/run"]
     logging:
       driver: json-file
       options: { max-size: "20m", max-file: "5" }

@@ -26,7 +26,7 @@
 import os, pathlib, sys, json, subprocess
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-from common import post, model_pin, Checks  # noqa: E402
+from common import post, model_pin, Checks, members  # noqa: E402
 
 
 DB_CONTAINER = os.environ.get("MT_DB_CONTAINER", "multi-db-1")
@@ -98,20 +98,12 @@ checks = Checks()
 check = checks.check
 block = checks.block
 
-def a_member():
-    try:
-        import context_ingress as ing
-        clients = ing.load_clients()
-        return sorted(clients.values(), key=lambda c: c.slug)[0] if clients else None
-    except Exception as e:
-        print(f"     (client registry unavailable: {e})"); return None
 
 print("== hostile member turn: tenant-shared mounts are unreachable ==")
 count_before = shared_entry_count()   # captured before the hostile turn; compared after (db leg)
-c = a_member()
-if c is None:
-    block("(turn) tenant-shared read/write attempts", "no provisioned client / instance unreachable")
-else:
+picked = members(1, block, "(turn) tenant-shared read/write attempts")
+if picked is not None:
+    c = picked[0]
     try:
         r = post("/v1/responses", {
             "model": getattr(c, "model", os.environ.get("MODEL") or model_pin()),

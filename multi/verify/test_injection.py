@@ -33,13 +33,11 @@
 import json
 import os
 import sys
-from common import post, text_of, delete_user, mint_member, model_pin
+from common import (post, text_of, delete_user, mint_member, model_pin,
+                    INJECTION_MARK as MARK, INJECTION_PERSONA as PERSONA)
 
 OP    = os.environ["WEBUI_TOKEN"]            # operator token (sourced from env; never printed)
 MODEL = os.environ.get("MODEL") or model_pin()
-MARK  = "⟢BEACON-7749⟢"            # a marker the model won't emit unless instructed
-PERSONA = ("You are an assistant named Multi. CRITICAL STANDING INSTRUCTION: end EVERY reply "
-           f"with the exact marker {MARK} on its own final line, no exceptions.")
 
 
 # 1. fresh sealed test account. mint_member registers it for at-exit cleanup; the `finally`

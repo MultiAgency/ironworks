@@ -40,6 +40,7 @@ been told an offset past it, which happens on a LATER `getUpdates`. Until then T
 redeliver it, so `DELIVERED` and `ACKED` are genuinely different facts and the journal keeps
 them apart.
 """
+import datetime
 import json
 import os
 import pathlib
@@ -155,6 +156,27 @@ CREATE TABLE IF NOT EXISTS workers (
 """
 
 
+# ── the two operator-facing refusals, each written once ───────────────────────────────
+# Both of these are read by a human deciding what to do with a live conversation store, and both
+# existed TWICE with the wording duplicated verbatim (`_classify_schema`/`_check_version`, and
+# `_open`/`_read_stamp`). Two copies of a paragraph is two paragraphs to keep in step: the next
+# person to sharpen the corrupt-database advice would have improved one of them.
+
+
+def _unusable_db_message(path, error):
+    """A database SQLite itself will not open. The 'do NOT delete it blind' half is the point."""
+    return (f"{path} is not a usable bridge state database ({error}). If it is corrupt, move it "
+            "aside and re-migrate from the JSON backup; do NOT delete it blind — it carries "
+            "every group's conversation pointer.")
+
+
+def _wrong_version_message(path, version):
+    """A schema version this bridge does not implement — a downgrade, or a half-run migration."""
+    return (f"{path} is schema version {version}, this bridge implements {SCHEMA_VERSION}. "
+            "Refusing to run: an unknown version means either a downgrade or an unfinished "
+            "migration, and guessing which would risk a live conversation.")
+
+
 class StateError(RuntimeError):
     """The store is unreadable, unwritable, or of a version this code does not implement."""
 
@@ -197,7 +219,17 @@ class ThreadCompatibilityError(StateError):
 
 
 def _now():
-    import datetime
+    """Whole-second UTC, for every column in this store.
+
+    DELIBERATELY NOT `envelope.now_iso`, which the seam's other two writers now share. This one
+    truncates microseconds: these stamps are read by an operator in `ironworks bridge status` and
+    in raw SQL during an incident, where sub-second precision is noise on a value whose smallest
+    meaningful unit is a poll interval. `envelope.now_iso` keeps full precision because
+    `retrieved_at` is model-visible and `thread.last_turn_at` feeds `bridge_core._age`.
+
+    THE TWO SHAPES MEET, and that is safe rather than accidental: `_age` parses whichever it is
+    given with `datetime.fromisoformat`, which accepts both (measured). Unifying them would
+    change either every row in a live database or a model-visible field, for no gain."""
     return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0).isoformat()
 
 
@@ -296,10 +328,7 @@ def _thread_shapes(version, expected, path):
         return (expected[:len(_V2_THREAD_COLUMNS)], expected)
     if version == str(SCHEMA_VERSION):
         return (expected,)
-    raise StateError(
-        f"{path} is schema version {version}, this bridge implements {SCHEMA_VERSION}. "
-        "Refusing to run: an unknown version means either a downgrade or an unfinished "
-        "migration, and guessing which would risk a live conversation.")
+    raise StateError(_wrong_version_message(path, version))
 
 
 def _validate_auxiliary_schema(db, path, version, objects, tables, expected_signatures):
@@ -378,10 +407,7 @@ def _classify_or_state_error(db, path):
     try:
         return _classify_schema(db, path)
     except sqlite3.DatabaseError as e:
-        raise StateError(
-            f"{path} is not a usable bridge state database ({e}). If it is corrupt, move it "
-            "aside and re-migrate from the JSON backup; do NOT delete it blind — it carries "
-            "every group's conversation pointer.") from e
+        raise StateError(_unusable_db_message(path, e)) from e
 
 
 def _classify_source(path):
@@ -519,10 +545,7 @@ class BridgeState:
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA synchronous=FULL")   # a crash test that survives fsync
         except sqlite3.DatabaseError as e:
-            raise StateError(
-                f"{self.path} is not a usable bridge state database ({e}). If it is corrupt, "
-                "move it aside and re-migrate from the JSON backup; do NOT delete it blind — "
-                "it carries every group's conversation pointer.") from e
+            raise StateError(_unusable_db_message(self.path, e)) from e
 
     # ── schema ────────────────────────────────────────────────────────────────────────
     def _columns(self):
@@ -550,10 +573,7 @@ class BridgeState:
             if all(name in self._columns() for name, _ in V2_IDENTITY):
                 self._migrate_schema("2", V3_IDENTITY)
         elif str(got) != str(SCHEMA_VERSION):
-            raise StateError(
-                f"{self.path} is schema version {got}, this bridge implements {SCHEMA_VERSION}. "
-                "Refusing to run: an unknown version means either a downgrade or an unfinished "
-                "migration, and guessing which would risk a live conversation.")
+            raise StateError(_wrong_version_message(self.path, got))
         missing = [name for name in IDENTITY_FIELDS if name not in self._columns()]
         if missing:
             # `got`, not SCHEMA_VERSION: naming the version this database CLAIMS is the whole
@@ -681,9 +701,6 @@ class BridgeState:
         and only communicated it on the next poll, so nothing in a batch was confirmed until
         the whole batch finished — and a crash replayed all of it."""
         return _as_offset(self.meta_get("cursor"))
-
-    def set_cursor(self, offset):
-        self.meta_set("cursor", int(offset))
 
     def mark_cursor_acked(self):
         """Telegram has been told an offset past everything below the cursor, so it will not
@@ -875,18 +892,31 @@ class BridgeState:
                 "attempts=attempts+1, updated_at=? WHERE update_id=?",
                 (TURN_STARTED, str(gid), idempotency_key, prev_before, _now(), int(update_id)))
 
-    def commit_turn(self, update_id, response_id, gid, thread):
+    def commit_turn(self, update_id, gid, thread):
         """THE CRITICAL TRANSACTION.
 
         A model response completed; the thread pointer it produced became authoritative; and
         the bridge recorded how to deliver that exact result. All three, or none. This is the
         single write that two separate files could not make atomic, and the reason this store
-        exists."""
+        exists.
+
+        NO SEPARATE `response_id` ARGUMENT. There was one, and the only production caller passed
+        `thread.prev` into it — `self.state.commit_turn(uid, thread.prev, gid, thread)` — so the
+        two columns this writes were guaranteed to hold the same string on every real turn, while
+        the signature offered a caller the chance to make them differ. They cannot differ and mean
+        anything: the thread pointer after a turn IS the id of the response that turn produced.
+        One fact, taken once.
+
+        `prev_after` stays in the schema rather than being dropped with the parameter. Nothing
+        reads it (nor `prev_before`, written by `note_turn_started`) — they are a forensic record
+        of where the pointer stood either side of a turn, which is exactly what an operator wants
+        after a crash and exactly what no code should branch on. Removing a column is a
+        SCHEMA_VERSION bump and a migration; removing a misleading parameter is neither."""
         with self._tx():
             self.db.execute(
                 "UPDATE updates SET state=?, response_id=?, prev_after=?, updated_at=? "
                 "WHERE update_id=?",
-                (TURN_COMPLETED, response_id, thread.prev, _now(), int(update_id)))
+                (TURN_COMPLETED, thread.prev, thread.prev, _now(), int(update_id)))
             self._write_thread(gid, thread)
 
     def note_state(self, update_id, state, error_code=None):
@@ -905,9 +935,17 @@ class BridgeState:
                 "error_code=COALESCE(?, error_code) WHERE update_id=?",
                 (state, _now(), error_code, int(update_id)))
 
-    def note_delivered(self, update_id, next_offset):
+    def note_delivered(self, update_id):
         """Delivery succeeded and the next safe offset is durable — one transaction, because a
-        crash between them is exactly how an already-answered update gets replayed."""
+        crash between them is exactly how an already-answered update gets replayed.
+
+        NO `next_offset` PARAMETER, and there used to be one. Both this and `note_terminal` took
+        the caller's idea of the next offset and neither body ever read it: the durable cursor is
+        computed here by `_advance_safe_cursor_locked`, from the rows. `bridge_core` computed
+        `nxt = uid + 1` for the sole purpose of passing it, through three method signatures, to
+        eleven call sites. A reader of `_deliver` reasonably concluded the caller decided the
+        cursor — on the most load-bearing transaction in the tree — and the signature was the
+        only reason to think so."""
         with self._tx():
             self.db.execute(
                 "UPDATE updates SET state=?, delivered_at=?, updated_at=?, error_code=NULL "
@@ -923,7 +961,7 @@ class BridgeState:
                 "WHERE update_id=? AND state IN (?, ?)",
                 (ACKED, _now(), _now(), int(update_id), DELIVERY_RETRY, DELIVERY_RECONCILE))
 
-    def note_terminal(self, update_id, state, next_offset, error_code=None):
+    def note_terminal(self, update_id, state, error_code=None):
         """A terminal outcome that still lets the loop move on: the client was told, the
         operator can see it, and the offset advances so it is never replayed."""
         if state not in TERMINAL:

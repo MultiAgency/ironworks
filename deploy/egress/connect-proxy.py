@@ -14,6 +14,20 @@ at all — only CONNECT, only to an exact `host:port` in the allowlist, only TCP
 that. TLS is end-to-end to the real origin: this never terminates it, never sees a byte of
 plaintext, and needs no certificate.
 
+WHAT THE ALLOWLIST THEREFORE DOES AND DOES NOT CONSTRAIN. It is matched against the CONNECT
+REQUEST LINE — the target a client asks for — and nothing after the `200`. Once the relay starts
+this cannot see, and does not look at, the ClientHello: a permitted tunnel may carry any SNI the
+client chooses, and reaching a different origin that way depends only on whether the allowed
+host's address also fronts one. The DNS lookup is likewise THIS process's, against the host
+resolver, unpinned.
+
+That is deliberate, not an omission to close later. Reading SNI means parsing TLS here, and
+enforcing it means terminating TLS here — which would move the one component that currently sits
+OUTSIDE the trust boundary inside it, holding plaintext and a CA, to police a one-entry
+allowlist. `docs/EGRESS_CONTAINMENT.md` § Residual risk states the scope and names the two
+triggers for revisiting it: a second allowlist entry, or a provider host on shared edge
+infrastructure. Do not "fix" this without changing that document first.
+
 WHY CONNECT AND NOT A DNS ALIAS. A network alias pointing `cloud-api.near.ai` at a relay makes
 the runtime resolve the provider host to a PRIVATE address, and the runtime's own provider
 policy classifies addresses after resolution. Naming the proxy explicitly keeps the provider

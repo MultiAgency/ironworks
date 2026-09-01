@@ -147,12 +147,16 @@ assert_runtime_security() {
   [ "$cap_drop" = ALL ] || fail "$container cap_drop is $cap_drop"
   [ "$security" = no-new-privileges:true ] || fail "$container security_opt is $security"
   [ "$root" = "$FLEET_WORKSPACE_ROOT" ] || fail "$container workspace root is $root"
-  case ",$cap_add," in
-    *,CAP_CHOWN,*CAP_SETGID,*CAP_SETUID,|*,CAP_CHOWN,*CAP_SETUID,*CAP_SETGID,) ;;
-    *) fail "$container cap_add is $cap_add" ;;
-  esac
-  [ "$(printf '%s' "$cap_add" | tr -cd ',' | wc -c | tr -d ' ')" = 2 ] \
-    || fail "$container has unexpected added capabilities: $cap_add"
+  # SORTED SET COMPARISON, not a pattern per ordering. The two `case` arms this replaces matched
+  # 2 of the 6 permutations of three capabilities, and passed only because `docker inspect`
+  # happens to preserve `docker run` argument order and CAP_CHOWN happens to be passed first.
+  # Reorder the flags in provisioning — a legitimate edit — and a correctly-confined container
+  # fails this check. Sorting makes the assertion about the SET, which is what it means, and the
+  # separate comma-count guard against extra capabilities becomes redundant: an unexpected
+  # capability changes the sorted string.
+  cap_sorted="$(printf '%s' "$cap_add" | tr ',' '\n' | sort | paste -sd, -)"
+  [ "$cap_sorted" = "CAP_CHOWN,CAP_SETGID,CAP_SETUID" ] \
+    || fail "$container cap_add is $cap_add (expected exactly CHOWN+SETGID+SETUID)"
   case "$cap_add" in *DAC_OVERRIDE*) fail "$container gained DAC_OVERRIDE" ;; esac
   case "$ports" in *2222*) fail "$container publishes 2222: $ports" ;; esac
   if docker inspect "$container" --format '{{range .Config.Env}}{{println .}}{{end}}' \

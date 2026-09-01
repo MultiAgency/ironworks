@@ -24,6 +24,8 @@
 #   3. Account Store rows in ONE transaction: activities, contacts, accounts, organization
 #   4. operator-curated staging material: ~/.agency/account-data/<slug>/ and <slug>.env
 #   5. registry, guidance, and bridge state LAST, after retry evidence is no longer needed
+#   6. proof that the RUNNING bridge no longer routes the group — in memory, not just on
+#      disk (it runs after 5 precisely because the point is a reload without this tenant)
 # What it deliberately does NOT touch:
 #   - backups (Hetzner images / restic snapshots age out on their documented schedules;
 #     after any restore of a backup that predates a deletion, RE-RUN this script)
@@ -144,10 +146,22 @@ REGISTRY_REMOVED_AT="${SCOPE_REGISTRY_REMOVED_AT:-}"
 # completely deprovisioned tenant look half-present on every rerun, which turned an idempotent
 # second run into a BLOCKED one. Only `group_id` has a demonstrated need to outlive the registry.
 if [ -n "$ACCT_TOKEN" ]; then
+  # This file receives the tenant's AUTHENTICATED account list, so every exit path removes it.
+  # INT/TERM must EXIT as well as clean up: a cleanup-only signal trap returns to the script and
+  # would let the destructive teardown continue after the operator pressed Ctrl-C or stopped it.
   AUTH_BODY=$(mktemp "${TMPDIR:-/tmp}/ironworks-deprovision-auth.XXXXXX")
+  cleanup_auth_body() { rm -f "${AUTH_BODY:-}"; }
+  trap cleanup_auth_body EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   AUTH_CODE=$(fleet_http_code curl_header "X-Service-Token: $ACCT_TOKEN" -s --max-time 15 \
     -o "$AUTH_BODY" -w '%{http_code}' "$ACCOUNT_BASE/list_accounts" 2>/dev/null)
-  AUTH_DOC=$(cat "$AUTH_BODY"); rm -f "$AUTH_BODY"
+  AUTH_DOC=$(cat "$AUTH_BODY")
+  cleanup_auth_body
+  AUTH_BODY=""
+  # The sensitive temporary file is gone. Restore the shell's default signal behaviour rather
+  # than leaving handlers installed across the later destructive steps.
+  trap - EXIT INT TERM
   if [ "$AUTH_CODE" = "200" ]; then
     ORG_ID=$(printf '%s' "$AUTH_DOC" | fleet_json "d.get('org') or ''") || {
       echo "!! authenticated Account Service response was unreadable; refusing deletion." >&2
@@ -277,7 +291,7 @@ fi
 
 echo; echo "== EXECUTING deletion for '$SLUG' =="
 DEGRADED=0     # any step that could not fully complete flips this; summarized at the end
-echo "-- 1/5 revoke the Account-Service identity, then PROVE the old token is refused"
+echo "-- 1/6 revoke the Account-Service identity, then PROVE the old token is refused"
 RM_FILES=0
 # The `-f` guard is gone: an absent map is zero to deregister, which the module already treats
 # as the desired end state. A CORRUPT map is now refused here too — this path used to
@@ -302,7 +316,7 @@ fi
 receipt_set account_revoked
 SCOPE_STATE="account_revoked"
 
-echo "-- 2/5 delete the sealed IronClaw account, then PROBE whether its token still works"
+echo "-- 2/6 delete the sealed IronClaw account, then PROBE whether its token still works"
 REVOCATION="BLOCKED"          # VERIFIED_REVOKED | RESIDUAL | BLOCKED
 if [ -n "$IC_UID" ] && [ -n "${WEBUI_TOKEN:-}" ]; then
   # Through the fleet helper, which provision.sh's compensator also uses — the two teardown
@@ -381,14 +395,32 @@ case "$REVOCATION" in
     # push the recorded expiry a further year out every time someone ran the script, which
     # turns an audit record into a moving target.
     if [ "$ALREADY_ABSENT" != 1 ]; then
-      python3 "$LIFECYCLE" residual add "$SLUG" "uid=${IC_UID:-unknown}" \
-        "lifetime_days=${SESSION_LIFETIME_DAYS:-365}" "org_id=$ORG_ID" >&2 || true
+      # A FAILED LEDGER WRITE MUST NOT EXIT 3. `|| true` swallowed it, and exit 3 is defined at
+      # the top of this file as "recorded in the residual-authority ledger with its expiry" —
+      # so a run whose write failed still claimed the record existed, for the one token whose
+      # whole point is that nothing else remembers it. `ironworks doctor` fails while an entry
+      # is outstanding; no entry means it passes, and the session goes on authenticating with
+      # nothing tracking it. That is the exact silence the ledger was built to end.
+      #
+      # DEGRADED=1, not an abort: the teardown itself succeeded and the remaining steps must
+      # still run. The `if [ "$DEGRADED" = 1 ]` block below already exits 1 BEFORE the
+      # REVOCATION case is reached, and 1 is this file's own code for "a revocation step did
+      # not complete" — so the honest exit falls out of the vocabulary already here.
+      if ! python3 "$LIFECYCLE" residual add "$SLUG" "uid=${IC_UID:-unknown}" \
+           "lifetime_days=${SESSION_LIFETIME_DAYS:-365}" "org_id=$ORG_ID" >&2; then
+        echo "   !! the residual-authority ledger entry could NOT be written for '$SLUG'." >&2
+        echo "      The member session STILL AUTHENTICATES and nothing is now tracking it." >&2
+        echo "      Record it by hand before this terminal is gone:" >&2
+        echo "        python3 $LIFECYCLE residual add $SLUG uid=${IC_UID:-unknown} \\" >&2
+        echo "          lifetime_days=${SESSION_LIFETIME_DAYS:-365} org_id=$ORG_ID" >&2
+        DEGRADED=1
+      fi
     fi
     echo "   The containment is CUSTODY (the token never left the seam) plus the global" >&2
     echo "   rotation in deploy/README.md. This DELETE did not end their access." >&2 ;;
 esac
 
-echo "-- 3/5 delete Account-Store rows in one transaction"
+echo "-- 3/6 delete Account-Store rows in one transaction"
 # THE ONLY IRREVERSIBLE STEP THAT WAS NOT HARDENED. Bare, this psql aborts the script under
 # `set -e` — after step 1 has deregistered the org token and step 2 has deleted the sealed
 # member. No AUDIT line, no `!! DEGRADED` banner, no residual-authority entry for a member
@@ -410,7 +442,7 @@ then
   DEGRADED=1
 fi
 
-echo "-- 4/5 remove operator-curated staging material on THIS machine"
+echo "-- 4/6 remove operator-curated staging material on THIS machine"
 # Same rule as step 1 above, for the same reason: an `&&` chain makes a FAILED rm invisible —
 # set -e ignores it, RM_STAGE does not increment, and the audit line below then reports
 # `staging=0` as though there had been nothing to remove. The staged tree holds this tenant's
@@ -443,7 +475,7 @@ if [ "$O2" != 0 ] || [ "$A2" != 0 ] || [ "$C2" != 0 ] || [ "$T2" != 0 ]; then
   DEGRADED=1
 fi
 
-echo "-- 5/5 remove routing and local credentials LAST"
+echo "-- 5/6 remove routing and local credentials LAST"
 BR_REMOVED=0            # what step 5 actually removed, for the AUDIT line — never the inventory
 if [ "$DEGRADED" = 0 ] && [ "$REVOCATION" != "BLOCKED" ]; then
   if [ -n "$GROUP_ID" ] && [ -f "$BRIDGE_STATE_DB" ]; then

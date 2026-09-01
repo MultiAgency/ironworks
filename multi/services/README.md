@@ -52,10 +52,15 @@ enforces is composition, and the fields that sound like capability configuration
 
 ## The fields
 
-Three kinds, and the difference matters when you change one. **Enforced** fields change behavior.
-**Validated** fields are checked but nothing branches on them at serve time. **Descriptive**
-fields are read by no code at all — they record an invariant for a human, and editing one changes
-nothing.
+Four kinds, and the difference matters when you change one. **Enforced** fields change behavior.
+**Validated** fields are checked at load but nothing branches on them at serve time. **Bound**
+fields are read by no code at serve time either, but a gate checks them against the thing that
+actually enforces them, so a wrong value fails CI rather than sitting there reading as
+configuration. **Descriptive** fields are prose.
+
+A bound field is still not a switch. `deploy/lib/test_service_manifest_binding.py` makes each one
+a claim that has to be TRUE; it does not make any of them a control. Editing `tool_policy` still
+confines nothing differently — it now breaks the build instead of quietly lying.
 
 ### Enforced — the serving path reads these
 
@@ -74,15 +79,26 @@ nothing.
 |---|---|
 | `version` | a positive integer, validated at load and carried into `<service>@<version>` for the operator console, release artifact, and persisted thread compatibility identity. A mismatch refuses thread continuation until explicit reset. **It is compatibility-bound metadata, not an independent lifecycle:** two versions cannot coexist, and there is no version rollout or migration machinery. Bump it to mark a composition change a human should notice, not to expect staged rollout behavior. |
 | `audience` | `internal` or `external`; any other value refuses to load. Nothing branches on it at serve time. `ironworks doctor` asserts the DEFAULT service is `external`, so a forgotten `SERVICE=` key can never land a tenant on an internal composition. |
-| `capabilities` | the declared shape: `account_records: read-only`, `writes: none`, `egress: none`, `outreach: none`. `test_services.py` asserts every definition declares exactly this, so the frozen boundary is machine-checked rather than restated in prose. It is an assertion about the product, **not** a switch: no code grants or denies anything from this block. What actually holds the boundary is the read-only Account Service surface, `confine-member.sh`, and the network boundary. |
+| `capabilities` | the declared shape: `account_records: read-only`, `writes: none`, `egress: none`, `outreach: none`. `test_services.py` asserts every definition declares exactly this, so the frozen boundary is machine-checked rather than restated in prose. It is an assertion about the product, **not** a switch: no code grants or denies anything from this block. What actually holds the boundary is the read-only Account Service surface, `confine-member.sh`, and the network boundary — and `test_service_manifest_binding.py` now checks the declaration against two of those three, asserting that `egress: none` means the enforced allowlist keeps no egress tool and that `read-only`/`writes: none` means the Account Service declares no mutating route. The declaration is still not the control; it is now a claim the controls have to agree with. |
+| `responsibility` | one non-empty sentence stating what this service is answerable for, **in the organization's vocabulary rather than the composition's**. Validated for presence, type and non-emptiness and nothing else — a responsibility that is *parsed* becomes a specification, and a specification for one service is a workflow engine for two. Nothing branches on it at serve time and nothing should. It exists because the meaning of a service used to live only in persona prose, so anything needing it had to grep a prompt: `test_services.py` now anchors the internal service's objective assertions on this field and on the composition together, and asserts every service declares its own distinct one. |
 | `evaluation` | the suite that measures whether this service's answers are any good, as a repo-relative path — or `null`, meaning none does. Required, and load-validated: a path that is not on disk refuses to load, so a suite cannot be named after it is moved or removed. Nothing is *run* from here; `multi/eval/run_eval.py` is invoked directly, and a declared path is a claim about which suite covers this service, not a hook. |
+
+### Bound — read by no code, but gated against what enforces them
+
+Provisioning still invokes `confine-member.sh` by path and the Account Store is still built from
+its compose file; neither consults this JSON. What changed is that a gate now refuses a value
+that is not true of those things, so these fields can no longer read as security configuration
+while meaning nothing.
+
+| key | meaning |
+|---|---|
+| `tool_policy` | which script confines a member of this service. Provisioning invokes it by path (`provision.sh`, `confine-existing.sh`), not through this field — but `test_service_manifest_binding.py` asserts the named script is the one provisioning hands a member token to, so naming a script nothing runs fails the build. |
+| `data_schema` | the schema the tenant's book is expected to match. Nothing validates a *book* against it, and nothing here does now — but the gate asserts it names the file the Account Store's compose mounts into Postgres' initdb hook, so it cannot drift from the schema actually loaded. |
 
 ### Descriptive — read by no code
 
 | key | meaning |
 |---|---|
-| `tool_policy` | which script confines a member of this service. Provisioning invokes `confine-member.sh` by path (`provision.sh`, `confine-existing.sh`); it does not read this field, so changing it confines nothing differently. |
-| `data_schema` | the schema the tenant's book is expected to match. Nothing validates a book against it. |
 | `title`, `summary` | prose for a human reading the definition. |
 
 ## Binding a service to a tenant takes TWO agreeing edits
@@ -110,9 +126,13 @@ which is what a genuine service change looks like.
 
 ## Adding one
 
-1. Write the persona parts. Prove the composition in a test before any tenant runs it.
-2. Add `multi/services/<name>.json`. `./deploy/ironworks service validate` must pass.
-3. Add the evaluation cases that say what a good answer looks like for THIS service, or declare
+1. State the `responsibility` first, before writing a line of persona. If you cannot say in one
+   sentence what the service is answerable for, in the organization's words, the service is not
+   ready to exist — and the persona you would write instead is where that vagueness goes to hide.
+2. Write the persona parts. Prove the composition in a test before any tenant runs it.
+3. Add `multi/services/<name>.json`. `./deploy/ironworks service validate` must pass, and it
+   refuses a missing, blank or non-string `responsibility` like any other required key.
+4. Add the evaluation cases that say what a good answer looks like for THIS service, or declare
    `"evaluation": null` and know that nothing measures its answers. `multi/eval/` composes the
    DEFAULT service and grades account-qualification cases; it measures the account-analysis claim
    and does not generalise for free. `relationship-intelligence@1` declares `null` for exactly
@@ -123,7 +143,7 @@ which is what a genuine service change looks like.
    **Do not write a suite to fill a `null`.** The `null` is information, and a suite built to
    remove it measures nothing anyone claimed. Add one when there is a product claim about that
    service's answers and cases that actually test it.
-4. Provision a tenant with `--service <name>`, and put `service: <name>` in its guidance
+5. Provision a tenant with `--service <name>`, and put `service: <name>` in its guidance
    marker. Preflight validates the pair before it creates any authority.
 
 ## What a service definition is not

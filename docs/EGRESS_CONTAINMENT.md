@@ -24,7 +24,8 @@ Only when `./deploy/ironworks egress status` reports `VERIFIED` may an operator 
 
 - the runtime has no direct public route;
 - outbound connections must cross the CONNECT gateway;
-- the gateway permits only exact allowlisted `host:port` destinations; and
+- the gateway admits only exact allowlisted `host:port` CONNECT targets, and relays TLS it never
+  terminates — see § Residual risk for what that constrains and what it does not; and
 - the boundary holds independently of which model-visible tools are enabled.
 
 The guarantee applies to the contained runtime, not every process or container on the host. A
@@ -98,3 +99,29 @@ The allowed model provider remains an intentional data sink: a prompt-injected t
 tenant context in traffic to that provider. Containment prevents arbitrary destinations; it does
 not make inference private from the selected provider, validate provider retention claims, or
 replace organization scoping, token custody, redaction, and per-bearer tool confinement.
+
+**The allowlist is enforced on the CONNECT request line, not on the traffic.** The gateway matches
+the target a client *asks* for, answers `200`, and from then on relays bytes — it never terminates
+TLS and never reads the ClientHello. So the guarantee constrains which host the runtime may open a
+tunnel to; it does not constrain what the runtime then speaks inside that tunnel. Two consequences
+follow, and neither is closed by the allowlist:
+
+- a client that opens a permitted tunnel may send a ClientHello naming a **different** server. Whether
+  that reaches anything depends on whether the allowed host's address also fronts other origins, as
+  shared CDN or edge infrastructure commonly does;
+- the **gateway** performs the DNS lookup, against the host's resolver, with no pinning. Poisoning or
+  rebinding that name redirects the tunnel. (The contained runtime has no resolver path out at all —
+  measured, `deploy/egress/proof/proof_checks.py` §14 — so this is the gateway's resolution, not
+  the client's.)
+
+This is the design working as intended rather than a defect to fix. Inspecting SNI would mean
+parsing TLS in the one component deliberately built never to look inside it, and terminating TLS
+would put the component that currently sits outside the trust boundary inside it, holding
+plaintext and a certificate authority. Both are worse trades for a single-entry allowlist. The
+exposure is also narrow and sits behind two other controls: reaching it requires code execution
+inside the contained runtime, where per-bearer confinement has already disabled the egress tools,
+and traffic to the provider itself is an accepted sink above.
+
+**Revisit when either trigger fires:** the allowlist gains a second entry, or the provider host is
+found to resolve to shared, multi-tenant edge infrastructure. Until then this is stated, not
+mitigated.

@@ -54,9 +54,13 @@ BOT_USERNAME="${TELEGRAM_BOT_USERNAME:?}"; WH_SECRET="${TELEGRAM_WEBHOOK_SECRET:
 CONTAINER="${CONTAINER:?}"; HOSTN="${AGENT_HOSTNAME:?}"
 WEBHOOK_URL="https://$HOSTN/webhooks/extensions/telegram/updates"
 
-TOKEN_FILE="$FLEET_AGENCY_DIR/$SLUG.token"
-[ -f "$TOKEN_FILE" ] || { echo "!! no bot token file: $TOKEN_FILE" >&2; exit 1; }
-BOT_TOKEN="$(cat "$TOKEN_FILE")"
+# `fleet_bot_token`, not `cat`: this read honoured neither MULTRON_TOKEN_DIR nor a trailing
+# newline, so on a host that relocates the token directory it looked in the wrong place, and a
+# token file written with `echo` built `…/bot<token>\n/setWebhook` — a failure that reads as a
+# bad token rather than a bad read. doctor.sh had both guards; this did not.
+TOKEN_FILE="$(fleet_bot_token_file "$SLUG")"
+BOT_TOKEN="$(fleet_bot_token "$SLUG")" \
+  || { echo "!! no bot token file: $TOKEN_FILE" >&2; exit 1; }
 
 # Current active_revision — the FULL-REPLACE PUT needs it as expected_revision (optimistic
 # concurrency; a wrong value 409s and changes nothing, so this is safe either way). It lives
@@ -107,8 +111,19 @@ start=$(curl_bearer "$OP_TOKEN" -s -X POST -H 'content-type: application/json' \
 IFS=$'\t' read -r step flow inv <<<"$(printf '%s' "$start" | python3 -c 'import sys,json
 d = json.load(sys.stdin)
 print("\t".join([d.get("device_link", {}).get("step", "?"), d.get("flow_id", ""), d.get("invocation_id", "")]))' 2>/dev/null || printf '?\t\t')"
-[ -n "$flow" ] && curl_bearer "$OP_TOKEN" -s -o /dev/null -X POST -H 'content-type: application/json' \
-  -d "{\"flow_id\":\"$flow\",\"invocation_id\":\"$inv\"}" "$API/api/reborn/product-auth/device-link/cancel" || true
+# THE CANCEL IS REPORTED. `A && B || C` swallowed a failed cancel with no output, leaving a live
+# device-link flow pending against the instance — the exact opposite of the sentence four lines
+# up ("then cancel it so nothing is left pending"). It is also the `A && B || C` shape that
+# provision.sh:288-289 and :426-430 were explicitly restructured away from: when `flow` is empty,
+# `B` never runs and `C` fires, so the two branches were never distinguishable anyway.
+if [ -n "$flow" ]; then
+  if ! curl_bearer "$OP_TOKEN" -sf -o /dev/null -X POST -H 'content-type: application/json' \
+       -d "{\"flow_id\":\"$flow\",\"invocation_id\":\"$inv\"}" \
+       "$API/api/reborn/product-auth/device-link/cancel"; then
+    echo "!! could not cancel probe device-link flow $flow — it is left PENDING on the instance." >&2
+    echo "   Cancel it by hand, or it will expire on the runtime's own schedule." >&2
+  fi
+fi
 if [ "$step" = "failed" ]; then
   echo "!! device-link still reports step=failed — api creds may be wrong; check the values" >&2; exit 1
 fi

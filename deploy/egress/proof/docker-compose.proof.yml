@@ -126,6 +126,12 @@ services:
     networks: [inner, edge]
     mem_limit: 128m
     security_opt: [no-new-privileges:true]
+    # Same confinement as the real overlay's `ingress`, and for the same reason: a proof stack
+    # that is less contained than the thing it certifies is measuring a different system.
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    read_only: true
+    tmpfs: ["/var/cache/nginx", "/var/run"]
 
 volumes:
   ic-data:

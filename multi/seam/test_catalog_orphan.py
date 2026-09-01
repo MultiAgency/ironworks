@@ -48,7 +48,7 @@ def _seam(name):
 
 
 CL = ing.ClientConfig(slug="testco", ironclaw_token="t", account_token="a",
-                      persona="TEST PERSONA (fixture)")
+                      persona="TEST PERSONA (fixture)", organization_verified=True)
 
 V1 = "2026-08-01T00:00:00+00:00"
 V2 = "2026-08-02T00:00:00+00:00"

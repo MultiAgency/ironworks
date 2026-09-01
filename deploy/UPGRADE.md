@@ -195,6 +195,24 @@ live certification evidence. Do not perform this rehearsal on live storage.
    `git cherry <new-pin> <old-pin>`: a commit forward-ported onto the release branch under
    a different SHA still shows in `git log` but is prefixed `-` by `git cherry` (already
    present); only `+` lines are genuinely dropped.
+2b. **Re-check the two upstream gaps, and RECORD the answer against the rev.** Both
+   [`docs/upstream-proposals/`](../docs/upstream-proposals/) documents — shared-conversation
+   admission, and organizational conversation authority — say "revisit only after an official
+   IronClaw release materially changes [those] semantics", and a pin bump is that event. Nothing
+   made anyone look, so the two documents have said `NO ACTION PLANNED` / `BRIDGE REMAINS
+   REQUIRED` since they were written without either claim being re-measured.
+
+   This is a five-minute read of the delta you already have open in step 2, and it is the only
+   step here that is about the PRODUCT rather than the deployment: those two gaps are why the
+   bridge exists at all (see `README.md` § "Why this rather than the IronClaw CLI"). If upstream
+   closes one, a large part of this repository becomes redundant — which is good news, and news
+   you want as a dated line rather than as a discovery.
+
+   In the ironclaw checkout at the new pin, look for a route-keyed shared-conversation admission
+   surface and for any org/tenant-level conversation authority mode. Then edit the `Status:` line
+   of each document to name the rev you checked and the date, even when the answer is unchanged.
+   An unchanged answer that was re-measured is a different fact from one nobody looked at.
+
 3. **Edit `IRONCLAW_PIN`.** Full SHA, `#` comment with the tag name and date.
 4. **Build on the VM.** Build a rev-named tag, then retag `ironclaw:main` to it —
    rollback becomes a retag, and `ironclaw:main` is never of unknown provenance:

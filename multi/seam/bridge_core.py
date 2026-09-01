@@ -115,7 +115,6 @@ class Bridge:
     # ── one update ────────────────────────────────────────────────────────────────────
     def handle_update(self, upd):
         uid = int(upd["update_id"])
-        nxt = uid + 1
         row = self.state.update_row(uid)
 
         if row is not None and row["state"] in (bs.DELIVERY_RETRY, bs.DELIVERY_RECONCILE):
@@ -139,7 +138,7 @@ class Bridge:
             return OUT_ALREADY_DELIVERED
 
         msg = upd.get("message") or upd.get("edited_message")
-        hit = summon = None
+        summon = None
         if msg is not None:
             summon = self.summoned(msg)
 
@@ -156,7 +155,7 @@ class Bridge:
         #
         # Routing decides whether to ANSWER. It cannot decide what already happened.
         if summon is None and row is not None and row["state"] in bs.IN_FLIGHT:
-            self.state.note_terminal(uid, bs.RECOVERY_BLOCKED, nxt, "route_lost_in_flight")
+            self.state.note_terminal(uid, bs.RECOVERY_BLOCKED, "route_lost_in_flight")
             self.log(f"[recovery-blocked] update {uid} was {row['state']} but its group is no "
                      "longer in the registry — a turn may have run and cannot be delivered; "
                      "operator reconciliation required (SECURITY.md)")
@@ -173,7 +172,7 @@ class Bridge:
             # below is an UPDATE that would match no row.
             if row is None:
                 self.state.note_received(uid, gid, (msg or {}).get("message_id"))
-            self.state.note_terminal(uid, bs.IGNORED, nxt)
+            self.state.note_terminal(uid, bs.IGNORED)
             self._log_unregistered(msg)
             return OUT_IGNORED
         gid, req = summon
@@ -187,13 +186,13 @@ class Bridge:
         speaker = ((msg or {}).get("from") or {}).get("first_name") or "Someone"
 
         if st == bs.RECEIVED:
-            return self._run_turn(uid, gid, req, speaker, nxt)
+            return self._run_turn(uid, gid, req, speaker)
 
         if st == bs.TURN_STARTED:
             # A turn MAY have run. See the module docstring: this is not recoverable on the
             # pinned runtime, and running another one would bill a second turn AND produce a
             # different answer chained on a pointer that may already have moved.
-            self.state.note_terminal(uid, bs.RECOVERY_BLOCKED, nxt, "turn_outcome_unknown")
+            self.state.note_terminal(uid, bs.RECOVERY_BLOCKED, "turn_outcome_unknown")
             self.log(f"[recovery-blocked] update {uid} for {self.groups[gid].slug}: a model turn "
                      f"may have run before the crash and cannot be recovered (key was recorded, "
                      f"response id was not). No second turn was run. See "
@@ -203,18 +202,18 @@ class Bridge:
 
         if st in (bs.TURN_COMPLETED, bs.DELIVERY_STARTED):
             # The answer exists and is retrievable. Deliver THAT one.
-            return self._deliver_existing(uid, gid, row, nxt)
+            return self._deliver_existing(uid, gid, row)
 
         # DELIVERED is handled above, before routing — it is unreachable from here, because a
         # row that existed was returned already and a row that did not is RECEIVED.
         # Unknown state: fail closed and say so, without guessing what it meant.
-        self.state.note_terminal(uid, bs.FAILED_TERMINAL, nxt, "unknown_state")
+        self.state.note_terminal(uid, bs.FAILED_TERMINAL, "unknown_state")
         self.log(f"[state error] update {uid} carries unknown state {st!r} — refusing to "
                  "interpret it; the update is terminal and was not re-run")
         return OUT_FAILED
 
     # ── the two paths ─────────────────────────────────────────────────────────────────
-    def _run_turn(self, uid, gid, req, speaker, nxt):
+    def _run_turn(self, uid, gid, req, speaker):
         thread = self.threads[gid]
         client = self.groups[gid]
         # Chosen HERE and recorded BEFORE the request, because it is the only handle that
@@ -237,7 +236,7 @@ class Bridge:
             if getattr(e, "request_sent", False):
                 # The model MAY have run. Treating this as an ordinary failure and asking the
                 # client to retry would invite a second execution of an unknowable first turn.
-                self.state.note_terminal(uid, bs.RECOVERY_BLOCKED, nxt,
+                self.state.note_terminal(uid, bs.RECOVERY_BLOCKED,
                                          "turn_outcome_unknown")
                 self.log(f"[recovery-blocked] {client.slug}@{gid} update {uid}: a model turn "
                          f"may have run ({type(e).__name__}) and no durable response id is "
@@ -249,7 +248,7 @@ class Bridge:
             # the next update. An ordinary turn exception has never stopped the loop and must
             # not start now.
             code = type(e).__name__
-            self.state.note_terminal(uid, bs.FAILED_TERMINAL, nxt, code)
+            self.state.note_terminal(uid, bs.FAILED_TERMINAL, code)
             self.log(f"[turn error] {client.slug}@{gid} update {uid}: {self.redact(e)}")
             self._notify(gid, CLIENT_FAILURE)
             self._clear_inflight(gid)
@@ -257,13 +256,13 @@ class Bridge:
 
         # THE CRITICAL TRANSACTION: the response id and the thread pointer it produced become
         # durable together, or neither does.
-        self.state.commit_turn(uid, thread.prev, gid, thread)
-        return self._deliver(uid, gid, text, nxt)
+        self.state.commit_turn(uid, gid, thread)
+        return self._deliver(uid, gid, text)
 
-    def _deliver_existing(self, uid, gid, row, nxt):
+    def _deliver_existing(self, uid, gid, row):
         rid = row["response_id"]
         if not rid:
-            self.state.note_terminal(uid, bs.RECOVERY_BLOCKED, nxt, "no_response_id")
+            self.state.note_terminal(uid, bs.RECOVERY_BLOCKED, "no_response_id")
             self.log(f"[recovery-blocked] update {uid}: recorded complete with no response id")
             self._notify(gid, CLIENT_BLOCKED)
             return OUT_RECOVERY_BLOCKED
@@ -272,15 +271,15 @@ class Bridge:
         except Exception as e:
             # Retrieval is FALLIBLE — the retention window is unmeasured (Q5), so this is a
             # real path, not a defensive one. Never fall back to running a new turn.
-            self.state.note_terminal(uid, bs.RECOVERY_BLOCKED, nxt, "response_unavailable")
+            self.state.note_terminal(uid, bs.RECOVERY_BLOCKED, "response_unavailable")
             self.log(f"[recovery-blocked] update {uid}: response {rid} could not be retrieved "
                      f"({self.redact(e)}). No new turn was run.")
             self._notify(gid, CLIENT_BLOCKED)
             return OUT_RECOVERY_BLOCKED
-        outcome = self._deliver(uid, gid, text, nxt)
+        outcome = self._deliver(uid, gid, text)
         return OUT_REDELIVERED if outcome == OUT_ANSWERED else outcome
 
-    def _deliver(self, uid, gid, text, nxt):
+    def _deliver(self, uid, gid, text):
         self.state.note_state(uid, bs.DELIVERY_STARTED)
         self.state.note_worker(gid, uid, "deliver", heartbeat_at=self.clock.now_iso())
         self.state.note_progress(inflight_stage="deliver")
@@ -290,7 +289,7 @@ class Bridge:
             acked = int(getattr(e, "acknowledged_chunks", 0))
             known_unsent = bool(getattr(e, "known_not_sent", False)) and acked == 0
             if known_unsent:
-                self.state.note_terminal(uid, bs.DELIVERY_RETRY, nxt,
+                self.state.note_terminal(uid, bs.DELIVERY_RETRY,
                                          "delivery_known_not_sent")
                 self.log(f"[delivery retry] update {uid}: Telegram rejected the first chunk "
                          f"before accepting it ({self.redact(e)}); stored answer retained for "
@@ -298,7 +297,7 @@ class Bridge:
                 outcome = OUT_DELIVERY_RETRY
             else:
                 code = "delivery_partial" if acked else "delivery_uncertain"
-                self.state.note_terminal(uid, bs.DELIVERY_RECONCILE, nxt, code)
+                self.state.note_terminal(uid, bs.DELIVERY_RECONCILE, code)
                 self.log(f"[delivery reconcile] update {uid}: {acked} chunk(s) acknowledged; "
                          f"complete delivery is not proved ({self.redact(e)}). Stored answer "
                          "retained; no model turn will be run.")
@@ -307,7 +306,7 @@ class Bridge:
             return outcome
         # Delivery and the next safe offset, together: a crash between them is precisely how an
         # already-answered update gets replayed.
-        self.state.note_delivered(uid, nxt)
+        self.state.note_delivered(uid)
         self._clear_inflight(gid, last_delivered_at=self.clock.now_iso())
         return OUT_ANSWERED
 

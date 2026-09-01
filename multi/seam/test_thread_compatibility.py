@@ -8,6 +8,7 @@ import pathlib
 import sqlite3
 import stat
 import tempfile
+import weakref
 import urllib.error
 
 try:
@@ -83,8 +84,22 @@ def assert_refuses(st, current, category):
 
 
 def _tmp_state():
+    """(TemporaryDirectory, BridgeState), with the close TIED to the directory.
+
+    The twelve call sites end `st.close(); d.cleanup()` on the happy path and do NOTHING on a
+    failing assertion — there is no try/finally anywhere, so a failure left an open SQLite handle
+    behind. Their shapes differ (several combine the setup and the cleanup with other statements
+    on one line), so restructuring twelve blocks into `with` would be a large re-indent for a
+    small guarantee.
+
+    `weakref.finalize` buys the guarantee outright: the state is closed when the directory is
+    finalized, which `TemporaryDirectory` does at `cleanup()`, at GC, or at interpreter exit —
+    whether or not the test reached its own cleanup line. Closing a handle whose file is already
+    unlinked is fine on POSIX, so finalizer order does not matter."""
     d = tempfile.TemporaryDirectory()
-    return d, bs.BridgeState(pathlib.Path(d.name) / "state.db")
+    st = bs.BridgeState(pathlib.Path(d.name) / "state.db")
+    weakref.finalize(d, st.close)
+    return d, st
 
 
 def test_fresh_row_binds_the_full_compatibility_identity():
@@ -845,7 +860,7 @@ def test_active_legacy_row_refuses_but_empty_legacy_row_auto_binds():
 def test_reset_clears_all_conversation_context_identity_and_preserves_delivery():
     d, st = _tmp_state(); persist(st, client())
     st.note_received(71, GID, 71)
-    st.note_terminal(71, bs.FAILED_TERMINAL, 72, "fixture")
+    st.note_terminal(71, bs.FAILED_TERMINAL, "fixture")
     delivery_before = dict(st.update_row(71))
     cursor_before, cursor_acked_before = st.cursor, st.cursor_acked
     assert st.reset_thread(GID) == 1

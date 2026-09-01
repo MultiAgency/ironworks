@@ -27,12 +27,18 @@ def render(value=None):
     root = operator_dir(value)
     source = TEMPLATE.read_text()
     default = str(DEFAULT_AGENCY_DIR)
-    if source.count(default) != 4:
-        raise RuntimeError("bridge.service no longer carries its four operator-root directives")
     rendered = source.replace(default, str(root))
+    # The four directives that must all move together. Named ONCE and counted FROM the list: the
+    # literal `!= 4` beside a four-item tuple was two statements of one fact, and adding a fifth
+    # directive would have satisfied the tuple while failing the count with a message naming
+    # "four".
     required = (f"EnvironmentFile={root}/bridge.env",
                 f"ExecStart=/usr/bin/env AGENCY_DIR={root} ",
                 f"BindPaths={root}", f"ReadWritePaths={root}")
+    if source.count(default) != len(required):
+        raise RuntimeError(
+            f"bridge.service carries {source.count(default)} operator-root occurrence(s); "
+            f"this renderer expects {len(required)}, one per directive it checks below")
     if not all(item in rendered for item in required):
         raise RuntimeError("rendered bridge unit does not use one operator directory everywhere")
     return rendered

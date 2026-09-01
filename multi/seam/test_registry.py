@@ -24,6 +24,11 @@ anywhere; the shared member token was reached only incidentally by
 non-zero exit without ever checking WHICH refusal fired; and the duplicate group id — the
 sharpest, since a miss serves a whole Telegram group the WRONG tenant's tokens and data — was
 pinned only by a live adversarial proof. A docstring that says "covered" is not coverage.
+
+Two checks here are not refusals but the PROPERTY the refusals rest on: `organization_verified`
+defaults to False, and a registry-loaded tenant carries `ORG_ID` as metadata while staying
+unverified. Its enforcement half — `_load_threads` refusing an unverified tenant — is in
+`test_telegram_bridge.py`, which has the bridge imports this suite deliberately does not.
 """
 import os, pathlib, tempfile
 
@@ -35,7 +40,12 @@ except ImportError:
 
 def _synthetic_guidance(slug):
     """Minimal valid slug-bound guidance for registry fixtures (client guidance is
-    mandatory and fail-closed since the pre-sale readiness round)."""
+    mandatory and fail-closed since the pre-sale readiness round).
+
+    SHARED WITH `test_telegram_bridge.py`, which imported a byte-identical copy of it. It lives
+    here because this suite is the one that tests what guidance must CONTAIN, so the minimal
+    valid example belongs beside the rules it satisfies — if a rule tightens, the fixture that
+    has to keep passing is in the same file as the assertion that tightened."""
     return (f"<!-- client-guidance v1 slug: {slug} -->\n"
             "> **SYNTHETIC GUIDANCE — test fixture, not a real business.**\n"
             f"# Client guidance — {slug.title()} Test Co (synthetic)\n"
@@ -228,6 +238,45 @@ def test_fact_fields_presence_survives_registry_parsing():
     assert clients["empty"].fact_fields == ()
     assert clients["listed"].fact_fields == ("allocation",)
     print("  PASS FACT_FIELDS presence survives registry parsing (None / () / declared)")
+
+
+def test_the_unverified_default_is_what_a_forgotten_kwarg_gets():
+    """`organization_verified` must default to False, so that FORGETTING it fails closed.
+
+    This asserts the default itself rather than only the registry call below, and the two are
+    deliberately separate tests: a change that flips the default back AND keeps the explicit
+    `organization_verified=False` in `load_clients` would leave the registry correct while every
+    other constructor in the tree silently became trusted again. That is the shape the defect
+    had — the guarantee resting on one keyword argument, with the dataclass fail-open behind it.
+    """
+    bare = reg.ClientConfig(slug="bare", ironclaw_token="it", account_token="at")
+    assert bare.organization_verified is False, \
+        "a directly-constructed ClientConfig is trusted by default — forgetting now fails OPEN"
+    print("  PASS ClientConfig defaults to unverified (a forgotten kwarg fails closed)")
+
+
+def test_a_registry_loaded_tenant_is_unverified_until_the_service_authenticates():
+    """Registry `ORG_ID` is operator metadata, so a freshly loaded tenant is NOT verified.
+
+    Only `account_service.resolve_account_scopes` may set the flag, and only from the org the
+    Account Service authenticated from the credential; `telegram_bridge._load_threads` refuses a
+    tenant without it (pinned in `test_telegram_bridge.py`, which has the bridge imports this
+    suite deliberately does not). Measured before this test existed: deleting the kwarg from
+    `load_clients` left all 596 offline tests green while the bridge began accepting registry
+    tenants on unauthenticated `ORG_ID` metadata.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        base = pathlib.Path(d)
+        (base / "acme.env").write_text(
+            "CLIENT_SLUG=acme\nACCOUNT_TOKEN=at-acme\nIRONCLAW_TOKEN=it-acme\nORG_ID=acme-org\n")
+        (base / "acme.guidance.md").write_text(_synthetic_guidance("acme"))
+        c = reg.load_clients(base)["acme"]
+    assert c.organization_verified is False, \
+        "a registry tenant is verified before the Account Service ever authenticated it"
+    # The metadata is still carried — it is useful in offline operator output — which is exactly
+    # why the flag, not the presence of an org id, is what the bridge is allowed to trust.
+    assert c.organization_id == "acme-org"
+    print("  PASS a registry-loaded tenant carries ORG_ID as metadata and stays unverified")
 
 
 if __name__ == "__main__":

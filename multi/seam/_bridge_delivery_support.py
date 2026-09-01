@@ -19,6 +19,13 @@ operator-visible degraded state was emitted.
 A crash here is `Crash`, a BaseException — not an Exception. `except Exception:` handlers in the
 bridge must not be able to swallow it, because a real SIGKILL is not catchable either.
 """
+# EVERY IMPORT HERE IS AN EXPORT. `__all__` at the foot of this file is built from `globals()`,
+# and the three suites that `from _bridge_delivery_support import *` rely on that: none of them
+# imports `json`, `bridge_core`, `bs`, `ing` or `tb` itself, and between them they use
+# `bridge_core` thirty-nine times and `json` once (test_bridge_recovery.py:232). An unused-import
+# check reads all five as dead — which is why `pyproject.toml` per-file-ignores F401 here — and
+# deleting them on that reading breaks three suites at import time. Add an import here only when
+# the star-importers should have it.
 import json
 import os
 import pathlib
@@ -37,9 +44,13 @@ except ImportError:  # direct execution compatibility
     import telegram_bridge as tb
 
 GID = "-100900001"
+# `organization_verified=True` is the fixture standing in for a tenant that has ALREADY been
+# through `resolve_account_scopes` — which is what every one of these suites is about, since they
+# start at `_load_threads` and go forward. The flag defaults to False so that forgetting it fails
+# closed; saying True here is the trust claim these fixtures were always making silently.
 CL = ing.ClientConfig(slug="testco", ironclaw_token="member-token",
                       account_token="org-token", telegram_group_id=GID,
-                      persona="TEST PERSONA (fixture)")
+                      persona="TEST PERSONA (fixture)", organization_verified=True)
 GROUPS = {GID: CL}
 
 
@@ -147,14 +158,23 @@ def _turns(ic, tw):
 
 
 class _Clock:
-    _n = [0.0]
+    """A monotonic fake, PER INSTANCE.
+
+    `_n = [0.0]` was a CLASS attribute, so all thirteen `_Clock()` in these suites shared one
+    counter and `sleep()` on any of them advanced every other. Harmless while the only
+    requirement is "increases" — which is why it survived — but it makes the value a function of
+    test ORDER, so the first assertion anyone writes about elapsed time would pass alone and fail
+    in the suite. Per-instance costs nothing and removes the trap."""
+
+    def __init__(self):
+        self._n = 0.0
 
     def monotonic(self):
-        self._n[0] += 0.001
-        return self._n[0]
+        self._n += 0.001
+        return self._n
 
     def sleep(self, s):
-        self._n[0] += s
+        self._n += s
 
     def now_iso(self, offset=0):
         return "2026-08-24T00:00:00+00:00"
@@ -218,7 +238,6 @@ def _tmp():
     return d, pathlib.Path(d.name) / "state.db"
 
 
-# ── the happy path, so every crash test below has a baseline ──────────────────────────
-
-
+# Everything defined above, re-exported for the three suites that star-import this module. See
+# the note at the imports: that includes the imported names, deliberately.
 __all__ = [name for name in globals() if not name.startswith("__")]

@@ -54,7 +54,6 @@ import os
 import pathlib
 import sys
 import urllib.error
-import urllib.request
 
 from common import DEFAULT_API, get
 

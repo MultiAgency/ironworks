@@ -32,7 +32,7 @@
 import os, pathlib, re, sys, json, subprocess, urllib.parse
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-from common import post, text_of, DEFAULT_API, model_pin, Checks  # noqa: E402
+from common import post, text_of, DEFAULT_API, model_pin, Checks, members  # noqa: E402
 
 
 def _mt_default():
@@ -68,17 +68,6 @@ checks = Checks()
 check = checks.check
 block = checks.block
 
-def a_member_token():
-    """First provisioned client's sealed member token (a real non-operator caller)."""
-    try:
-        import context_ingress as ing
-        clients = ing.load_clients()
-        if not clients:
-            return None
-        return sorted(clients.values(), key=lambda c: c.slug)[0].ironclaw_token
-    except Exception as e:
-        print(f"     (client registry unavailable: {e})")
-        return None
 
 # ---- (a) static: the container env carries no DEV_SECRET, and only allowlisted keys ----
 print("== (a) MT container env: no tenant-shared DEV_SECRET seeded ==")
@@ -103,10 +92,9 @@ except Exception as e:
 
 # ---- (b) behavioral backstop: a member turn cannot surface a tool credential ----
 print("== (b) member turn: no tenant-shared credential materializes ==")
-tok = a_member_token()
-if tok is None:
-    block("(b) member credential-exfil turn", "no provisioned client / instance unreachable")
-else:
+picked = members(1, block, "(b) member credential-exfil turn")
+if picked is not None:
+    tok = picked[0].ironclaw_token
     try:
         r = post("/v1/responses", {
             "model": os.environ.get("MODEL") or model_pin(),
@@ -153,13 +141,18 @@ else:
     else:
         # The operator has already: seeded IRONCLAW_REBORN_DEV_SECRET__<handle>=<value> and
         # restarted the STAGING instance. We only verify consume + no-leak here.
-        handle = None
-        if "--handle" in sys.argv:
-            handle = sys.argv[sys.argv.index("--handle") + 1]
-        expect = None
-        if "--expect" in sys.argv:
-            expect = sys.argv[sys.argv.index("--expect") + 1]
-        tok_c = a_member_token()
+        # `sys.argv[i + 1]` IndexErrors when the flag is last (`--handle` with nothing after
+        # it), which is a traceback where the block below already has the right message.
+        def _flag(name):
+            if name not in sys.argv:
+                return None
+            i = sys.argv.index(name) + 1
+            return sys.argv[i] if i < len(sys.argv) else None
+
+        handle = _flag("--handle")
+        expect = _flag("--expect")
+        picked_c = members(1)
+        tok_c = picked_c[0].ironclaw_token if picked_c else None
         if not (handle and expect and tok_c):
             block("(c) staging positive half",
                   "need --handle <name> --expect <seeded-value> and a provisioned staging client")

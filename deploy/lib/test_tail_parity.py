@@ -80,7 +80,9 @@ class TailParity(unittest.TestCase):
             f"by the same rules, stated twice for tool-vocabulary reasons only.")
 
     def test_rules_match_pairwise_except_the_recorded_divergence(self):
-        for i, (a, b) in enumerate(zip(self.op, self.sf), start=1):
+        # strict=True: the two rule lists are asserted equal in length by the test above, and a
+        # silent truncation here would compare only the shorter prefix and report parity.
+        for i, (a, b) in enumerate(zip(self.op, self.sf, strict=True), start=1):
             if a == b:
                 continue
             self.assertEqual(

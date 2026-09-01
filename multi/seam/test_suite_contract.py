@@ -43,6 +43,12 @@ letter of this check while restoring the defect.
 import ast
 import pathlib
 
+# A SANITY FLOOR, NOT A CENSUS. It exists to catch a glob that has stopped matching — a moved
+# directory, a renamed suffix — so it is set well BELOW the true count (18 at the time of
+# writing) and should never need bumping as suites are added. Stated once because it was
+# stated twice, in the file whose own thesis is that hand-maintained numbers drift.
+_SUITE_FLOOR = 14
+
 SEAM = pathlib.Path(__file__).resolve().parent
 
 
@@ -76,7 +82,8 @@ def test_every_seam_suite_runs_its_own_tests():
         elif "globals()" not in ast.unparse(block):
             hand_listed.append(path.name)
 
-    assert checked >= 14, f"only {checked} suites found — this check is looking in the wrong place"
+    assert checked >= _SUITE_FLOOR, (
+        f"only {checked} suites found — this check is looking in the wrong place")
     assert not no_runner, (
         "these suites define tests but execute NOTHING when run as scripts, so the local gate "
         f"in CONTRIBUTING.md scores them as passing while running none of them: {no_runner}. "
@@ -135,7 +142,10 @@ def test_every_seam_suite_reaches_its_siblings_through_the_shim():
     shims are two halves of one mechanism: the markers let pytest resolve these suites from the
     repository root, the shims keep them runnable as bare scripts from inside `multi/seam/`.
 
-    `test_handoff_2b.py` had the markers and not the shim. It reached its siblings with
+    `test_handoff_2b.py` (since retired with the unwired module it covered) had the markers and
+    not the shim. The incident is kept because the MECHANISM is still live — every suite here
+    depends on that pair — and a worked example is why the rule is followed. It reached its
+    siblings with
     `sys.path.insert(<this dir>)` and bare imports, so under `pytest multi/seam` from the root it
     loaded a SECOND copy of context_ingress, handoff, registry, persona, services, envelope,
     account_service, responses and pins as top-level modules beside the `multi.seam.*` ones
@@ -158,7 +168,8 @@ def test_every_seam_suite_reaches_its_siblings_through_the_shim():
             path_hackers.append(path.name)
 
     assert SIBLINGS, "no seam modules found — this check is looking in the wrong place"
-    assert checked >= 14, f"only {checked} suites found — this check is looking in the wrong place"
+    assert checked >= _SUITE_FLOOR, (
+        f"only {checked} suites found — this check is looking in the wrong place")
     assert not offenders, (
         "these suites import a seam sibling at module scope WITHOUT the try/except shim, so "
         f"pytest-from-the-root loads a second copy of it: {offenders}. Use the pair every other "

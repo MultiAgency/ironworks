@@ -27,7 +27,7 @@
 # This makes real LLM calls (one turn per client). Prereqs: MT instance on :3020 and a provisioned
 # client registry. Run:
 #   IRONCLAW_API=http://127.0.0.1:3020 python3 test_egress_closed.py
-import json, os, pathlib, sys, time, urllib.error, urllib.request
+import json, os, pathlib, sys, time, urllib.error
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
 import context_ingress as ing  # noqa: E402

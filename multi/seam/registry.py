@@ -65,9 +65,18 @@ class ClientConfig:
     # only operator metadata; the bridge replaces it with the authenticated /list_accounts
     # result at startup before it is allowed to load a persisted conversation.
     organization_id: str = ""
-    # Directly constructed configs are trusted test/adjunct inputs. Registry configs override
-    # this to False and only the authenticated startup resolution may turn it back on.
-    organization_verified: bool = True
+    # FALSE IS THE DEFAULT BECAUSE FORGETTING MUST BE SAFE. Only `resolve_account_scopes` may set
+    # this, and only from an org the Account Service authenticated; `telegram_bridge._load_threads`
+    # refuses to load a conversation without it. That made the whole guarantee rest on ONE keyword
+    # argument at the registry construction below remembering to be there — a fail-open default
+    # held shut by a line nothing tested. Measured: deleting that kwarg left all 596 offline tests
+    # green while `_load_threads` began ACCEPTING registry tenants, so the bridge would have served
+    # on the `ORG_ID` metadata that SECURITY.md says is never authoritative.
+    #
+    # Inverted, the same mistake fails closed, and every caller that passes True is making the
+    # trust claim explicitly and visibly — which is what a directly-constructed "trusted
+    # test/adjunct input" always was, said out loud. `test_registry.py` pins the registry case.
+    organization_verified: bool = False
     model: str = MODEL
     # Which `facts` keys THIS partner's book is expected to carry, in the order they should be
     # read. Declared per client (registry FACT_FIELDS) because every book is shaped differently

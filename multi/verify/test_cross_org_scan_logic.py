@@ -39,7 +39,7 @@ for fb in finals:
 
 def scan(finals, b_private):
     ns = {"finals": finals, "b_private": b_private, "json": json}
-    exec(SCAN, ns)  # noqa: S102 — the point is to run the proof's own bytes
+    exec(SCAN, ns)   # deliberate: the point is to run the proof's OWN bytes, not a copy
     return ns["tool_leak"], ns["attempted"]
 
 

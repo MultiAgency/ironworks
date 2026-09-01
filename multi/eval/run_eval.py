@@ -8,6 +8,9 @@
       python3 multi/eval/run_eval.py
 
 Options:
+    --service NAME  which service definition to compose and grade (default: the seam's
+                    DEFAULT_SERVICE). A service is refused unless its own definition declares
+                    THIS suite as its `evaluation` — see `resolve_service` for why.
     --case <id>     run one case
     --runs N        run each case N times (consistency: same book, same question)
     --json PATH     write the full transcript + verdicts
@@ -22,10 +25,62 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1] / "seam"))
 
 from cases import CASES, PASS, FAIL, REVIEW
 
-def build_thread():
+# BELOW THE IMPORT, NOT ABOVE IT, and that is load-bearing rather than tidiness. Ruff's E402
+# exempts `sys.path` manipulation preceding a module-level import, which is why that import needs
+# no suppression. A plain assignment above it is NOT exempt and silently ends the exemption: these
+# two lines sat above the import for one afternoon and put an E402 on a line nobody had touched
+# since it was written. Anything that is not `sys.path` setup belongs down here.
+ROOT = pathlib.Path(__file__).resolve().parents[2]
+SUITE_DIR = pathlib.Path(__file__).resolve().parent
+
+
+def resolve_service(name=None):
+    """The service this suite is allowed to grade, or exit saying why it is not.
+
+    THIS IS WHAT MAKES `evaluation` MEAN SOMETHING. Every definition declares an `evaluation`
+    path — `"multi/eval"` for account-analysis, `null` for relationship-intelligence — and until
+    now no code could act on it: this runner composed the DEFAULT service unconditionally, so the
+    field was a claim about coverage that nothing checked and adding a second graded service
+    meant editing the runner rather than the manifest.
+
+    Two refusals, both fail-closed:
+
+      * `evaluation: null` means nothing measures this service's answers. That null is
+        INFORMATION — `multi/services/README.md` argues at length against writing a suite to fill
+        one — so grading it here anyway would manufacture exactly the coverage the null denies.
+      * an `evaluation` pointing somewhere else means this suite does not claim to cover that
+        service. `multi/eval/` grades account-qualification cases whose evidence-discipline
+        grader greps a four-tier vocabulary only `ANALYST.md` defines; run it against a service
+        that declares a different objective and every case measures nothing.
+    """
+    import services as svc
+    name = name or svc.DEFAULT_SERVICE
+    try:
+        d = svc.load_service(name)
+    except svc.ServiceError as e:
+        # No "Known: ..." appended here — `load_service`'s own message already lists them, and a
+        # second copy is a second thing to keep in step.
+        sys.exit(str(e))
+    declared = d["evaluation"]
+    if declared is None:
+        sys.exit(
+            f"service {name!r} declares \"evaluation\": null — nothing measures its answers, and "
+            "that is deliberate.\nDo not point this suite at it to remove the null: multi/eval/ "
+            "grades account-qualification cases and would report a score that means nothing.\n"
+            f"Its responsibility is: {d['responsibility']}")
+    if (ROOT / declared).resolve() != SUITE_DIR:
+        sys.exit(
+            f"service {name!r} declares its evaluation suite as {declared!r}, which is not this "
+            f"one ({SUITE_DIR.relative_to(ROOT)}).\nRun the suite that claims to cover it, or fix "
+            "the definition — a suite grading a service it does not claim is not evidence.")
+    return d
+
+
+def build_thread(service=None):
     import context_ingress as ing
-    from persona import compose_client_persona
-    guidance = pathlib.Path(__file__).parent / "eval.guidance.md"
+    from persona import compose_service_persona
+    d = resolve_service(service)
+    guidance = SUITE_DIR / "eval.guidance.md"
     if not guidance.is_file():
         sys.exit(f"missing {guidance} — the eval client needs guidance like any other client "
                  "(composition fails closed by design)")
@@ -39,7 +94,12 @@ def build_thread():
         ironclaw_token=os.environ["EVAL_IRONCLAW_TOKEN"],
         account_token=os.environ["EVAL_ACCOUNT_TOKEN"],
         name="Evaluation Org",
-        persona=compose_client_persona(str(guidance), "eval"),
+        # `compose_service_persona`, not the default-service alias: the service is now chosen.
+        # A guidance file whose first-line marker names a different service (or names none, which
+        # pins the default) is REFUSED inside load_guidance — the same two-agreeing-edits rule
+        # that stops a registry tenant landing on the wrong composition. Grading a service
+        # therefore needs its guidance to say so too, which is the correct amount of friction.
+        persona=compose_service_persona(d, str(guidance), "eval"),
     )
     return ing, ing.Thread(client=client)
 
@@ -70,6 +130,11 @@ def run_case(ing, thread, case, tally, results, width=20, run=None):
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--service",
+                    help="which service definition to compose and grade. Defaults to the "
+                         "seam's DEFAULT_SERVICE. A service whose definition declares a "
+                         "different evaluation suite, or null, is refused rather than "
+                         "graded by cases that do not claim to cover it.")
     ap.add_argument("--case")
     ap.add_argument("--runs", type=int, default=1)
     ap.add_argument("--json")
@@ -85,16 +150,16 @@ def main():
     if not cases:
         sys.exit(f"no case matching {args.case!r}. Known: {[c['id'] for c in CASES]}")
 
-    ing, thread = build_thread()
+    ing, thread = build_thread(args.service)
     results, tally = [], collections.Counter()
 
     for run in range(1, args.runs + 1):
         if args.runs > 1:
             print(f"\n{'='*70}\nRUN {run}/{args.runs}   (fresh thread — no carry-over between runs)\n{'='*70}")
-            _, thread = build_thread()
+            _, thread = build_thread(args.service)
         for c in cases:
             if args.isolate:
-                _, thread = build_thread()
+                _, thread = build_thread(args.service)
             run_case(ing, thread, c, tally, results, width=20, run=run)
 
     total = sum(tally.values())

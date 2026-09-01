@@ -9,6 +9,7 @@ unit-tested without importing psycopg or starting Postgres.
 from __future__ import annotations
 
 import argparse
+import os
 import hashlib
 import json
 import pathlib
@@ -190,7 +191,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("action", choices=("status", "apply"))
     args = parser.parse_args(argv)
-    import os
+    # `psycopg` ONLY. The deferral is deliberate and this file's header explains it — the driver
+    # is absent wherever this module is imported for its DDL alone. `os` is stdlib, needs no
+    # deferral, and sitting here made the one import that IS load-bearing look incidental.
     import psycopg
 
     try:

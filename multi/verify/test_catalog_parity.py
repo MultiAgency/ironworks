@@ -20,7 +20,7 @@
 import sys, json, pathlib
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "multi/seam"))
-from common import Checks, get  # noqa: E402
+from common import Checks, get, members  # noqa: E402
 
 CATALOG_ROUTES = ["/api/webchat/v2/settings/tools", "/api/webchat/v2/skills"]
 
@@ -29,21 +29,12 @@ check = checks.check
 block = checks.block
 
 
-def two_clients():
-    try:
-        import context_ingress as ing
-        clients = ing.load_clients()
-        picks = sorted(clients.values(), key=lambda c: c.slug)
-        return picks[:2] if len(picks) >= 2 else None
-    except Exception as e:
-        print(f"     (client registry unavailable: {e})"); return None
-
 def canon(obj):
     """Order-independent canonical form so a reordered-but-equal catalog still compares equal."""
     return json.dumps(obj, sort_keys=True)
 
 print("== tool/skill catalog is identical across clients and client-agnostic ==")
-pair = two_clients()
+pair = members(2, block, "catalog parity")
 if pair is None:
     block("catalog parity across clients", "need two provisioned clients / instance unreachable")
 else:

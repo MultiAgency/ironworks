@@ -14,6 +14,11 @@ permissions:
 jobs:
   quality:
     runs-on: ubuntu-latest
+    # A HUNG JOB IS NOT A FAILING JOB. This runs `./deploy/ironworks test`, which shells
+    # out to docker, pytest and shellcheck; without a ceiling a wedged step burns the
+    # runner's own 6-hour default and reports nothing in the meantime.
+    # `scheduled-integration.yml` already sets one on its long job; this had none.
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

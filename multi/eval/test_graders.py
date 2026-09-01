@@ -94,8 +94,7 @@ def check_real_answers(failures):
     """Regression: grade REAL model output captured from a live run.
 
     Hand-written samples prove a grader CAN fail. They do not prove it fails only on bad
-    answers — the author writes the bad sample to match the pattern they just wrote. The
-    A real run caught two graders that failed CORRECT answers: one wanted "do not
+    answers — the author writes the bad sample to match the pattern they just wrote. A real run caught two graders that failed CORRECT answers: one wanted "do not
     contact" and got "asked not to be contacted"; the other read "Dominic explicitly said
     EMEA is a separate P&L" as evidence of merging the entities. Both were graders at fault.
 
@@ -118,11 +117,22 @@ def check_real_answers(failures):
     observed = json.loads(path.read_text())
     by_id = {c["id"]: c for c in CASES}
     by_id.update({c["id"]: c for c in adv.CASES})
-    print("\n  regression against committed real model output:")
+    # AN UNRECOGNISED CASE ID IS A FAILURE, NOT A SKIP — and this loop used to `continue` past
+    # one. Rename a case in `cases.py` and every fixture key stops matching: the leg then grades
+    # ZERO real answers, prints an empty list, and exits 0. That is the same "a check that cannot
+    # fail manufactures confidence" shape the SystemExit above refuses for a missing fixture,
+    # reached by a different door — the fixture is present, and nothing in it is used.
+    unknown = sorted(set(observed) - set(by_id))
+    if unknown:
+        raise SystemExit(
+            f"!! {path.name} carries answers for case id(s) no longer defined: {unknown}.\n"
+            "   Nothing would grade them and this leg would pass having checked nothing. Either "
+            "restore the ids in cases.py/adversarial.py, or re-capture the fixture.")
+    if not observed:
+        raise SystemExit(f"!! {path.name} is empty — there is no real model output to grade.")
+    print(f"\n  regression against committed real model output ({len(observed)} case(s)):")
     for case_id, answer in sorted(observed.items()):
-        case = by_id.get(case_id)
-        if not case:
-            continue
+        case = by_id[case_id]
         verdict, why = case["grader"](answer)
         ok = verdict == PASS
         if not ok:

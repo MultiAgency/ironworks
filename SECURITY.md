@@ -67,21 +67,25 @@ stops while containment remains. Rollback deliberately restores unrestricted egr
 degraded state.
 
 The allowed model provider remains a data sink by design. A prompt-injected turn could encode data
-to that provider, though it cannot reach attacker infrastructure through this boundary. Reassess
-the policy if the provider host, port, model path, or URL-fetch behavior changes.
+to that provider. What the boundary denies is a tunnel to an **attacker-chosen host**: the gateway
+matches the CONNECT request line and then relays TLS it never terminates, so it constrains which
+host may be opened, not what is spoken inside. Whether a permitted tunnel could reach
+attacker-controlled content therefore depends on what else shares the allowed host's address —
+stated, with its two revisit triggers, in
+[`docs/EGRESS_CONTAINMENT.md`](docs/EGRESS_CONTAINMENT.md) § Residual risk, which owns this.
+Reassess the policy if the provider host, port, model path, or URL-fetch behavior changes.
 
 ## Delivery guarantee
 
-| Property | Guarantee |
-|---|---|
-| Model execution | At most once, except before a response ID becomes durable |
-| Telegram delivery | Complete only when every chunk is acknowledged; otherwise retained for retry or explicit reconciliation |
-| Re-delivery | Uses the original stored response and never a second model execution |
-| Ordering | Strict within a group; serial across groups |
+[`docs/BRIDGE_DELIVERY.md`](docs/BRIDGE_DELIVERY.md) owns the delivery guarantee table, the state
+diagram, and the ordering and concurrency bounds. It is not restated here: this file carried a
+second copy, and the copy is the one that went stale — it claimed cross-group work was serial for
+as long as the bridge has been running a bounded worker pool. One owner, cited from the other.
+`deploy/lib/test_documented_guarantees.py` now gates the values that copy got wrong.
 
-Nothing is exactly once. Updates move transactionally through `RECEIVED`, `TURN_STARTED`,
-`TURN_COMPLETED`, `DELIVERY_STARTED`, `DELIVERED`, and `ACKED`. Response ID and thread pointers
-commit together. Recovery fetches a completed response instead of regenerating it.
+The two properties that are security claims rather than delivery mechanics: **a model execution
+is at most once** under bridge-controlled replay, and **re-delivery uses the original stored
+response and never a second model execution**. Nothing is exactly once.
 
 If a model request may have run but no response ID is durable, the update becomes
 `RECOVERY_BLOCKED` and is never replayed. **"May have run" is a claim about evidence, not about
@@ -110,7 +114,9 @@ Do not patch or vendor IronClaw to close these limitations. Re-measure them afte
 
 ## Accepted operational limits
 
-- One bot and bridge process form a shared availability boundary; cross-group work is serial.
+- One bot and bridge process form a shared availability boundary. Work is serial *within* a
+  group and bounded-concurrent across them; the pool size and its ceiling are in
+  [`docs/BRIDGE_DELIVERY.md`](docs/BRIDGE_DELIVERY.md), which owns them.
 - Response retention is externally controlled, so recovery blocks rather than regenerates when a
   stored response cannot be fetched.
 - Tool confinement depends on token custody and must be repeated after tool-surface changes.

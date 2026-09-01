@@ -25,7 +25,7 @@ import atexit, json, os, pathlib, re, sys, urllib.error, urllib.request
 # owns and a proof must match is exactly what responses.py says the import direction is for:
 # operator tooling reads product modules.
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[2] / "multi" / "seam"))
-from responses import output_text as _text  # noqa: E402
+from responses import output_text as _text
 
 API = os.environ.get("IRONCLAW_API", "http://127.0.0.1:3020").rstrip("/")
 OP = os.environ["WEBUI_TOKEN"]
@@ -45,7 +45,8 @@ def _model_pin():
     try:
         pin = p.read_text().split("#", 1)[0].strip()
     except OSError as e:
-        raise SystemExit(f"!! cannot read {p} ({e}) — MODEL_PIN is tracked; set MODEL to override")
+        raise SystemExit(
+            f"!! cannot read {p} ({e}) — MODEL_PIN is tracked; set MODEL to override") from e
     if not pin:
         raise SystemExit(f"!! {p} has no model on its first line")
     return pin

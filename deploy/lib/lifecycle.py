@@ -28,14 +28,29 @@ material: slug, user id, when it was deleted, when the session can no longer aut
     python3 deploy/lib/lifecycle.py journal set <slug> <stage> [k=v ...]
     python3 deploy/lib/lifecycle.py journal get <slug> [--json]
     python3 deploy/lib/lifecycle.py journal stage <slug>          # prints the stage, or ''
+    python3 deploy/lib/lifecycle.py journal reached <slug> <stage>    # exit 0 = yes, 1 = no
     python3 deploy/lib/lifecycle.py journal clear <slug>
     python3 deploy/lib/lifecycle.py teardown set <slug> <state> [k=v ...]
     python3 deploy/lib/lifecycle.py teardown get <slug> [--json]
     python3 deploy/lib/lifecycle.py residual add <slug> uid=<id> lifetime_days=<n> [k=v ...]
+    python3 deploy/lib/lifecycle.py residual has <slug>               # exit 0 = yes, 1 = no
     python3 deploy/lib/lifecycle.py residual classify <slug> TEST_RESIDUAL <reason...>
     python3 deploy/lib/lifecycle.py residual drop <slug>
     python3 deploy/lib/lifecycle.py residual list [--json]
+
+`journal reached` and `residual has` were the two commands this list omitted, and they are the
+two the shell actually branches on — `provision.sh` calls the first three times to decide whether
+to skip creating authority, `deprovision.sh` calls the second. Both were documented only in the
+code that implements them.
+
+EXIT CODES, because two callers read them as booleans:
+
+    0   success, or the query is TRUE
+    1   the query is FALSE — `journal reached` / `residual has`, and nothing else
+    2   `residual list` found outstanding ACTIVE_RISK authority
+   64   usage: an unknown group, action, argument or field
 """
+import argparse
 import datetime
 import json
 import os
@@ -315,101 +330,190 @@ def _kv(args):
     fields = {}
     for a in args:
         if "=" not in a:
-            raise SystemExit(f"!! expected key=value, got {a!r}")
+            # ValueError, not SystemExit: `main` maps ValueError to 64, where a bare SystemExit
+            # with a string exits 1 — the code a caller reads as "no, that query is false".
+            raise ValueError(f"expected key=value, got {a!r}")
         k, v = a.split("=", 1)
         fields[k] = v
     return fields
+
+
+# ── CLI dispatch ──────────────────────────────────────────────────────────────────────
+#
+# THE EXIT CODES ARE THE INTERFACE. `deprovision.sh` runs `residual has <slug>` and reads the
+# code as a boolean; `provision.sh` runs `journal reached`. The console and the release gate read
+# `residual list`. So:
+#
+#     0   the thing succeeded, or the query is TRUE
+#     1   the query is FALSE — and NOTHING ELSE. `residual has` on an absent slug, and only that
+#     2   `residual list` found outstanding ACTIVE_RISK authority
+#    64   usage: a group, action, argument or field this tool cannot accept
+#
+# EXIT 1 USED TO MEAN THREE DIFFERENT THINGS, and that is what this rewrite is for. It meant the
+# boolean above; it meant "unknown group"/"unknown action"/"expected key=value"; and it meant an
+# uncaught `IndexError` traceback from `rest[0]` on six paths where an argument was simply
+# missing. A caller writing the obvious `if lifecycle.py residual has "$SLUG"; then` could not
+# tell "no residual authority" from "you typo'd the subcommand" — the typo took the false branch
+# silently. Usage errors are 64 now, and 64 alone.
+#
+# argparse REPLACES a hand-rolled three-level if/elif chain that unpacked positionally
+# (`slug, stage, *kv = rest`), so a missing argument surfaced as `!! not enough values to unpack
+# (expected at least 2, got 0)` — a Python internal, presented to an operator as usage text.
+# `deploy/ironworks:1719` already dispatches this way; this is that shape.
+
+
+class _Usage(argparse.ArgumentParser):
+    """argparse exits 2 on a parse error, and 2 is taken — it means outstanding authority.
+
+    `raise SystemExit(f"!! {msg}")` is the obvious override and is WRONG for exactly the reason
+    this rewrite exists: SystemExit with a STRING argument prints it and exits **1**, the code a
+    caller reads as "that query is false". Print, then exit with the number."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        print(f"!! {message}", file=sys.stderr)
+        raise SystemExit(64)
+
+
+def _parser():
+    ap = _Usage(prog="lifecycle.py", description=__doc__.strip().splitlines()[0],
+                formatter_class=argparse.RawDescriptionHelpFormatter)
+    # `--json` is accepted before OR after the subcommand, as it always was: the callers in
+    # multi/provision/ write it in both positions.
+    ap.add_argument("--json", action="store_true", help="machine-readable output")
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+    groups = ap.add_subparsers(dest="group")
+
+    def sub(parent, name, *positionals, **kw):
+        p = parent.add_parser(name, parents=[common], **kw)
+        for spec in positionals:
+            p.add_argument(spec) if isinstance(spec, str) else p.add_argument(*spec[0], **spec[1])
+        return p
+
+    journal = groups.add_parser("journal", help="provisioning progress").add_subparsers(dest="act")
+    sub(journal, "set", "slug", "stage", (["kv"], {"nargs": "*", "metavar": "key=value"}))
+    sub(journal, "get", "slug")
+    sub(journal, "stage", "slug")
+    # `choices` HERE AND NOWHERE ELSE IN THIS GROUP. `journal_reached` answers False for a stage
+    # it does not know, which is right for the library (an empty journal has no stage) and wrong
+    # for the CLI: `provision.sh` asks `journal reached <slug> org_registered` to decide whether
+    # to SKIP creating an org token, so a mistyped stage name reads as "not reached" and mints a
+    # second live credential — the credential accumulation this journal exists to prevent. The
+    # three live call sites pass hardcoded valid stages, so this can only ever catch a typo, and
+    # a typo is exactly what it needs to catch.
+    #
+    # `journal set` needs no `choices`: `journal_set` already raises ValueError on an unknown
+    # stage, and `main` maps that to 64.
+    sub(journal, "reached", "slug", (["stage"], {"choices": STAGES}))
+    sub(journal, "clear", "slug")
+
+    teardown = groups.add_parser("teardown", help="teardown receipts").add_subparsers(dest="act")
+    sub(teardown, "set", "slug", "state", (["kv"], {"nargs": "*", "metavar": "key=value"}))
+    sub(teardown, "get", "slug")
+
+    residual = groups.add_parser("residual",
+                                 help="residual-authority ledger").add_subparsers(dest="act")
+    sub(residual, "add", "slug", (["kv"], {"nargs": "*", "metavar": "key=value"}))
+    sub(residual, "has", "slug")
+    sub(residual, "classify", "slug", "classification",
+        (["reason"], {"nargs": "*", "metavar": "word"}))
+    sub(residual, "drop", "slug")
+    sub(residual, "list")
+    return ap
+
+
+def _cmd_journal(a, out):
+    if a.act == "set":
+        doc = journal_set(a.slug, a.stage, _kv(a.kv))
+        out(json.dumps(doc) if a.json else f"journal {a.slug}: {a.stage}")
+    elif a.act == "get":
+        doc = journal_get(a.slug)
+        out(json.dumps(doc, indent=1) if a.json else
+            "\n".join(f"{k}: {v}" for k, v in sorted(doc.items()) if k != "history"))
+    elif a.act == "stage":
+        out(journal_stage(a.slug))
+    elif a.act == "reached":
+        return 0 if journal_reached(a.slug, a.stage) else 1
+    elif a.act == "clear":
+        out("cleared" if journal_clear(a.slug) else "no journal")
+    return 0
+
+
+def _cmd_teardown(a, out):
+    if a.act == "set":
+        doc = teardown_set(a.slug, a.state, _kv(a.kv))
+        out(json.dumps(doc) if a.json else f"teardown {a.slug}: {a.state}")
+    elif a.act == "get":
+        doc = teardown_get(a.slug)
+        out(json.dumps(doc) if a.json else
+            "\n".join(f"{k}: {v}" for k, v in sorted(doc.items())))
+    return 0
+
+
+def _cmd_residual(a, out):
+    if a.act == "add":
+        e = residual_add(a.slug, _kv(a.kv))
+        out(json.dumps(e) if a.json else
+            f"residual authority recorded for {a.slug}: expires {e['expires_at']}")
+    elif a.act == "has":
+        # Exit-code query, deliberately NOT `residual list | grep`. That form is a trap under
+        # `set -o pipefail`: `list` exits 2 while authority is outstanding, so the pipeline
+        # reports 2 whatever grep found, and a caller reading it as a boolean concludes the
+        # opposite of the truth. This one has no output to parse.
+        out_, _ = residual_list()
+        return 0 if a.slug in out_ else 1
+    elif a.act == "classify":
+        # `reason` arrives as words. The `reason ` prefix and a leading `-` are tolerated because
+        # deprovision.sh's operator instructions have spelled it both ways.
+        reason = " ".join(a.reason).lstrip("-").lstrip() if a.reason else ""
+        if reason.startswith("reason "):
+            reason = reason[len("reason "):]
+        e = residual_classify(a.slug, a.classification, reason)
+        out(f"{a.slug}: classified {e['classification']} — the token still "
+            f"authenticates until {e['expires_at']}" if not a.json else json.dumps(e))
+    elif a.act == "drop":
+        out("dropped" if residual_drop(a.slug) else "not present")
+    elif a.act == "list":
+        outstanding, done = residual_list()
+        if a.json:
+            out(json.dumps({"outstanding": outstanding, "expired": done}, indent=1))
+        else:
+            blocking, waived = residual_split(outstanding)
+            for slug, e in sorted(blocking.items()):
+                out(f"OUTSTANDING {slug}  expires {e['expires_at']}  "
+                    f"user {e.get('uid', '?')}  ACTIVE_RISK")
+            for slug, e in sorted(waived.items()):
+                # Still printed, still with its real expiry. A waiver changes what the release
+                # gate does, never what the ledger says.
+                out(f"OUTSTANDING {slug}  expires {e['expires_at']}  "
+                    f"user {e.get('uid', '?')}  {e.get('classification')} "
+                    f"(waived: {e.get('waiver_reason')})")
+            for slug in sorted(done):
+                out(f"expired     {slug}")
+        return 2 if residual_split(outstanding)[0] else 0
+    return 0
+
+
+_GROUPS = {"journal": _cmd_journal, "teardown": _cmd_teardown, "residual": _cmd_residual}
 
 
 def main(argv):
     if not argv:
         print(__doc__)
         return 64
-    group, *rest = argv
-    as_json = "--json" in rest
-    rest = [a for a in rest if a != "--json"]
+    args = _parser().parse_args(argv)
+    if args.group is None or getattr(args, "act", None) is None:
+        # A group with no action. argparse cannot require this on its own without making
+        # `--help` unreachable, so it is checked here — as usage, not as a traceback.
+        print(f"!! {args.group or 'lifecycle.py'}: which action? "
+              f"see `{sys.argv[0]} --help`", file=sys.stderr)
+        return 64
     try:
-        if group == "journal":
-            action, *rest = rest
-            if action == "set":
-                slug, stage, *kv = rest
-                doc = journal_set(slug, stage, _kv(kv))
-                print(json.dumps(doc) if as_json else f"journal {slug}: {stage}")
-            elif action == "get":
-                doc = journal_get(rest[0])
-                print(json.dumps(doc, indent=1) if as_json else
-                      "\n".join(f"{k}: {v}" for k, v in sorted(doc.items()) if k != "history"))
-            elif action == "stage":
-                print(journal_stage(rest[0]))
-            elif action == "reached":
-                return 0 if journal_reached(rest[0], rest[1]) else 1
-            elif action == "clear":
-                print("cleared" if journal_clear(rest[0]) else "no journal")
-            else:
-                raise SystemExit(f"!! unknown journal action {action!r}")
-        elif group == "teardown":
-            action, *rest = rest
-            if action == "set":
-                slug, state, *kv = rest
-                doc = teardown_set(slug, state, _kv(kv))
-                print(json.dumps(doc) if as_json else f"teardown {slug}: {state}")
-            elif action == "get":
-                doc = teardown_get(rest[0])
-                print(json.dumps(doc) if as_json else
-                      "\n".join(f"{k}: {v}" for k, v in sorted(doc.items())))
-            else:
-                raise SystemExit(f"!! unknown teardown action {action!r}")
-        elif group == "residual":
-            action, *rest = rest
-            if action == "add":
-                slug, *kv = rest
-                e = residual_add(slug, _kv(kv))
-                print(json.dumps(e) if as_json else
-                      f"residual authority recorded for {slug}: expires {e['expires_at']}")
-            elif action == "has":
-                # Exit-code query, deliberately NOT `residual list | grep`. That form is a trap
-                # under `set -o pipefail`: `list` exits 2 while authority is outstanding, so the
-                # pipeline reports 2 whatever grep found, and a caller reading it as a boolean
-                # concludes the opposite of the truth. This one has no output to parse.
-                out, _ = residual_list()
-                return 0 if rest[0] in out else 1
-            elif action == "classify":
-                slug, classification, *rest = rest
-                reason = " ".join(rest).lstrip("-").lstrip() if rest else ""
-                if reason.startswith("reason "):
-                    reason = reason[len("reason "):]
-                e = residual_classify(slug, classification, reason)
-                print(json.dumps(e) if as_json else
-                      f"{slug}: classified {e['classification']} — the token still "
-                      f"authenticates until {e['expires_at']}")
-            elif action == "drop":
-                print("dropped" if residual_drop(rest[0]) else "not present")
-            elif action == "list":
-                out, done = residual_list()
-                if as_json:
-                    print(json.dumps({"outstanding": out, "expired": done}, indent=1))
-                else:
-                    blocking, waived = residual_split(out)
-                    for slug, e in sorted(blocking.items()):
-                        print(f"OUTSTANDING {slug}  expires {e['expires_at']}  "
-                              f"user {e.get('uid', '?')}  ACTIVE_RISK")
-                    for slug, e in sorted(waived.items()):
-                        # Still printed, still with its real expiry. A waiver changes what the
-                        # release gate does, never what the ledger says.
-                        print(f"OUTSTANDING {slug}  expires {e['expires_at']}  "
-                              f"user {e.get('uid', '?')}  {e.get('classification')} "
-                              f"(waived: {e.get('waiver_reason')})")
-                    for slug in sorted(done):
-                        print(f"expired     {slug}")
-                return 2 if residual_split(out)[0] else 0
-            else:
-                raise SystemExit(f"!! unknown residual action {action!r}")
-        else:
-            raise SystemExit(f"!! unknown group {group!r}")
+        return _GROUPS[args.group](args, print)
     except ValueError as e:
         print(f"!! {e}", file=sys.stderr)
         return 64
-    return 0
 
 
 if __name__ == "__main__":
