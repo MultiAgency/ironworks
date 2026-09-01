@@ -775,6 +775,52 @@ class ConsoleTest(unittest.TestCase):
         for required in ("live.isolation", "live.egress", "live.revocation", "live.eval"):
             self.assertIn(required, blocked)
 
+    def test_composed_artifact_parses_and_records_what_evidence_supplied(self):
+        """THE COMPOSED ARTIFACT IS THE RELEASE DELIVERABLE, so it must survive being read.
+
+        `import_evidence` is already correct and already pinned above; both defects here were in
+        its CALLER, and neither is visible from the pure function:
+
+          1. `rows` fed `promotion_gate` while `rep.checks` kept the pre-import verdicts. The one
+             document then said three different things — `checks` said BLOCKED, `data.evidence`
+             named those ids as supplied, `release.promotable` was computed from the supplied
+             ones. `Report.exit_code` reads `self.checks` too, so a composition answering every
+             blind check still exited 3.
+          2. the `evidence: ...` note printed to stdout even under `--json`, so `json.loads` on a
+             COMPOSED artifact raised while an uncomposed one parsed. The contract in the
+             console's own header is "`--json` ... on stdout, with nothing else on stdout".
+
+        Measured on production 2026-09-01 before the fix: 4 gate.lib.* rows imported as PASS,
+        serialized as BLOCKED, `promotable: True`, exit 3, stdout unparseable."""
+        base = self.run_json("release", "verify", "--offline-only")
+        fingerprint = base.get("tree_fingerprint")
+        if not fingerprint:
+            self.skipTest("no tree fingerprint here — cannot match evidence to this tree")
+        blind = [c for c in base["checks"]
+                 if c["verdict"] in ("BLOCKED", "SKIPPED") and c["id"].startswith("gate.")][:3]
+        self.assertTrue(blind, "no blind gate rows to supply — fixture assumption broke")
+
+        ev = self.tmp / "other-env-evidence.json"
+        ev.write_text(json.dumps({
+            "tree_fingerprint": fingerprint,
+            "checks": [{"id": c["id"], "verdict": "PASS", "kind": c["kind"]} for c in blind]}))
+
+        raw = self.run_cli("--offline", "--json", "release", "verify",
+                           "--offline-only", "--with-evidence", str(ev))
+        # (2) nothing but the document on stdout. Assert the shape before parsing, so a failure
+        # names the contract rather than surfacing as a bare JSONDecodeError.
+        self.assertTrue(raw.stdout.lstrip().startswith("{"),
+                        f"non-JSON preamble on stdout: {raw.stdout[:120]!r}")
+        doc = json.loads(raw.stdout)
+        self.assertIn("supplied by evidence", json.dumps(doc["evidence"]))
+
+        # (1) the imported verdict is IN the artifact, not merely used to compute promotability.
+        got = {c["id"]: c["verdict"] for c in doc["checks"]}
+        for c in blind:
+            self.assertEqual("PASS", got[c["id"]],
+                             f"{c['id']} was supplied by evidence but serialized as "
+                             f"{got[c['id']]} — the artifact contradicts its own evidence note")
+
 
 class ColdStartCheckTest(unittest.TestCase):
     """`tenant.cold_start` — would the bridge REFUSE to start?
