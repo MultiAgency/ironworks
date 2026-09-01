@@ -1,7 +1,7 @@
 # MultiAgency Account Service image — deps only; code + fixtures are mounted at /app.
 # Pinned for reproducibility: an unpinned `pip install` rebuilds a different image over
 # time. Versions match the verified-running stack (flask/psycopg) plus a current stable gunicorn.
-FROM python:3.12-slim@sha256:2c941e860699f878900b0edc2403613c234d4b32eda3cc9fa7036991a2a63c4a
+FROM python:3.14-slim@sha256:656d12e70054d5fda18a045e2494c96701e9792dd1445f95b3d038df954f57e9
 COPY requirements.lock /tmp/account-service-requirements.lock
 RUN pip install --no-cache-dir --require-hashes -r /tmp/account-service-requirements.lock
 WORKDIR /app
