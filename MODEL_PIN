@@ -51,6 +51,25 @@ qwen/qwen3.5-397b-a17b  # TEE-attested via Chutes, verified end-to-end by NEAR A
 #   * `usage.cost` is an estimate that OVERSTATES the cost of a cached turn;
 #   * never reconcile spend from `usage.cost` alone.
 #
+# Re-measured 2026-09-02 at IronClaw 1.4.0, and all three bullets hold — but the cause is not
+# what this section assumed, and it is specific to THIS PIN'S NAME
+# (docs/experiments/0040-the-cost-field-misses-the-pin-twice.md).
+#
+# IronClaw's table keys everything off the model string. `qwen/...` trips its `is_local_model`
+# name heuristic — a leading `qwen`, like `llama`, `mistral` or `deepseek` — which means "free
+# Ollama model", so on CREATE this pin prices at exactly "0". On RETRIEVAL the model has become
+# the literal "reborn" (G-2), which the table does not know, so it falls back to its default
+# entry and prices the same turn at GPT-4o's $2.50/Mtok in and $10.00/Mtok out. Neither figure
+# describes this model. The cache-read divisor is keyed the same way — Anthropic 10x, OpenAI 2x,
+# everything else none — so a `qwen` pin gets no discount, which is exactly why the 2026-08-27
+# measurement above came out as it did.
+#
+# So bullet two is confirmed, and the reason is sharper than "an extension with its own pricing
+# table": the table would price a KNOWN model correctly on create, and misses this one twice.
+# A pin whose name starts with llama/mistral/qwen/deepseek/phi/gemma/yi will read as free.
+# Consider that when swapping the pin — not because spend should be read from this field, which
+# bullet three forbids, but because a zero there is not evidence of anything.
+#
 # ── OPEN ─────────────────────────────────────────────────────────────────────────────────
 #
 # The catalogue reports `is_ready: false` for every TEE-attested model including this one. The

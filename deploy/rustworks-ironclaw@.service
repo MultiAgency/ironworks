@@ -28,7 +28,10 @@ Group=ironclaw-%i
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
-ProtectHome=true
+# Rootless Docker's account-owned socket lives under /run/user/<uid>. ProtectHome=true hides
+# /run/user entirely, so the fail-closed preflight can never see the very socket it is required to
+# verify. Read-only keeps the home trees immutable to this unit while leaving the socket reachable.
+ProtectHome=read-only
 ReadWritePaths=/var/lib/ironclaw/%i
 
 [Install]

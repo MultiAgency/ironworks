@@ -78,15 +78,15 @@ fn created_for(stage: Stage) -> Option<OpaqueId> {
 
 /// What IronWorks recorded: how far it got, and which identifiers it created.
 fn recorded(progress: ProvisionProgress, ids: &[(Authority, &str)]) -> Recorded {
-    Recorded { progress, ids: ids.iter().map(|(a, id)| (*a, OpaqueId::new(*id))).collect() }
+    Recorded::from_created(progress, ids.iter().map(|(a, id)| (*a, OpaqueId::new(*id))))
 }
 
 /// Every authority recorded under the identifier `Fixture::present` uses by default.
 fn recorded_all(progress: ProvisionProgress) -> Recorded {
-    Recorded {
+    Recorded::from_created(
         progress,
-        ids: Authority::ALL.iter().map(|a| (*a, OpaqueId::new(format!("{}-1", a.tag())))).collect(),
-    }
+        Authority::ALL.iter().map(|a| (*a, OpaqueId::new(format!("{}-1", a.tag())))),
+    )
 }
 
 fn store() -> (Dir, LifecycleStore) {
@@ -973,8 +973,104 @@ fn created_identifiers_are_durable_and_map_back_to_their_authority() {
     }
     let store = LifecycleStore::open(&path).unwrap();
     let recorded = store.created(&s.slug).unwrap();
-    assert_eq!(recorded.ids.get(&Authority::OrgRegistration), Some(&OpaqueId::new("acme-sales")));
-    assert_eq!(recorded.ids.get(&Authority::Member), None, "we minted no member");
+    assert_eq!(recorded.created_id(Authority::OrgRegistration), Some(&OpaqueId::new("acme-sales")));
+    assert_eq!(recorded.created_id(Authority::Member), None, "we minted no member");
+}
+
+#[test]
+fn adoption_records_measured_identities_with_provenance_in_one_instance() {
+    let (_d, store) = store();
+    let slug = Slug::parse("local-name").unwrap();
+    let service = ironworks_domain::ServiceId::parse("account-analysis").unwrap();
+    let channel = ironworks_domain::ChannelRef::new("-100900001");
+    let scope = ironworks_domain::ScopeEvidence::from_record_store(
+        ironworks_domain::OrgId::parse("measured-org").unwrap(),
+        "http://records.invalid",
+    );
+    let subject = RuntimeSubject::new(
+        RuntimeTenantId::parse("runtime-namespace").unwrap(),
+        RuntimeUserId::parse("user_observed").unwrap(),
+    );
+    let evidence = AdoptionEvidence::observed(&scope, subject.clone());
+
+    let spec = store.adopt(&slug, &service, &channel, &evidence, NOW).unwrap();
+    assert_eq!(spec.org.as_str(), "measured-org");
+    assert_eq!(
+        store.progress(&slug).unwrap(),
+        ProvisionProgress::Provisioning { reached: Stage::MemberMinted }
+    );
+    let history = store.history(&slug).unwrap();
+    assert_eq!(
+        history.iter().map(|(stage, _, adopted)| (*stage, *adopted)).collect::<Vec<_>>(),
+        vec![
+            (Stage::PreflightPassed, false),
+            (Stage::OrgRegistered, true),
+            (Stage::DataInitializationSettled, true),
+            (Stage::MemberMinted, true),
+        ]
+    );
+
+    let recorded = store.recorded(&slug).unwrap();
+    let org = recorded.identity(Authority::OrgRegistration).unwrap();
+    assert_eq!(org.id(), &OpaqueId::new("measured-org"));
+    assert_eq!(org.provenance(), IdentityProvenance::Adopted);
+    let member = recorded.identity(Authority::Member).unwrap();
+    assert_eq!(member.id(), &OpaqueId::new("user_observed"));
+    assert_eq!(member.provenance(), IdentityProvenance::Adopted);
+    assert_eq!(member.runtime_subject(), Some(&subject));
+
+    let created = store.created(&slug).unwrap();
+    assert_eq!(created.created_id(Authority::OrgRegistration), None);
+    assert_eq!(created.created_id(Authority::Member), None);
+}
+
+#[test]
+fn adoption_refuses_an_existing_slug_instead_of_upserting_it() {
+    let (_d, store) = store();
+    let s = spec("acme");
+    let scope =
+        ironworks_domain::ScopeEvidence::from_record_store(s.org.clone(), "http://records.invalid");
+    let evidence = AdoptionEvidence::observed(
+        &scope,
+        RuntimeSubject::new(
+            RuntimeTenantId::parse("tenant-a").unwrap(),
+            RuntimeUserId::parse("user-a").unwrap(),
+        ),
+    );
+    store.adopt(&s.slug, &s.service, &s.channel, &evidence, NOW).expect("first adoption");
+    let before = store.recorded(&s.slug).unwrap();
+
+    let replacement = AdoptionEvidence::observed(
+        &scope,
+        RuntimeSubject::new(
+            RuntimeTenantId::parse("tenant-b").unwrap(),
+            RuntimeUserId::parse("user-b").unwrap(),
+        ),
+    );
+    assert!(matches!(
+        store.adopt(&s.slug, &s.service, &s.channel, &replacement, NOW),
+        Err(LifecycleError::AlreadyExists { .. })
+    ));
+    assert_eq!(store.recorded(&s.slug).unwrap(), before);
+}
+
+#[test]
+fn a_failed_adoption_transaction_leaves_no_partial_instance() {
+    let (_d, store) = store();
+    let s = spec("atomic");
+    let scope =
+        ironworks_domain::ScopeEvidence::from_record_store(s.org.clone(), "http://records.invalid");
+    let evidence = AdoptionEvidence::observed(
+        &scope,
+        RuntimeSubject::new(
+            RuntimeTenantId::parse("tenant-a").unwrap(),
+            RuntimeUserId::parse("user-a").unwrap(),
+        ),
+    );
+    // The v3 table rejects this timestamp after the instance and stage rows have been attempted.
+    assert!(store.adopt(&s.slug, &s.service, &s.channel, &evidence, "bad").is_err());
+    assert_eq!(store.spec(&s.slug).unwrap(), None);
+    assert!(store.history(&s.slug).unwrap().is_empty());
 }
 
 /// A stage is never walked backwards.

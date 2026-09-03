@@ -63,10 +63,16 @@ receives a socket. IronClaw's managed proxy remains the worker's egress boundary
 
 ## Installing it
 
-**This is the procedure. It has not been performed.** It was originally written as though done
-on `multi-serve` on 2026-09-01; no evidence supports that and the local evidence contradicts it
-(see "What is not here"). Read every command below as untested. It is kept because the reasoning
-behind two of the choices is not obvious and should not have to be reconstructed.
+**First exercised on `multi-serve` on 2026-09-02, from the primary workstation.** Source sync,
+the containerized Rust build, unit installation, pinned IronClaw binary installation, a dedicated
+rootless Docker daemon and the `relationship-demo` control plane were completed. The control plane
+is healthy on loopback; the relay remains disabled because no production lifecycle record exists
+from which `lifecycle confine` can derive and journal its policy. See "What remains" below.
+
+That first install found two defects in this procedure. The rsync exclusions must be rooted: an
+unrooted `--exclude site/` also removed `crates/site`, leaving a workspace Cargo could not load.
+And the IronClaw unit must use `ProtectHome=read-only`, not `true`: systemd includes `/run/user` in
+`ProtectHome`, while the rootless Docker socket the preflight must verify lives there.
 
     # paths and a service user that owns nothing else
     sudo install -d -o "$USER" -g "$USER" -m 0755 /opt/rustworks
@@ -77,7 +83,7 @@ behind two of the choices is not obvious and should not have to be reconstructed
     sudo install -d -o root -g root -m 0711 /var/lib/ironclaw
 
     # source, without build output, git, generated pages or secrets
-    rsync -az --delete --exclude target/ --exclude .git/ --exclude site/ --exclude local/ \
+    rsync -az --delete --exclude /target/ --exclude /.git/ --exclude /site/ --exclude /local/ \
           --exclude __pycache__/ ./ multi-serve:/opt/rustworks/
 
     # binaries, built in a container so no toolchain lands on the host
@@ -195,30 +201,27 @@ That digest is now historical: the corpus has moved and the current composition 
 time you build — the property being checked is that the two architectures agree, not that they
 agree on any particular value.
 
-## What is not here
+## What remains
 
-**Nothing here has been deployed.** Checked 2026-09-01 from the primary workstation
-(`mbp.local`):
+`multi-serve` is a Hetzner Ubuntu 24.04 host. On 2026-09-02 the `multi` operator account was reached
+with the SSH key registered in Hetzner; direct root SSH remains disabled. The host has cgroup v2,
+and the dedicated `ironclaw-relationship-demo` daemon measured both rootless security and the
+`systemd` cgroup driver. `ironclaw 1.4.0`, its pinned worker image, the current RustWorks binaries
+and all four units are installed. A Hetzner firewall admits inbound SSH only.
 
-- `multi-serve` does not resolve (NXDOMAIN), has no `/etc/hosts` entry, and appears in neither
-  `~/.ssh/config` — which holds one unrelated host — nor `known_hosts`. The `rsync` above names
-  `multi-serve:` as its destination, so as written it could not have connected from here.
-- `/opt/rustworks`, `/etc/rustworks` and `/var/lib/rustworks` do not exist locally either.
-- `hcloud` is installed but has no active context, so whether the server exists at all is
-  unconfirmed — only that nothing here can reach it.
+**This is not a serving claim.** `rustworks-ironclaw@relationship-demo` is healthy on
+`127.0.0.1:3997`, but no member has been minted for it, the registry and relay environment do not
+exist, and the Telegram and relay units remain disabled. The source now contains
+`lifecycle adopt`, which resolves the records org and runtime subject from credential handles and
+records them with adopted provenance in one transaction. That command has not yet been rebuilt on
+the host or run against a minted production member. The synthetic
+`crates/lifecycle/examples/seed.rs` remains unsuitable: it would record `acme-sales` and a fixture
+channel as production evidence.
 
-So: no `/etc/rustworks/`, no registry, no running unit. The units are written and unproven in
-place; `dev/relay-loop.sh`'s own behaviour is tested, the systemd wrapping around it is not.
-
-**One thing would overturn this**: the install running from a different machine that does have
-the host configured. If that happened, record it here with the date and the machine, because the
-claim it replaces was wrong precisely for lacking both.
-
-**Do not confuse this with the local stack.** `multi/serve/multi-watchdog.sh:44-45` watches
-ironclaw on `127.0.0.1:3020` and the Account Service on `127.0.0.1:8443`, and containers answer
-on both of those ports on the workstation. That is the Python fleet and a local Account Service,
-not this deployment. The operator turn recorded on 2026-09-01 read its records from that local
-service.
+**Do not confuse this with the existing Python stack on the same host.** Its watchdog watches
+IronClaw on `127.0.0.1:3020` and the Account Service on `127.0.0.1:8443`; both ports still answer
+for that fleet. The Rust control plane uses `127.0.0.1:3997` and no Rust relay is enabled, so the
+2026-09-02 work did not cut over or interrupt the Python service.
 
 **And nothing here confines the member.** A served deployment whose member is unconfined can call
 `builtin.http` and `outbound_deliver` — see `lifecycle confine` and

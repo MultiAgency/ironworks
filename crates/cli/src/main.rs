@@ -157,6 +157,15 @@ enum Mode {
         store: String,
         dry_run: bool,
     },
+    /// Observe an existing record scope and runtime member, then record both in one local
+    /// transaction. It creates no foreign authority and accepts no asserted org or member id.
+    LifecycleAdopt {
+        store: String,
+        service: String,
+        channel: String,
+        records_credential: String,
+        member_credential: String,
+    },
     /// Fleet-wide member reconciliation. A different question from `inspect`, so a different
     /// command: it discovers authority no instance accounts for, rather than proving custody of
     /// what one instance recorded.
@@ -457,11 +466,67 @@ fn parse_lifecycle(argv: &[String]) -> Result<Args, Exit> {
              \x20        mismatch exits 2 having made no settings read and no settings write.\n\
              \x20        Every attempt is appended to the confinement ledger; --dry-run opens\n\
              \x20        the store read-only and writes nothing at all.\n\
-             \x20        Needs IRONCLAW_API, IRONCLAW_OPERATOR_TOKEN and IRONCLAW_MEMBER_TOKEN.",
+             \x20        Needs IRONCLAW_API, IRONCLAW_OPERATOR_TOKEN and IRONCLAW_MEMBER_TOKEN.\n\n\
+             \x20      ironworks lifecycle adopt <slug> --store <path> --service <service>\n\
+             \x20        --channel <channel> --records-credential <handle>\n\
+             \x20        --member-credential <handle>\n\
+             \x20        OBSERVES ONLY. Resolves the records handle to an org and the member\n\
+             \x20        handle through /api/webchat/v2/session, then records both atomically.\n\
+             \x20        There is no --org or --member-id; neither identity may be asserted.\n\
+             \x20        Refuses an existing slug and writes no partial instance when either\n\
+             \x20        authority cannot be observed. Needs IRONWORKS_RECORDS and IRONCLAW_API.",
         )
     };
     match argv.first().map(String::as_str) {
         Some("inspect") => {}
+        Some("adopt") => {
+            let slug = argv.get(1).cloned().ok_or_else(usage)?;
+            if slug.starts_with("--") {
+                return Err(usage());
+            }
+            let (mut store, mut service, mut channel) = (None, None, None);
+            let (mut records_credential, mut member_credential) = (None, None);
+            let mut it = argv[2..].iter();
+            while let Some(flag) = it.next() {
+                let mut value = || {
+                    it.next().cloned().ok_or_else(|| fail(USAGE, format!("{flag} needs a value")))
+                };
+                match flag.as_str() {
+                    "--store" => store = Some(value()?),
+                    "--service" => service = Some(value()?),
+                    "--channel" => channel = Some(value()?),
+                    "--records-credential" => records_credential = Some(value()?),
+                    "--member-credential" => member_credential = Some(value()?),
+                    "--org" | "--member" | "--member-id" => {
+                        return Err(fail(
+                            USAGE,
+                            format!(
+                                "{flag} is not accepted: adopt measures org and member identity \
+                                 from their credentials"
+                            ),
+                        ));
+                    }
+                    other => return Err(fail(USAGE, format!("unknown flag {other}"))),
+                }
+            }
+            return Ok(Args {
+                slug,
+                guidance: String::new(),
+                service: String::new(),
+                journal: String::new(),
+                mode: Mode::LifecycleAdopt {
+                    store: store.ok_or_else(|| fail(USAGE, "--store is required"))?,
+                    service: service.ok_or_else(|| fail(USAGE, "--service is required"))?,
+                    channel: channel.ok_or_else(|| fail(USAGE, "--channel is required"))?,
+                    records_credential: records_credential
+                        .ok_or_else(|| fail(USAGE, "--records-credential is required"))?,
+                    member_credential: member_credential
+                        .ok_or_else(|| fail(USAGE, "--member-credential is required"))?,
+                },
+                crash_at: None,
+                call_log: None,
+            });
+        }
         Some("confine") => {
             let slug = argv.get(1).cloned().ok_or_else(usage)?;
             if slug.starts_with("--") {
@@ -587,6 +652,18 @@ fn run() -> Result<(), Exit> {
     if let Mode::LifecycleConfine { store, dry_run } = &args.mode {
         return run_lifecycle_confine(&args.slug, store, *dry_run);
     }
+    if let Mode::LifecycleAdopt { store, service, channel, records_credential, member_credential } =
+        &args.mode
+    {
+        return run_lifecycle_adopt(
+            &args.slug,
+            store,
+            service,
+            channel,
+            records_credential,
+            member_credential,
+        );
+    }
     if matches!(args.mode, Mode::Status) {
         return run_status(&args.journal);
     }
@@ -610,6 +687,7 @@ fn run() -> Result<(), Exit> {
         Mode::LifecycleInspect { .. }
         | Mode::LifecycleMembers { .. }
         | Mode::LifecycleConfine { .. }
+        | Mode::LifecycleAdopt { .. }
         | Mode::Status
         | Mode::Compose => {
             unreachable!("the read-only commands return before boot")
@@ -745,7 +823,7 @@ fn run_lifecycle_inspect(
         .spec(&slug)
         .map_err(|x| blocked(x.to_string()))?
         .ok_or_else(|| e(format!("no lifecycle record for {slug}")))?;
-    let recorded = store.created(&slug).map_err(|x| blocked(x.to_string()))?;
+    let recorded = store.recorded(&slug).map_err(|x| blocked(x.to_string()))?;
     let serving = store.serving(&slug).map_err(|x| blocked(x.to_string()))?;
     let axis = confinement_axis(&store, &slug, &recorded, confinement)?;
 
@@ -759,7 +837,7 @@ fn run_lifecycle_inspect(
         let credential =
             CredentialRef::new(CredentialPurpose::RuntimeMember, "env:IRONCLAW_OPERATOR_TOKEN");
         let admin = ironworks_reconcile::Admin::new(&base, &credential);
-        let recorded_id = recorded.ids.get(&ironworks_lifecycle::Authority::Member).cloned();
+        let recorded_id = recorded.accounted_id(ironworks_lifecycle::Authority::Member).cloned();
         let inventory =
             ironworks_reconcile::IronclawMember::new(&admin, recorded_id).observe(&spec);
         let report = inspect(&spec, &recorded, &inventory, &serving, &axis);
@@ -825,7 +903,8 @@ fn confinement_axis(
         return Ok(ConfinementAxis::NotRequested);
     }
     let ledger = if store.schema_version() >= 2 { Ledger::Present } else { Ledger::PredatesLedger };
-    let Some(member) = recorded.ids.get(&ironworks_lifecycle::Authority::Member).cloned() else {
+    let Some(member) = recorded.accounted_id(ironworks_lifecycle::Authority::Member).cloned()
+    else {
         // No member to bind against. `inspect` decides whether that is "not yet applicable" or a
         // recorded stage with no identifier; this only supplies what it could read.
         return Ok(ConfinementAxis::Recorded { ledger, latest: None });
@@ -909,6 +988,93 @@ fn policy_for(
     Ok((definition, policy))
 }
 
+/// Adopt authority that already exists, without creating or changing any of it.
+///
+/// There is intentionally no org or member-id parameter. The Account Service supplies the former
+/// from the records handle, and /session supplies the complete runtime subject from the member
+/// handle. Only after both reads succeed does one SQLite transaction record the instance.
+fn run_lifecycle_adopt(
+    slug: &str,
+    store_path: &str,
+    service: &str,
+    channel: &str,
+    records_credential: &str,
+    member_credential: &str,
+) -> Result<(), Exit> {
+    use ironworks_domain::ScopeResolver;
+    use ironworks_lifecycle::{AdoptionEvidence, LifecycleError, LifecycleStore};
+
+    let e = |m: String| fail(FAILED, m);
+    let blocked = |m: String| Exit { code: BLOCKED, message: m };
+    let slug = Slug::parse(slug.to_owned()).map_err(|x| e(x.to_string()))?;
+    let service =
+        ironworks_domain::ServiceId::parse(service.to_owned()).map_err(|x| e(x.to_string()))?;
+    // Loading is the preflight proof that this build actually carries the requested service.
+    ironworks_services::service::load(service.as_str()).map_err(|x| e(x.to_string()))?;
+    if channel.trim().is_empty() {
+        return Err(fail(USAGE, "--channel must not be empty"));
+    }
+    let channel = ironworks_domain::ChannelRef::new(channel);
+    let checked_handle = |raw: &str, flag: &str| -> Result<String, Exit> {
+        let Some(name) = raw.strip_prefix("env:") else {
+            return Err(fail(USAGE, format!("{flag} must be an env:NAME handle, never a secret")));
+        };
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            return Err(fail(USAGE, format!("{flag} must be an env:NAME handle")));
+        }
+        Ok(raw.to_owned())
+    };
+    let records_credential = checked_handle(records_credential, "--records-credential")?;
+    let member_credential = checked_handle(member_credential, "--member-credential")?;
+
+    // Open before contacting either authority so an existing slug refuses without resolving any
+    // credential. Opening may initialise or migrate schema, but no instance row or observation is
+    // written until adopt's single transaction below.
+    let store = LifecycleStore::open(store_path).map_err(|x| blocked(x.to_string()))?;
+    if store.spec(&slug).map_err(|x| blocked(x.to_string()))?.is_some() {
+        return Err(
+            e(LifecycleError::AlreadyExists { slug: slug.as_str().to_owned() }.to_string()),
+        );
+    }
+
+    let records_base = std::env::var("IRONWORKS_RECORDS")
+        .map_err(|_| fail(USAGE, "IRONWORKS_RECORDS is not set (the account service base URL)"))?;
+    let records_handle = CredentialRef::new(CredentialPurpose::RecordScope, records_credential);
+    let book = Book::new(&records_base, EnvCredentials);
+    let scope = ScopeResolver::resolve(&book, &records_handle).map_err(|why| {
+        blocked(format!("the records credential could not establish an org: {why}"))
+    })?;
+
+    let runtime_base = std::env::var("IRONCLAW_API")
+        .map_err(|_| fail(USAGE, "IRONCLAW_API is not set (the instance's base URL)"))?;
+    // authenticated_subject makes only the member-authenticated GET. Admin retains an operator
+    // handle for confinement methods, but this observational command never resolves or uses it.
+    let unused_operator =
+        CredentialRef::new(CredentialPurpose::RuntimeMember, "env:IRONCLAW_OPERATOR_TOKEN");
+    let admin = ironworks_reconcile::Admin::new(&runtime_base, &unused_operator);
+    let member_handle = CredentialRef::new(CredentialPurpose::RuntimeMember, member_credential);
+    let session =
+        ironworks_reconcile::MemberConfinement::new(&admin, &EnvCredentials, member_handle);
+    let subject = session.authenticated_subject().map_err(|why| {
+        blocked(format!("the member credential could not establish a runtime subject: {why}"))
+    })?;
+
+    // The runtime tenant is recorded as measured fact. It is not compared with the local slug:
+    // those are separate namespaces, and one host's naming convention is not a lifecycle rule.
+    let evidence = AdoptionEvidence::observed(&scope, subject);
+    let spec =
+        store.adopt(&slug, &service, &channel, &evidence, &now_iso()).map_err(|why| match why {
+            LifecycleError::AlreadyExists { .. } => e(why.to_string()),
+            _ => blocked(why.to_string()),
+        })?;
+    println!("ADOPTED   {}", spec.slug);
+    println!("  records org    : {}", evidence.org());
+    println!("  runtime tenant : {}", evidence.subject().tenant());
+    println!("  runtime member : {}", evidence.subject().user());
+    println!("  provenance     : observed existing; no foreign authority was created");
+    Ok(())
+}
+
 fn run_lifecycle_confine(slug: &str, store_path: &str, dry_run: bool) -> Result<(), Exit> {
     use ironworks_lifecycle::{Blocked, ConfinementAttempt, ObservedAt, PolicyBinding};
     use ironworks_reconcile::{Applied, Binding, Reading};
@@ -934,9 +1100,11 @@ fn run_lifecycle_confine(slug: &str, store_path: &str, dry_run: bool) -> Result<
     }
     .map_err(|x| blocked(x.to_string()))?;
 
-    let recorded = store.created(&slug_id).map_err(|x| blocked(x.to_string()))?;
-    let member =
-        recorded.ids.get(&ironworks_lifecycle::Authority::Member).cloned().ok_or_else(|| {
+    let recorded = store.recorded(&slug_id).map_err(|x| blocked(x.to_string()))?;
+    let member = recorded
+        .accounted_id(ironworks_lifecycle::Authority::Member)
+        .cloned()
+        .ok_or_else(|| {
             e(format!(
                 "no member recorded for {slug}. Confinement applies to a member IronWorks \
                  recorded creating; there is nothing here to confine."
@@ -3069,12 +3237,19 @@ fn finish(
                 )
                 .map_err(|x| fail(FAILED, x.to_string()))?;
             if let Some(u) = usage {
+                // Tokens are the runtime's own count and are trustworthy. The cost is not: it is
+                // priced from IronClaw's table, which classifies the pinned `qwen/…` as a free
+                // local model on create and as an unknown model — GPT-4o's rates — on fetch. So
+                // it is labelled rather than printed as a figure, because an operator reading
+                // `cost 0` every turn would reasonably conclude the turns were free.
+                // `docs/experiments/0040-the-cost-field-misses-the-pin-twice.md`.
                 eprintln!(
-                    "usage: {} in ({} cached), {} out, cost {}",
+                    "usage: {} in ({} cached), {} out, runtime cost estimate {} (not the \
+                     provider's price; see INVARIANTS §G-7)",
                     u.input_tokens,
                     u.cached_tokens,
                     u.output_tokens,
-                    u.total_cost_usd.as_deref().unwrap_or("unknown")
+                    u.total_cost_usd.as_deref().unwrap_or("unreported")
                 );
             }
             if let Some(found) = ironworks_ironclaw::malformed_answer(&text) {
@@ -4059,6 +4234,75 @@ mod tests {
             panic!("ordinary confinement should parse")
         };
         assert!(matches!(ordinary.mode, Mode::LifecycleConfine { dry_run: true, .. }));
+    }
+
+    #[test]
+    fn adoption_accepts_handles_and_has_no_asserted_identity_flags() {
+        let Ok(args) = parse_lifecycle(&[
+            "adopt".into(),
+            "local-name".into(),
+            "--store".into(),
+            "/tmp/lifecycle.store".into(),
+            "--service".into(),
+            "relationship-intelligence".into(),
+            "--channel".into(),
+            "-1001".into(),
+            "--records-credential".into(),
+            "env:TENANT_RECORDS".into(),
+            "--member-credential".into(),
+            "env:TENANT_MEMBER".into(),
+        ]) else {
+            panic!("adopt should accept credential handles")
+        };
+        assert!(matches!(
+            args.mode,
+            Mode::LifecycleAdopt {
+                records_credential,
+                member_credential,
+                ..
+            } if records_credential == "env:TENANT_RECORDS"
+                && member_credential == "env:TENANT_MEMBER"
+        ));
+
+        for flag in ["--org", "--member", "--member-id"] {
+            let Err(err) = parse_lifecycle(&[
+                "adopt".into(),
+                "local-name".into(),
+                "--store".into(),
+                "s".into(),
+                "--service".into(),
+                "relationship-intelligence".into(),
+                "--channel".into(),
+                "-1001".into(),
+                "--records-credential".into(),
+                "env:R".into(),
+                "--member-credential".into(),
+                "env:M".into(),
+                flag.into(),
+                "asserted".into(),
+            ]) else {
+                panic!("adopt accepted asserted identity flag {flag}")
+            };
+            assert_eq!(err.code, USAGE);
+            assert!(err.message.contains("measures org and member identity"));
+        }
+    }
+
+    #[test]
+    fn adoption_refuses_a_raw_credential_without_echoing_it() {
+        let secret = "member-secret-that-must-not-appear";
+        let err = run_lifecycle_adopt(
+            "local-name",
+            "/tmp/not-opened-because-the-handle-refuses-first",
+            "relationship-intelligence",
+            "-1001",
+            "env:TENANT_RECORDS",
+            secret,
+        )
+        .expect_err("a raw credential is not a handle");
+        assert_eq!(err.code, USAGE);
+        assert!(err.message.contains("env:NAME"));
+        assert!(!err.message.contains(secret));
     }
 
     #[test]

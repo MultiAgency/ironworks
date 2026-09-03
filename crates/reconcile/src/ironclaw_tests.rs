@@ -120,10 +120,10 @@ fn a_recorded_member_that_exists_is_managed() {
         Presence::Present { id: recorded_id.clone() }
     );
 
-    let ours = Recorded {
-        progress: ProvisionProgress::Provisioning { reached: Stage::MemberMinted },
-        ids: [(Authority::Member, recorded_id)].into_iter().collect(),
-    };
+    let ours = Recorded::from_created(
+        ProvisionProgress::Provisioning { reached: Stage::MemberMinted },
+        [(Authority::Member, recorded_id)],
+    );
     let member =
         holdings(&ours, &inventory).into_iter().find(|h| h.authority == Authority::Member).unwrap();
     assert_eq!(member.custody, Custody::Managed);
@@ -138,10 +138,10 @@ fn an_authoritative_404_for_the_recorded_member_is_absent_and_contradicts() {
     let inventory = IronclawMember::new(&client(&f), Some(recorded_id.clone())).observe(&spec());
     assert_eq!(inventory.presence(Authority::Member), Presence::Absent);
 
-    let ours = Recorded {
-        progress: ProvisionProgress::Provisioning { reached: Stage::MemberMinted },
-        ids: [(Authority::Member, recorded_id)].into_iter().collect(),
-    };
+    let ours = Recorded::from_created(
+        ProvisionProgress::Provisioning { reached: Stage::MemberMinted },
+        [(Authority::Member, recorded_id)],
+    );
     let report = inspect(
         &spec(),
         &ours,

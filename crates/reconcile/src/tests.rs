@@ -91,10 +91,10 @@ fn a_matching_org_registration_is_managed() {
         Presence::Present { id: OpaqueId::new("acme-sales") }
     );
 
-    let ours = Recorded {
-        progress: ProvisionProgress::Provisioning { reached: Stage::OrgRegistered },
-        ids: [(Authority::OrgRegistration, OpaqueId::new("acme-sales"))].into_iter().collect(),
-    };
+    let ours = Recorded::from_created(
+        ProvisionProgress::Provisioning { reached: Stage::OrgRegistered },
+        [(Authority::OrgRegistration, OpaqueId::new("acme-sales"))],
+    );
     let held = holdings(&ours, &inventory);
     let org = held.iter().find(|h| h.authority == Authority::OrgRegistration).unwrap();
     assert_eq!(org.custody, Custody::Managed);
@@ -115,10 +115,10 @@ fn a_credential_for_another_org_is_reported_as_what_it_is() {
 
     // We recorded creating a credential for acme-sales. What is out there opens rival-co, so it
     // is not ours.
-    let ours = Recorded {
-        progress: ProvisionProgress::Provisioning { reached: Stage::OrgRegistered },
-        ids: [(Authority::OrgRegistration, OpaqueId::new("acme-sales"))].into_iter().collect(),
-    };
+    let ours = Recorded::from_created(
+        ProvisionProgress::Provisioning { reached: Stage::OrgRegistered },
+        [(Authority::OrgRegistration, OpaqueId::new("acme-sales"))],
+    );
     let held = holdings(&ours, &inventory);
     let org = held.iter().find(|h| h.authority == Authority::OrgRegistration).unwrap();
     assert_eq!(org.custody, Custody::KnownUnmanaged);

@@ -56,7 +56,7 @@
 //! suspending a member does not remove product-surface authority from an already-issued session,
 //! and modelling it as an authority-removal state would be a lie in the type system.
 
-use ironworks_domain::Slug;
+use ironworks_domain::{ChannelRef, ScopeEvidence, ServiceId, Slug};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::Path;
 use std::sync::Mutex;
@@ -91,20 +91,132 @@ pub use state::{
     InstanceSpec, ProvisionProgress, ServingObservation, SmokeEvidence, SmokeOutcome, Stage,
 };
 
-/// What IronWorks durably recorded about its own actions: how far it got, and what it created.
+/// How an authority identifier entered the lifecycle record.
 ///
-/// Kept together because custody needs both, and separate from the inventory because this is a
-/// note about ourselves while the inventory is a report about the world.
+/// This distinction controls compensation: IronWorks may reverse authority it created, but an
+/// adopted identifier is an observation about somebody else's prior action and is never ours to
+/// remove merely because this deployment later fails.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityProvenance {
+    Created,
+    Adopted,
+}
+
+impl IdentityProvenance {
+    fn tag(self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Adopted => "adopted",
+        }
+    }
+
+    fn from_tag(tag: &str) -> Option<Self> {
+        match tag {
+            "created" => Some(Self::Created),
+            "adopted" => Some(Self::Adopted),
+            _ => None,
+        }
+    }
+}
+
+/// One foreign authority identifier, with the provenance lifecycle must not erase.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorityIdentity {
+    id: OpaqueId,
+    provenance: IdentityProvenance,
+    runtime_subject: Option<RuntimeSubject>,
+}
+
+impl AuthorityIdentity {
+    pub fn created(id: OpaqueId) -> Self {
+        Self { id, provenance: IdentityProvenance::Created, runtime_subject: None }
+    }
+
+    pub fn adopted(id: OpaqueId) -> Self {
+        Self { id, provenance: IdentityProvenance::Adopted, runtime_subject: None }
+    }
+
+    pub fn id(&self) -> &OpaqueId {
+        &self.id
+    }
+
+    pub fn provenance(&self) -> IdentityProvenance {
+        self.provenance
+    }
+
+    /// The full subject measured from `/session`, when this identity was adopted that way.
+    ///
+    /// Older created identities predate this observation and correctly return `None`; absence is
+    /// not rewritten into a guessed tenant.
+    pub fn runtime_subject(&self) -> Option<&RuntimeSubject> {
+        self.runtime_subject.as_ref()
+    }
+}
+
+/// What IronWorks durably recorded about its own actions and observations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Recorded {
     pub progress: ProvisionProgress,
-    pub ids: std::collections::BTreeMap<Authority, OpaqueId>,
+    identities: std::collections::BTreeMap<Authority, AuthorityIdentity>,
 }
 
 impl Recorded {
     /// Just the progress, for a caller with no interest in identifiers.
     pub fn from_progress(progress: ProvisionProgress) -> Self {
-        Self { progress, ids: std::collections::BTreeMap::new() }
+        Self { progress, identities: std::collections::BTreeMap::new() }
+    }
+
+    /// Construct a record of authority IronWorks created.
+    pub fn from_created(
+        progress: ProvisionProgress,
+        ids: impl IntoIterator<Item = (Authority, OpaqueId)>,
+    ) -> Self {
+        Self {
+            progress,
+            identities: ids
+                .into_iter()
+                .map(|(authority, id)| (authority, AuthorityIdentity::created(id)))
+                .collect(),
+        }
+    }
+
+    pub fn identity(&self, authority: Authority) -> Option<&AuthorityIdentity> {
+        self.identities.get(&authority)
+    }
+
+    pub fn accounted_id(&self, authority: Authority) -> Option<&OpaqueId> {
+        self.identity(authority).map(AuthorityIdentity::id)
+    }
+
+    pub fn created_id(&self, authority: Authority) -> Option<&OpaqueId> {
+        self.identity(authority)
+            .filter(|identity| identity.provenance == IdentityProvenance::Created)
+            .map(AuthorityIdentity::id)
+    }
+}
+
+/// The two authoritative answers required to adopt an existing instance.
+///
+/// The organization is copied from [`ScopeEvidence`], not accepted as a string, and the member is
+/// the complete subject returned by the runtime. This value creates no foreign authority; it is
+/// consumed only by [`LifecycleStore::adopt`] to record what those systems already reported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdoptionEvidence {
+    org: ironworks_domain::OrgId,
+    subject: RuntimeSubject,
+}
+
+impl AdoptionEvidence {
+    pub fn observed(scope: &ScopeEvidence, subject: RuntimeSubject) -> Self {
+        Self { org: scope.org().clone(), subject }
+    }
+
+    pub fn org(&self) -> &ironworks_domain::OrgId {
+        &self.org
+    }
+
+    pub fn subject(&self) -> &RuntimeSubject {
+        &self.subject
     }
 }
 
@@ -198,10 +310,9 @@ type StoredProgress = (Option<String>, Option<String>, Option<String>, Option<St
 
 /// What `open` initialises and migrates to.
 ///
-/// `open_readonly` accepts **1 and 2**. A v1 store holds valid lifecycle state and simply predates
-/// the confinement ledger; refusing it would make inspection impossible until somebody ran a
-/// writing command, which is a worse answer than reporting that the ledger is not there.
-const SCHEMA_VERSION: i64 = 2;
+/// `open_readonly` accepts every known version. Older stores hold valid lifecycle state; refusing
+/// them would make inspection impossible until somebody ran a writing command.
+const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_meta (
@@ -357,6 +468,52 @@ const V2_OBJECTS: [&str; 5] = [
     "confinement_drift",
 ];
 
+/// Provenance-aware authority identities, added at schema 3.
+///
+/// `stage_history.created_id` is retained as historical storage for v1/v2 readers. This table is
+/// the authoritative identity view from v3 onward: an adopted id is accounted for without being
+/// relabelled as something IronWorks created. A runtime subject is present only when `/session`
+/// supplied the member identity; older rows remain honest by carrying no inferred tenant.
+const SCHEMA_V3: &str = "
+CREATE TABLE authority_identities (
+    slug       TEXT NOT NULL REFERENCES instances(slug) ON DELETE RESTRICT,
+    authority  TEXT NOT NULL CHECK (authority IN
+                   ('org_registration','tenant_data','member','member_confinement','registry_entry')),
+    opaque_id  TEXT NOT NULL CHECK (length(opaque_id) > 0),
+    provenance TEXT NOT NULL CHECK (provenance IN ('created','adopted')),
+    observed_at TEXT NOT NULL CHECK (length(observed_at) >= 20),
+    subject_tenant TEXT,
+    subject_user   TEXT,
+    PRIMARY KEY (slug, authority),
+    CHECK ((subject_tenant IS NULL) = (subject_user IS NULL)),
+    CHECK (subject_tenant IS NULL OR authority = 'member'),
+    CHECK (subject_user IS NULL OR subject_user = opaque_id),
+    CHECK (subject_tenant IS NULL OR length(subject_tenant) > 0),
+    CHECK (subject_user IS NULL OR length(subject_user) > 0)
+) WITHOUT ROWID;
+
+INSERT INTO authority_identities(
+    slug, authority, opaque_id, provenance, observed_at, subject_tenant, subject_user
+)
+SELECT slug,
+       CASE stage
+         WHEN 'org_registered' THEN 'org_registration'
+         WHEN 'data_initialization_settled' THEN 'tenant_data'
+         WHEN 'member_minted' THEN 'member'
+         WHEN 'member_confined' THEN 'member_confinement'
+         WHEN 'staged' THEN 'registry_entry'
+       END,
+       created_id,
+       CASE adopted WHEN 1 THEN 'adopted' ELSE 'created' END,
+       at,
+       NULL,
+       NULL
+FROM stage_history
+WHERE created_id IS NOT NULL
+  AND stage IN ('org_registered','data_initialization_settled','member_minted',
+                'member_confined','staged');
+";
+
 /// What a file turned out to be, decided by reads alone.
 ///
 /// Discovery happens **before** any pragma or DDL, because `PRAGMA journal_mode = WAL` rewrites the
@@ -371,6 +528,7 @@ enum Shape {
     Foreign,
     V1,
     V2,
+    V3,
     Unknown(i64),
 }
 
@@ -413,6 +571,10 @@ pub enum LifecycleError {
     #[error("no lifecycle record for {slug}")]
     NoSuchInstance { slug: String },
     #[error(
+        "instance {slug} already exists; adoption is a one-time provenance record and never an upsert"
+    )]
+    AlreadyExists { slug: String },
+    #[error(
         "instance {slug} is recorded at stage {recorded}, which is at or past {attempted} — a \
          stage is never walked backwards, because a later run finding less than an earlier one \
          is evidence about the observer, not about the world"
@@ -441,7 +603,8 @@ pub enum LifecycleError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Prepare {
     Initialise,
-    Migrate,
+    MigrateV1,
+    MigrateV2,
     Validate,
 }
 
@@ -478,15 +641,17 @@ fn discover(path: &Path, conn: &Connection) -> Result<Shape, LifecycleError> {
     Ok(match found {
         1 => Shape::V1,
         2 => Shape::V2,
+        3 => Shape::V3,
         other => Shape::Unknown(other),
     })
 }
 
-/// A brand-new store is born at v2, in one transaction.
-fn init_v2(conn: &Connection) -> Result<(), LifecycleError> {
+/// A brand-new store is born at the current schema, in one transaction.
+fn init_current(conn: &Connection) -> Result<(), LifecycleError> {
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch(SCHEMA)?;
     tx.execute_batch(SCHEMA_V2)?;
+    tx.execute_batch(SCHEMA_V3)?;
     tx.execute(
         "INSERT INTO lifecycle_meta(key,value) VALUES('schema_version',?1)",
         params![SCHEMA_VERSION.to_string()],
@@ -495,14 +660,24 @@ fn init_v2(conn: &Connection) -> Result<(), LifecycleError> {
     Ok(())
 }
 
-/// Add the ledger to an existing store, additively, in one transaction.
-///
-/// It reads, rewrites and drops nothing: `instances` and `stage_history` are not named. SQLite DDL
-/// is transactional, so an interrupted run rolls back with the version still `1` and every
-/// original row intact, and the next `open` re-runs it.
-fn migrate_v1_to_v2(conn: &Connection) -> Result<(), LifecycleError> {
+/// Add provenance-aware identities to a valid v2 store, in one transaction.
+fn migrate_v2_to_v3(conn: &Connection) -> Result<(), LifecycleError> {
+    validate_v2(conn)?;
+    let tx = conn.unchecked_transaction()?;
+    tx.execute_batch(SCHEMA_V3)?;
+    tx.execute(
+        "UPDATE lifecycle_meta SET value=?1 WHERE key='schema_version'",
+        params![SCHEMA_VERSION.to_string()],
+    )?;
+    tx.commit()?;
+    Ok(())
+}
+
+/// Migrate a v1 store through both additive schemas without exposing an intermediate commit.
+fn migrate_v1_to_v3(conn: &Connection) -> Result<(), LifecycleError> {
     let tx = conn.unchecked_transaction()?;
     tx.execute_batch(SCHEMA_V2)?;
+    tx.execute_batch(SCHEMA_V3)?;
     tx.execute(
         "UPDATE lifecycle_meta SET value=?1 WHERE key='schema_version'",
         params![SCHEMA_VERSION.to_string()],
@@ -525,6 +700,19 @@ fn validate_v2(conn: &Connection) -> Result<(), LifecycleError> {
         if present == 0 {
             return Err(LifecycleError::Corrupt { what: "the v2 confinement ledger schema" });
         }
+    }
+    Ok(())
+}
+
+fn validate_v3(conn: &Connection) -> Result<(), LifecycleError> {
+    validate_v2(conn)?;
+    let present: i64 = conn.query_row(
+        "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='authority_identities'",
+        [],
+        |r| r.get(0),
+    )?;
+    if present == 0 {
+        return Err(LifecycleError::Corrupt { what: "the v3 authority identity schema" });
     }
     Ok(())
 }
@@ -834,8 +1022,9 @@ impl LifecycleStore {
                 return Err(LifecycleError::Uninitialized { path: path.display().to_string() });
             }
             Shape::Empty => Prepare::Initialise,
-            Shape::V1 => Prepare::Migrate,
-            Shape::V2 => Prepare::Validate,
+            Shape::V1 => Prepare::MigrateV1,
+            Shape::V2 => Prepare::MigrateV2,
+            Shape::V3 => Prepare::Validate,
         };
 
         // ── only now may the file change ────────────────────────────────────────────
@@ -854,9 +1043,10 @@ impl LifecycleStore {
         conn.pragma_update(None, "foreign_keys", "ON")?;
 
         match prepare {
-            Prepare::Initialise => init_v2(&conn)?,
-            Prepare::Migrate => migrate_v1_to_v2(&conn)?,
-            Prepare::Validate => validate_v2(&conn)?,
+            Prepare::Initialise => init_current(&conn)?,
+            Prepare::MigrateV1 => migrate_v1_to_v3(&conn)?,
+            Prepare::MigrateV2 => migrate_v2_to_v3(&conn)?,
+            Prepare::Validate => validate_v3(&conn)?,
         }
         Ok(Self { conn: Mutex::new(conn), writable: true, version: SCHEMA_VERSION })
     }
@@ -881,6 +1071,10 @@ impl LifecycleStore {
                 validate_v2(&conn)?;
                 2
             }
+            Shape::V3 => {
+                validate_v3(&conn)?;
+                3
+            }
             Shape::Unknown(found) => {
                 return Err(LifecycleError::Version { found, expected: SCHEMA_VERSION });
             }
@@ -903,6 +1097,84 @@ impl LifecycleStore {
 
     fn require_writable(&self) -> Result<(), LifecycleError> {
         if self.writable { Ok(()) } else { Err(LifecycleError::ReadOnly) }
+    }
+
+    /// Record one already-existing org scope and runtime member, atomically.
+    ///
+    /// This performs no foreign-system operation. Its caller must obtain [`AdoptionEvidence`] by
+    /// observing the authorities first; either every local row commits or none does. A slug that
+    /// already exists refuses even when every field agrees, because replacing its first provenance
+    /// event with an upsert would make history operator-editable.
+    pub fn adopt(
+        &self,
+        slug: &Slug,
+        service: &ServiceId,
+        channel: &ChannelRef,
+        evidence: &AdoptionEvidence,
+        now: &str,
+    ) -> Result<InstanceSpec, LifecycleError> {
+        self.require_writable()?;
+        let conn = self.conn.lock().expect("lifecycle lock");
+        let tx = conn.unchecked_transaction()?;
+        let exists: i64 = tx.query_row(
+            "SELECT count(*) FROM instances WHERE slug=?1",
+            params![slug.as_str()],
+            |r| r.get(0),
+        )?;
+        if exists != 0 {
+            return Err(LifecycleError::AlreadyExists { slug: slug.as_str().to_owned() });
+        }
+
+        tx.execute(
+            "INSERT INTO instances(slug,org,service,channel,stage,started_at,updated_at)
+             VALUES(?1,?2,?3,?4,?5,?6,?6)",
+            params![
+                slug.as_str(),
+                evidence.org.as_str(),
+                service.as_str(),
+                channel.as_str(),
+                Stage::MemberMinted.tag(),
+                now,
+            ],
+        )?;
+        for (stage, adopted) in [
+            (Stage::PreflightPassed, false),
+            (Stage::OrgRegistered, true),
+            (Stage::DataInitializationSettled, true),
+            (Stage::MemberMinted, true),
+        ] {
+            tx.execute(
+                "INSERT INTO stage_history(slug,stage,at,adopted,created_id)
+                 VALUES(?1,?2,?3,?4,NULL)",
+                params![slug.as_str(), stage.tag(), now, i64::from(adopted)],
+            )?;
+        }
+        tx.execute(
+            "INSERT INTO authority_identities(
+                 slug,authority,opaque_id,provenance,observed_at,subject_tenant,subject_user
+             ) VALUES(?1,?2,?3,'adopted',?4,NULL,NULL)",
+            params![slug.as_str(), Authority::OrgRegistration.tag(), evidence.org.as_str(), now,],
+        )?;
+        tx.execute(
+            "INSERT INTO authority_identities(
+                 slug,authority,opaque_id,provenance,observed_at,subject_tenant,subject_user
+             ) VALUES(?1,?2,?3,'adopted',?4,?5,?3)",
+            params![
+                slug.as_str(),
+                Authority::Member.tag(),
+                evidence.subject.user().as_str(),
+                now,
+                evidence.subject.tenant().as_str(),
+            ],
+        )?;
+        tx.commit()?;
+
+        Ok(InstanceSpec {
+            slug: slug.clone(),
+            org: evidence.org.clone(),
+            service: service.clone(),
+            channel: channel.clone(),
+        })
     }
 
     /// Record what an operator asked for. Idempotent: a repeat keeps the existing progress.
@@ -968,14 +1240,15 @@ impl LifecycleStore {
             });
         }
         let conn = self.conn.lock().expect("lifecycle lock");
-        let changed = conn.execute(
+        let tx = conn.unchecked_transaction()?;
+        let changed = tx.execute(
             "UPDATE instances SET stage=?2, updated_at=?3 WHERE slug=?1",
             params![slug.as_str(), stage.tag(), now],
         )?;
         if changed == 0 {
             return Err(LifecycleError::NoSuchInstance { slug: slug.as_str().to_owned() });
         }
-        conn.execute(
+        tx.execute(
             "INSERT INTO stage_history(slug,stage,at,adopted,created_id) VALUES(?1,?2,?3,?4,?5)",
             params![
                 slug.as_str(),
@@ -985,6 +1258,20 @@ impl LifecycleStore {
                 created.map(OpaqueId::as_str)
             ],
         )?;
+        if let Some(id) = created
+            && let Some(authority) =
+                Authority::ALL.iter().copied().find(|a| a.created_at() == stage)
+        {
+            let provenance =
+                if adopted { IdentityProvenance::Adopted } else { IdentityProvenance::Created };
+            tx.execute(
+                "INSERT INTO authority_identities(
+                     slug,authority,opaque_id,provenance,observed_at,subject_tenant,subject_user
+                 ) VALUES(?1,?2,?3,?4,?5,NULL,NULL)",
+                params![slug.as_str(), authority.tag(), id.as_str(), provenance.tag(), now],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -1130,30 +1417,97 @@ impl LifecycleStore {
 
     /// What IronWorks recorded bringing into existence, by authority.
     ///
-    /// The other half of [`ProvisionProgress`]. Progress says how far we got; this says *what we
-    /// got*, and custody needs both — reaching `member_minted` tells you a member was created,
-    /// not which one.
+    /// Strictly created-only. Adopted identities are deliberately absent: compensation and any
+    /// caller asking what IronWorks made must never acquire somebody else's prior authority.
     pub fn created(&self, slug: &Slug) -> Result<Recorded, LifecycleError> {
+        self.read_identities(slug, Some(IdentityProvenance::Created))
+    }
+
+    /// Every authority identity lifecycle accounts for, preserving created/adopted provenance.
+    pub fn recorded(&self, slug: &Slug) -> Result<Recorded, LifecycleError> {
+        self.read_identities(slug, None)
+    }
+
+    fn read_identities(
+        &self,
+        slug: &Slug,
+        only: Option<IdentityProvenance>,
+    ) -> Result<Recorded, LifecycleError> {
         let progress = self.progress(slug)?;
         let conn = self.conn.lock().expect("lifecycle lock");
-        let mut stmt = conn.prepare(
-            "SELECT stage, created_id FROM stage_history
-             WHERE slug=?1 AND created_id IS NOT NULL ORDER BY at, rowid",
-        )?;
-        let rows = stmt.query_map(params![slug.as_str()], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-        })?;
-        let mut ids = std::collections::BTreeMap::new();
-        for row in rows {
-            let (tag, id) = row?;
-            let stage = Stage::from_tag(&tag).ok_or(LifecycleError::Corrupt { what: "stage" })?;
-            if let Some(authority) =
-                Authority::ALL.iter().copied().find(|a| a.created_at() == stage)
-            {
-                ids.insert(authority, OpaqueId::new(id));
+        let mut identities = std::collections::BTreeMap::new();
+        if self.version >= 3 {
+            let mut stmt = conn.prepare(
+                "SELECT authority,opaque_id,provenance,subject_tenant,subject_user
+                 FROM authority_identities WHERE slug=?1 ORDER BY authority",
+            )?;
+            let rows = stmt.query_map(params![slug.as_str()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            })?;
+            for row in rows {
+                let (authority, id, provenance, tenant, user) = row?;
+                let authority = Authority::ALL
+                    .iter()
+                    .copied()
+                    .find(|candidate| candidate.tag() == authority)
+                    .ok_or(LifecycleError::Corrupt { what: "an authority identity" })?;
+                let provenance = IdentityProvenance::from_tag(&provenance)
+                    .ok_or(LifecycleError::Corrupt { what: "authority identity provenance" })?;
+                if only.is_some_and(|wanted| wanted != provenance) {
+                    continue;
+                }
+                let runtime_subject = match (tenant, user) {
+                    (Some(tenant), Some(user)) => Some(RuntimeSubject::new(
+                        RuntimeTenantId::parse(&tenant)
+                            .map_err(|_| LifecycleError::Corrupt { what: "runtime tenant id" })?,
+                        RuntimeUserId::parse(&user)
+                            .map_err(|_| LifecycleError::Corrupt { what: "runtime user id" })?,
+                    )),
+                    (None, None) => None,
+                    _ => return Err(LifecycleError::Corrupt { what: "a runtime subject" }),
+                };
+                let identity =
+                    AuthorityIdentity { id: OpaqueId::new(id), provenance, runtime_subject };
+                identities.insert(authority, identity);
+            }
+        } else {
+            let mut stmt = conn.prepare(
+                "SELECT stage,created_id,adopted FROM stage_history
+                 WHERE slug=?1 AND created_id IS NOT NULL ORDER BY at,rowid",
+            )?;
+            let rows = stmt.query_map(params![slug.as_str()], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, bool>(2)?))
+            })?;
+            for row in rows {
+                let (tag, id, adopted) = row?;
+                let stage =
+                    Stage::from_tag(&tag).ok_or(LifecycleError::Corrupt { what: "stage" })?;
+                let provenance =
+                    if adopted { IdentityProvenance::Adopted } else { IdentityProvenance::Created };
+                if only.is_some_and(|wanted| wanted != provenance) {
+                    continue;
+                }
+                if let Some(authority) =
+                    Authority::ALL.iter().copied().find(|a| a.created_at() == stage)
+                {
+                    identities.insert(
+                        authority,
+                        AuthorityIdentity {
+                            id: OpaqueId::new(id),
+                            provenance,
+                            runtime_subject: None,
+                        },
+                    );
+                }
             }
         }
-        Ok(Recorded { progress, ids })
+        Ok(Recorded { progress, identities })
     }
 
     /// Every identifier recorded across **all** instances for one authority.
@@ -1166,13 +1520,21 @@ impl LifecycleStore {
         &self,
         authority: Authority,
     ) -> Result<std::collections::BTreeSet<OpaqueId>, LifecycleError> {
-        let stage = authority.created_at();
         let conn = self.conn.lock().expect("lifecycle lock");
-        let mut stmt = conn.prepare(
-            "SELECT DISTINCT created_id FROM stage_history
-             WHERE stage=?1 AND created_id IS NOT NULL",
-        )?;
-        let rows = stmt.query_map(params![stage.tag()], |r| r.get::<_, String>(0))?;
+        let (sql, tag) = if self.version >= 3 {
+            (
+                "SELECT DISTINCT opaque_id FROM authority_identities WHERE authority=?1",
+                authority.tag(),
+            )
+        } else {
+            (
+                "SELECT DISTINCT created_id FROM stage_history
+                 WHERE stage=?1 AND created_id IS NOT NULL",
+                authority.created_at().tag(),
+            )
+        };
+        let mut stmt = conn.prepare(sql)?;
+        let rows = stmt.query_map(params![tag], |r| r.get::<_, String>(0))?;
         rows.map(|row| Ok(OpaqueId::new(row?))).collect()
     }
 

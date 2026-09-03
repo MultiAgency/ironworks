@@ -126,10 +126,28 @@ impl Outcome {
 
 /// Token and cost accounting, best-effort.
 ///
-/// Absent on create and populated on fetch (measured). `cost` is an IronClaw extension computed
-/// from its own pricing table — treat it as an estimate, not an invoice. Measured 2026-08-27:
-/// cached tokens are billed at the same rate as fresh ones, so a cache hit visible here is not
-/// a saving visible on a bill.
+/// Token counts are present and correct on both create and fetch at 1.4.0.
+///
+/// # `total_cost_usd` does not describe the pinned model, in either direction
+///
+/// It is an IronClaw extension computed from *its own* per-model table, and measured 2026-09-02
+/// (`docs/experiments/0040-the-cost-field-misses-the-pin-twice.md`) that table misses
+/// our pin twice over, for two unrelated reasons:
+///
+/// - **On create** it prices the model the request named. `qwen/…` is classified as a free local
+///   model by a name heuristic — the table's `is_local_model` matches a leading `qwen`, alongside
+///   `llama`, `mistral`, `deepseek` and others — so a turn on the pin prices at exactly **`"0"`**.
+/// - **On fetch** the model has become the literal `"reborn"` (§G-2), which the table does not
+///   know, so it falls back to its default entry and prices the same turn at **GPT-4o's rates**
+///   ($2.50/Mtok in, $10.00/Mtok out).
+///
+/// A model the table *does* know prices correctly on create — measured with `model: "default"`,
+/// which is neither local-prefixed nor a table entry and duly came back at the default rates. So
+/// this is a fact about the pin's name, not about the create path.
+///
+/// The cache-read discount is keyed the same way (Anthropic 10×, OpenAI 2×, everything else none),
+/// so `qwen/…` gets no discount — which is why `0001`'s "cached costs the same as fresh" holds
+/// here. §G-7's *never reconcile spend from it* is the rule; this is why.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Usage {
     pub input_tokens: u64,

@@ -149,10 +149,10 @@ fn sidecars(path: &Path) -> Vec<PathBuf> {
 // ── open, discovery and migration ───────────────────────────────────────────────────────────
 
 #[test]
-fn a_brand_new_store_is_born_at_version_two() {
+fn a_brand_new_store_is_born_at_current_version() {
     let dir = Dir::new();
     let store = LifecycleStore::open(dir.path().join("lifecycle.db")).expect("open");
-    assert_eq!(store.schema_version(), 2);
+    assert_eq!(store.schema_version(), 3);
 }
 
 /// The v1 fixture is built by the CURRENT writer and then walked back, so it is the shape a real
@@ -169,6 +169,7 @@ fn v1_store(path: &Path) {
         };
         conn.execute_batch(&format!("DROP {kind} IF EXISTS {object};")).expect("drop v2");
     }
+    conn.execute_batch("DROP TABLE authority_identities;").expect("drop v3");
     conn.execute("UPDATE lifecycle_meta SET value='1' WHERE key='schema_version'", [])
         .expect("walk back to v1");
 }
@@ -192,13 +193,43 @@ fn a_v1_store_migrates_and_keeps_every_original_row() {
     assert!(!history_before.is_empty(), "the fixture must have stages to preserve");
 
     let store = LifecycleStore::open(&path).expect("migrate");
-    assert_eq!(store.schema_version(), 2);
+    assert_eq!(store.schema_version(), 3);
     let slug = Slug::parse("acme").unwrap();
     assert_eq!(store.spec(&slug).expect("spec"), spec_before);
     assert_eq!(store.created(&slug).expect("created"), recorded_before);
     assert_eq!(store.history(&slug).expect("history"), history_before, "stage history moved");
     // And the ledger is usable afterwards.
     assert_eq!(store.latest_applicable(&slug, &OpaqueId::new(MEMBER)).expect("query"), None);
+}
+
+#[test]
+fn a_v2_adopted_id_migrates_without_becoming_created() {
+    let dir = Dir::new();
+    let path = dir.path().join("lifecycle.db");
+    let s = spec();
+    {
+        let store = LifecycleStore::open(&path).expect("open");
+        store.declare(&s, NOW).expect("declare");
+        store.reach(&s.slug, Stage::PreflightPassed, false, None, NOW).expect("preflight");
+        store
+            .reach(&s.slug, Stage::OrgRegistered, true, Some(&OpaqueId::new("existing-org")), NOW)
+            .expect("adopt old-shape identity");
+        let conn = store.conn.lock().expect("lock");
+        conn.execute_batch(
+            "DROP TABLE authority_identities;
+             UPDATE lifecycle_meta SET value='2' WHERE key='schema_version';",
+        )
+        .expect("walk back to v2");
+    }
+
+    let store = LifecycleStore::open(&path).expect("migrate");
+    assert_eq!(store.schema_version(), 3);
+    assert_eq!(store.created(&s.slug).unwrap().created_id(Authority::OrgRegistration), None);
+    let identity =
+        store.recorded(&s.slug).unwrap().identity(Authority::OrgRegistration).unwrap().clone();
+    assert_eq!(identity.id(), &OpaqueId::new("existing-org"));
+    assert_eq!(identity.provenance(), IdentityProvenance::Adopted);
+    assert_eq!(identity.runtime_subject(), None, "v2 recorded no runtime tenant to recover");
 }
 
 #[test]
@@ -237,7 +268,7 @@ fn an_interrupted_migration_rolls_back_and_the_retry_succeeds() {
 
     // The retry is the point: idempotent-by-rollback rather than idempotent-by-ignoring.
     let store = LifecycleStore::open(&path).expect("retry migrates");
-    assert_eq!(store.schema_version(), 2);
+    assert_eq!(store.schema_version(), 3);
 }
 
 /// A pre-existing object of the wrong shape must fail loudly rather than be adopted. This is what
@@ -279,7 +310,7 @@ fn an_unknown_version_is_refused_before_anything_is_written() {
 
     assert!(matches!(
         LifecycleStore::open(&path),
-        Err(LifecycleError::Version { found: 99, expected: 2 })
+        Err(LifecycleError::Version { found: 99, expected: 3 })
     ));
     assert_eq!(std::fs::read(&path).expect("read"), before, "the refused open mutated the store");
     assert!(sidecars(&path).is_empty(), "the refused open created a WAL sidecar");

@@ -139,8 +139,25 @@ file.
   cursor, replayable by `Last-Event-ID` or `?after_cursor=` — and carries progressive answer text
   plus the `run_id` the cancel above needs. ADR 0002 is unaffected: it declined `stream: true` on
   the create call, and this is a different object on a different route, read after create returns.
-  Note also that `GET /api/webchat/v2/threads` returns each thread with a `title` holding the raw
-  request input, so an envelope's record bytes are durably readable on a second route.
+  `GET /api/webchat/v2/threads` also returns a derived `title` per thread. *This bullet briefly
+  said that title held the raw request input and put an envelope's record bytes on a second route.
+  It does not: the title is the first non-empty line of the earliest user message, capped at 60
+  characters, derived per read and never persisted, and for our envelope those 60 characters are a
+  constant JSON wrapper prefix carrying no tenant content —
+  `docs/experiments/0040-the-cost-field-misses-the-pin-twice.md` finding 4.*
+- **[measured @ 1.4.0] `usage.cost` misses the pinned model twice, in opposite directions.** Token
+  counts are correct on both create and retrieval; only the cost differs, and the cause is the
+  model *string* rather than the route
+  (`docs/experiments/0040-the-cost-field-misses-the-pin-twice.md`). Create prices the model the
+  request named, and `qwen/…` trips IronClaw's `is_local_model` name heuristic — meaning *free local
+  model* — so the pin prices at exactly `"0"`. Retrieval prices the literal `"reborn"` the model has
+  become by then (bullet above), which the table does not know, so it falls back to GPT-4o's
+  $2.50/Mtok in and $10.00/Mtok out. **A model the table knows prices correctly on create**, measured
+  with `model: "default"`. `ironworks_ironclaw` builds its outcome from the create response on the
+  answering path, so the operator saw `cost 0` on every turn until that line was relabelled an
+  estimate; nothing journals the figure, so no stored accounting was affected. This is the sharp
+  form of §G-7, and it is one mechanism away from the `"reborn"` bullet above rather than a separate
+  fact.
 - **[measured @ 1.3.0] An unknown response id returns 404**, JSON-enveloped,
   `param: "response_id"`. **[measured @ 1.4.0]** A *different member's* id returns the same 404, and
   so does that thread's timeline, with the owner's own fetch returning 200 as the control
@@ -574,7 +591,12 @@ consecutive runs on one probe, 6 PASS each). That change also moved what it prov
 it used to confine reports a **53**-row catalogue, and a minted member **52**, so the floor §L-8
 states — 50 disabled + 2 locked — is the minted member's and was not what the old run measured
 (`docs/experiments/0037-what-the-seam-never-asked-for.md` check 3). `dev/prove-workspace.sh` needs a
-runtime on `hosted-single-tenant-volume-sandboxed`, which `dev/docker-compose.probe.yml` is not;
+runtime on `hosted-single-tenant-volume-sandboxed` **and** a service declaring
+`runtime_tools: "sandbox"`; as of 2026-09-02 `dev/probe-up.sh --sandboxed` supplies the first
+(`dev/docker-compose.probe-sandboxed.yml`, and `docs/experiments/0039-the-catalogue-has-two-axes.md`
+for what standing it up measured), so the proof now reports the one block that remains — no shipped
+service declares `sandbox`, which PRD §13 records as a product decision nobody has taken. **It is
+still BLOCKED**; what changed is which of its two reasons stands;
 and `dev/prove-deployment-isolation.sh` runs as root on a deployment host, which does not exist
 (`deploy/README.md`). A bare count was here and was wrong — it said six while `dev/` held nine —
 so the enumeration below is the claim and no number stands in front of it.

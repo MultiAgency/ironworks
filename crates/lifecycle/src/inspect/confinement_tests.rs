@@ -156,8 +156,8 @@ fn clean_world() -> (Recorded, AuthorityInventory) {
             },
         })
         .collect();
-    let recorded = Recorded {
-        progress: ProvisionProgress::Activated {
+    let recorded = Recorded::from_created(
+        ProvisionProgress::Activated {
             smoke: crate::state::SmokeEvidence::from_outcome(
                 &SmokeOutcome::Passed {
                     isolation: "own org only".into(),
@@ -167,20 +167,17 @@ fn clean_world() -> (Recorded, AuthorityInventory) {
             )
             .expect("smoke"),
         },
-        ids: Authority::ALL
-            .iter()
-            .map(|a| {
-                (
-                    *a,
-                    OpaqueId::new(if *a == Authority::Member {
-                        MEMBER.to_owned()
-                    } else {
-                        format!("{}-1", a.tag())
-                    }),
-                )
-            })
-            .collect(),
-    };
+        Authority::ALL.iter().map(|a| {
+            (
+                *a,
+                OpaqueId::new(if *a == Authority::Member {
+                    MEMBER.to_owned()
+                } else {
+                    format!("{}-1", a.tag())
+                }),
+            )
+        }),
+    );
     (recorded, AuthorityInventory::Reconciled(ids))
 }
 

@@ -113,7 +113,7 @@ enum Applicability {
 }
 
 fn applicability(recorded: &crate::Recorded) -> Applicability {
-    match recorded.ids.get(&Authority::Member) {
+    match recorded.accounted_id(Authority::Member) {
         Some(member) => Applicability::Applicable(member.clone()),
         None if recorded.progress.has_reached(Stage::MemberMinted) => {
             Applicability::NoRecordedMember
@@ -397,7 +397,7 @@ pub fn inspect(
 
     for holding in &held {
         match &holding.custody {
-            Custody::Managed => {}
+            Custody::Managed | Custody::Adopted => {}
             Custody::KnownUnmanaged => {
                 blocked = true;
                 findings.push(Finding {
@@ -551,6 +551,9 @@ fn describe_custody(custody: &Custody, presence: &crate::Presence) -> String {
     };
     match custody {
         Custody::Managed => format!("MANAGED{id} — exists, and we recorded creating it"),
+        Custody::Adopted => {
+            format!("ADOPTED{id} — exists, and we recorded observing rather than creating it")
+        }
         Custody::KnownUnmanaged => {
             format!("UNMANAGED{id} — exists, and we have no record of creating it")
         }

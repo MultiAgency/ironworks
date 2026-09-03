@@ -543,6 +543,13 @@ observations live in `AuthorityInventory`.
 by type and length. *Why:* a token there would be a second copy of every client credential in a
 file whose whole purpose is to outlive a crash.
 
+**F-3a — An accounted identifier still says who created it.** Authority identities carry
+created or adopted provenance. The created-only query remains created-only, compensation may act
+only on that set, and confinement binds against the broader accounted set. Adoption records the
+org resolved by the record-store credential and the complete tenant/user subject returned by the
+runtime; it accepts neither id as operator text. The runtime tenant is a measured fact, not an
+alias for the local lifecycle slug.
+
 **F-4 — Deleting a member does not revoke its token.** Measured. A deprovisioned tenant leaves an
 authenticating session for up to the session lifetime (365 days at the pinned rev — a compiled-in
 constant with no configuration path). **Deprovisioning is a process with a remainder, not a
@@ -608,8 +615,29 @@ idempotency key (ADR 0005), never by polling, because no response id was returne
 *This entry previously read "returns whatever status it has", which the pinned source contradicts
 at both revisions; `DESIGN.md` corrected it first and this copy lagged.*
 **G-6** Rate limit is 30 requests / 60 seconds **per user**, shared with the chat surface.
-**G-7** `usage.cost` is a computed estimate that does **not** model the provider's cached-read
-discount. Never reconcile spend from it.
+**G-7** `usage.cost` is a computed estimate priced from IronClaw's own per-model table, and for the
+pinned model it is wrong in **both** directions. Never reconcile spend from it. *Mechanism measured
+at 1.4.0 (`docs/experiments/0040-the-cost-field-misses-the-pin-twice.md`); the table keys
+everything off the model string.*
+
+- **On create** it prices the model the request named, and `qwen/…` trips the table's
+  `is_local_model` name heuristic — a leading `qwen`, alongside `llama`, `mistral`, `deepseek`,
+  `phi`, `gemma`, `yi` — which means *free local model*. The pin therefore prices at exactly `"0"`.
+- **On retrieval** the model has become the literal `"reborn"` (§G-2), which the table does not
+  know, so it falls back to its default entry: **GPT-4o's $2.50/Mtok in and $10.00/Mtok out**,
+  against the $0.50 and $3.30 `MODEL_PIN` records from the provider catalogue.
+
+So §G-2's post-hoc model amnesia is what produces the second figure — two entries in this section
+are one mechanism apart. A model the table *does* know prices correctly on create, measured with
+`model: "default"`, so **this is a fact about the pin's name, not about the create path**; an
+earlier reading of it as "create does not price" survived three consistent runs and was wrong.
+
+The cache-read divisor is keyed the same way (Anthropic 10×, OpenAI 2×, everything else none), so
+the pin gets none and cached bills at the full input rate — which is why `0001`'s finding holds, and
+why the upstream type's doc comment about "the provider's cache-read discount" is accurate about
+intent rather than contradicted. `ironworks_ironclaw::model::Usage` carries both failure modes in
+its own doc, and the operator line labels the figure an estimate rather than printing `cost 0` as
+though the turn were free.
 **G-8** A pin can be invalidated by someone else's deployment with no warning: the previously
 pinned model was withdrawn from the provider catalogue mid-session, having served turns an hour
 earlier.
@@ -977,14 +1005,21 @@ surface.** `GET /settings/tools` returns 53 rows: 51 `always_allow`, 2 `ask_each
 `agent.auto_approve_tools: true`. Confinement is therefore mandatory, not hardening, for the
 authority that endpoint reports.
 
-**The row count is caller-relative, and this table is the operator's view — measured 2026-09-02,
-`docs/experiments/0037-what-the-seam-never-asked-for.md` check 3.** Read with the WebUI env bearer
-the catalogue is 53 rows; read with a member minted by `POST /api/webchat/v2/admin/users` it is
-**52**, and the single difference is `nearai.web_search`. That resolves the standing disagreement
-between this section and `0012`: both counts were correct for the caller each was read with.
-Confinement authenticates *as the member* (§L-6), so the catalogue `ConfinementPolicy` actually
-writes against is the 52. §L-8's floor is stated against the member's view and is unchanged;
-what is corrected is the label on this enumeration, not its contents.
+**The row count has two independent axes, and this table is one of four cells — measured
+2026-09-02, `docs/experiments/0037-what-the-seam-never-asked-for.md` check 3 and
+`docs/experiments/0039-the-catalogue-has-two-axes.md` finding 1.**
+
+| `GET /settings/tools` | operator (WebUI env bearer) | minted member |
+|---|---|---|
+| `production` | **53** — the enumeration below | **52** |
+| `hosted-single-tenant-volume-sandboxed` | **54** | **53** |
+
+The **caller** axis is `nearai.web_search`; the **profile** axis is `builtin.shell`. They do not
+interact, and the locked pair in §L-4 is the same in all four cells. That resolves the standing
+disagreement between this section and `0012`: both counts were correct for the caller each was read
+with. Confinement authenticates *as the member* (§L-6) on whichever profile is served, so the
+catalogue `ConfinementPolicy` writes against is the right-hand column. What is corrected here is the
+label on this enumeration, not its contents.
 
 The enumerations are different layers, measured separately at the pin:
 
@@ -1350,3 +1385,14 @@ user-sandbox process port: writable persistent `/workspace`, read-only system fi
 credentials, and managed allowlist egress. Every authority-changing and general host tool remains
 disabled. The deployment must use `hosted-single-tenant-volume-sandboxed`; allowing shell on the
 old `production` profile is not equivalent and must not be described as sandboxed.
+
+*Measured 2026-09-02, and the last sentence is stronger than it reads
+(`docs/experiments/0039-the-catalogue-has-two-axes.md`).* On `production` there is no
+`builtin.shell` row in the settings catalogue **at all** — the profile decides whether the
+capability is catalogued, not merely whether it is safe. So `sandbox` on `production` is not a
+weaker sandbox; it is a policy naming a row that does not exist, which `assess` reports as
+`AllowedToolAbsent`. On the sandboxed profile the row is present and the shipped service's
+`runtime_tools: none` disables it: `dev/prove-confinement.sh` reaches 53 catalogued, 2 reachable,
+approval off. **The sandbox itself is still unexercised** — `dev/prove-workspace.sh` had two
+independent blocks, and only the runtime one is retired; no shipped service declares `sandbox`, so
+no turn has run in that workspace.

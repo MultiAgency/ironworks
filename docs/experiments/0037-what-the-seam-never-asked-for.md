@@ -191,12 +191,26 @@ dropped stream would reopen exactly the ambiguity this design exists to close", 
 is correct and is not disturbed**: it is about the create call's own response body. The thread
 projection is a different object, read on a different route, after create has returned.
 
-One thing worth recording that nobody asked: `GET /api/webchat/v2/threads` returns each thread with
-a `title` holding the **raw request input** (`{"format":"openai_compat.responses_input.v1","input":…`).
-For the seam, the request input is the rendered envelope, which carries a tenant's records. They are
-durably readable on a second route, under the same member bearer. That is not a leak across tenants
-— check 7 shows the scoping holds — but it is a second place a tenant's records live, and §B-7's
-audience rule should be read against it.
+**Corrected 2026-09-02, the same day, by
+`docs/experiments/0040-the-cost-field-misses-the-pin-twice.md` finding 4.** This paragraph
+read:
+
+> One thing worth recording that nobody asked: `GET /api/webchat/v2/threads` returns each thread
+> with a `title` holding the **raw request input** … For the seam, the request input is the rendered
+> envelope, which carries a tenant's records. They are durably readable on a second route … a second
+> place a tenant's records live, and §B-7's audience rule should be read against it.
+
+**It was a misreading of a console line this run had itself truncated, and it was wrong three
+ways.** The title is a derived sidebar label capped at 60 characters, taken from the first non-empty
+line of the earliest user message; derivation is read-time only and nothing is persisted
+(`ironclaw@4cb47cfaf3/crates/domains/ironclaw_threads/src/title.rs`). Measured with a marker planted
+at the front of the input, every thread carried the same 60 characters — the compat layer's JSON
+wrapper prefix — and the marker did not appear. Not the raw input, not durable, and not record
+bytes. §E-11 and PRD §19.2 are untouched.
+
+It is kept rather than deleted because the shape of the mistake is worth having on record: a
+`…`-truncated value printed by this run's own helper was read as a truncation performed by the
+runtime, and the conclusion was drawn from the ellipsis rather than from a measurement.
 
 ## 7 — the runtime does isolate a response by member — PASS, and §I's gap closes
 
@@ -285,6 +299,11 @@ The `production` profile is not the served profile. §L-10 and `dev/prove-worksp
 `hosted-single-tenant-volume-sandboxed`, and **none of checks 4 through 8 has been repeated there**
 — the external-tool lane's wiring already differs by profile (`0031`), so nothing here should be
 read as a property of the served topology until it is re-run against one.
+
+*Retired the same day by `0039-the-catalogue-has-two-axes.md`, which stood that stack up and
+repeated checks 4 through 8 on it. All five reproduced; check 3's caller axis gained a second,
+independent profile axis. This paragraph is left as written — it records what this run established
+and what it did not.*
 
 Check 5 does not explain the compat cancel's 400; it measures it. Check 6 observed one turn's stream
 and did not test resumption after a real drop, or the `SSE_MAX_LIFETIME` close. Check 8 measured one

@@ -148,6 +148,10 @@ impl AuthorityInventory {
 pub enum Custody {
     /// It exists, and IronWorks' journal accounts for it.
     Managed,
+    /// It exists and lifecycle recorded observing it, but IronWorks did not create it.
+    ///
+    /// Accounted-for is not owned-by-us: failed provisioning must never compensate this authority.
+    Adopted,
     /// **It exists and IronWorks did not record creating it.** The reference found an instance
     /// holding 43 members, 41 of which the registry had never heard of — accumulated over weeks
     /// by proof scripts that minted and never cleaned up, with nothing reporting it because
@@ -241,10 +245,16 @@ pub fn holdings(recorded: &crate::Recorded, inventory: &AuthorityInventory) -> V
         .copied()
         .map(|authority| {
             let presence = inventory.presence(authority);
-            let custody = match (&presence, recorded.ids.get(&authority)) {
-                // We recorded creating one, and this is it.
-                (Presence::Present { id }, Some(ours)) if id == ours => Custody::Managed,
-                // We recorded creating one, and this is a DIFFERENT one. The stray-member case:
+            let custody = match (&presence, recorded.identity(authority)) {
+                // We recorded this exact identity. Its provenance decides whether it is ours to
+                // compensate or prior authority we merely adopted.
+                (Presence::Present { id }, Some(identity)) if id == identity.id() => {
+                    match identity.provenance() {
+                        crate::IdentityProvenance::Created => Custody::Managed,
+                        crate::IdentityProvenance::Adopted => Custody::Adopted,
+                    }
+                }
+                // We recorded an identity and this is a DIFFERENT one. The stray-member case:
                 // the stage was reached, so "did we get this far?" says yes — and the thing out
                 // there is still not ours.
                 (Presence::Present { .. }, Some(_)) => Custody::KnownUnmanaged,
