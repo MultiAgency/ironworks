@@ -18,6 +18,8 @@
 #   4. prior serves after       a NEW channel process and a NEW relay process against the SAME
 #      restart                  live path answer into the prior's room, and not the candidate's
 #
+# Both serving checks go through the same helper, so the two halves of the control cannot drift.
+#
 # ── why each serving check asserts a negative in the same run ────────────────────────────────
 #
 # "An answer was delivered" is not evidence of a cutover: a stale registry delivers answers too.
@@ -257,6 +259,40 @@ degraded() { grep -qE "timed out (writing|reading)|rate limited|rate.?limit|HTTP
 # and never the cause — and a BLOCKED verdict is only worth reading if it says what stopped it.
 why()      { grep -vE '^[[:space:]]*(→|$)' <<<"$1" | tail -n1 | cut -c1-88; }
 
+# serve <name> <room that must answer> <room that must stay silent> <call-log> <id=room> <id=room>
+#
+# Both serving checks go through here rather than through two copies, so the assertion cannot
+# drift apart between them — which matters more than the duplication it removes, because the two
+# checks are each other's control and a difference between them would be invisible.
+serve() {
+  local name="$1" answers="$2" silent="$3" L="$4"; shift 4
+  if ! channel "$@"; then
+    verdict "$name" BLOCKED "no channel on :$CHAN_PORT"
+    return
+  fi
+  local out rc
+  out="$(relay "$L")"; rc=$?
+  if no_model "$out"; then
+    verdict "$name" BLOCKED "runtime has no usable model key"
+    return
+  fi
+  if degraded "$out"; then
+    verdict "$name" BLOCKED "dependency unavailable: $(why "$out")"
+    return
+  fi
+  local log good bad
+  log="$(obs)"
+  good="$(in_room "$log" "$answers")"
+  bad="$(in_room "$log" "$silent")"
+  if [ "$rc" -eq 0 ] && [ "$good" -ge 1 ] && [ "$bad" = 0 ] && [ "$(creates "$L")" = 1 ]; then
+    verdict "$name" PASS \
+      "$good chunk(s) into $answers, 0 into $silent, create=1"
+  else
+    verdict "$name" FAIL \
+      "rc=$rc answered=$good silent=$bad create=$(creates "$L")"
+  fi
+}
+
 # ── 1. publication ───────────────────────────────────────────────────────────────────────
 # The real publisher, over a valid prior registry. What must come out of it: the candidate live,
 # the prior durable and reachable by name, and neither credential anywhere in either file.
@@ -284,25 +320,8 @@ fi
 # ── 2. the candidate serves ──────────────────────────────────────────────────────────────
 # Two rooms, one batch, one live registry. The candidate's update must be answered and the
 # prior's must not be — a relay still serving the old file would satisfy exactly the opposite.
-L="$WORK/2.log"
-if ! channel "$((UID_BASE+1))=$CAND_ROOM" "$((UID_BASE+2))=$PRIOR_ROOM"; then
-  verdict "cutover.candidate_serves" BLOCKED "no channel on :$CHAN_PORT"
-else
-  out="$(relay "$L")"; rc=$?
-  log="$(obs)"
-  cand="$(in_room "$log" "$CAND_ROOM")"; prior="$(in_room "$log" "$PRIOR_ROOM")"
-  if no_model "$out"; then
-    verdict "cutover.candidate_serves" BLOCKED "runtime has no usable model key"
-  elif degraded "$out"; then
-    verdict "cutover.candidate_serves" BLOCKED "dependency unavailable: $(why "$out")"
-  elif [ $rc -eq 0 ] && [ "$cand" -ge 1 ] && [ "$prior" = 0 ] && [ "$(creates "$L")" = 1 ]; then
-    verdict "cutover.candidate_serves" PASS \
-      "$cand chunk(s) into $CAND_ROOM, 0 into $PRIOR_ROOM, create=1"
-  else
-    verdict "cutover.candidate_serves" FAIL \
-      "rc=$rc candidate_room=$cand prior_room=$prior create=$(creates "$L")"
-  fi
-fi
+serve "cutover.candidate_serves" "$CAND_ROOM" "$PRIOR_ROOM" "$WORK/2.log" \
+  "$((UID_BASE+1))=$CAND_ROOM" "$((UID_BASE+2))=$PRIOR_ROOM"
 
 sleep 5
 
@@ -324,25 +343,8 @@ fi
 # ── 4. the prior serves after a restart ──────────────────────────────────────────────────
 # A new channel process and a new relay process, the same live path and the same journal. Fresh
 # update ids, so the batch is genuinely new work rather than a settled one being reread.
-L="$WORK/4.log"
-if ! channel "$((UID_BASE+11))=$PRIOR_ROOM" "$((UID_BASE+12))=$CAND_ROOM"; then
-  verdict "cutover.prior_serves_after_restart" BLOCKED "no channel on :$CHAN_PORT"
-else
-  out="$(relay "$L")"; rc=$?
-  log="$(obs)"
-  cand="$(in_room "$log" "$CAND_ROOM")"; prior="$(in_room "$log" "$PRIOR_ROOM")"
-  if no_model "$out"; then
-    verdict "cutover.prior_serves_after_restart" BLOCKED "runtime has no usable model key"
-  elif degraded "$out"; then
-    verdict "cutover.prior_serves_after_restart" BLOCKED "dependency unavailable: $(why "$out")"
-  elif [ $rc -eq 0 ] && [ "$prior" -ge 1 ] && [ "$cand" = 0 ] && [ "$(creates "$L")" = 1 ]; then
-    verdict "cutover.prior_serves_after_restart" PASS \
-      "$prior chunk(s) into $PRIOR_ROOM, 0 into $CAND_ROOM, create=1"
-  else
-    verdict "cutover.prior_serves_after_restart" FAIL \
-      "rc=$rc prior_room=$prior candidate_room=$cand create=$(creates "$L")"
-  fi
-fi
+serve "cutover.prior_serves_after_restart" "$PRIOR_ROOM" "$CAND_ROOM" "$WORK/4.log" \
+  "$((UID_BASE+11))=$PRIOR_ROOM" "$((UID_BASE+12))=$CAND_ROOM"
 
 # ── verdict ──────────────────────────────────────────────────────────────────────────────
 printf '\n%d passed, %d failed, %d blocked\n' "$pass" "$failed" "$blocked"
