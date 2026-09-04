@@ -34,7 +34,7 @@
 //! ```text
 //! poll offset=41
 //! redelivered update=41
-//! accepted chunk=0 bytes=214 sha256=6f1a...
+//! accepted chunk=0 channel=-1002000001 bytes=214 sha256=6f1a...
 //! dropped-after-accept chunk=1
 //! poll offset=42
 //! acknowledged through=42
@@ -307,6 +307,10 @@ fn send(stream: &mut TcpStream, cfg: &Config, state: &Mutex<State>, body: &[u8])
     };
     let text = parsed.get("text").and_then(|v| v.as_str()).unwrap_or("");
     let done = parsed.get("last").and_then(serde_json::Value::as_bool).unwrap_or(false);
+    // The room the caller addressed. A real channel knows it for every message it takes, and
+    // without it the log says an answer was delivered while staying silent about to whom — which
+    // is precisely the question a registry cutover asks.
+    let room = parsed.get("channel").and_then(|v| v.as_str()).unwrap_or("");
 
     let mut s = state.lock().expect("state");
     let index = s.chunk_index;
@@ -314,7 +318,7 @@ fn send(stream: &mut TcpStream, cfg: &Config, state: &Mutex<State>, body: &[u8])
     let accept = |s: &mut State, index: u32| {
         let digest = Sha256::digest(text.as_bytes());
         s.observations.push(format!(
-            "accepted chunk={index} bytes={} sha256={}",
+            "accepted chunk={index} channel={room} bytes={} sha256={}",
             text.len(),
             hex12(&digest)
         ));
@@ -324,7 +328,8 @@ fn send(stream: &mut TcpStream, cfg: &Config, state: &Mutex<State>, body: &[u8])
         Fault::RejectBeforeAccept => {
             // Nothing is accepted, and the caller is told so explicitly. This is the only outcome
             // that licenses a free retry, so it is the only one that may be reported positively.
-            s.observations.push(format!("rejected chunk={index} (nothing accepted)"));
+            s.observations
+                .push(format!("rejected chunk={index} channel={room} (nothing accepted)"));
             drop(s);
             respond(stream, 409, "{\"accepted\":false,\"reason\":\"rejected before accept\"}");
         }
