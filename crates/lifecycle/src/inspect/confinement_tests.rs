@@ -397,15 +397,21 @@ fn a_live_subject_mismatch_fails() {
 #[test]
 fn live_drift_fails_even_with_a_clean_baseline() {
     // The baseline is a fact about the past. A measured contradiction now outranks it.
-    assert_eq!(
-        outcome(&ConfinementAxis::Measured {
+    let (recorded, inventory) = clean_world();
+    let report = run(
+        &recorded,
+        &inventory,
+        &ConfinementAxis::Measured {
             ledger: Ledger::Present,
             latest: Some(measured_attempt(MEMBER, SHUT, binding())),
             live: Box::new(live_drifted()),
             current: binding(),
-        }),
-        Some(ConfinementOutcome::Fail)
+        },
     );
+    assert_eq!(report.confinement.outcome, Some(ConfinementOutcome::Fail));
+    let text = report.confinement.lines.join("\n");
+    assert!(text.contains("historically certified"), "the historical fact disappeared: {text}");
+    assert!(text.contains("outside policy now"), "the current drift was blurred: {text}");
 }
 
 #[test]

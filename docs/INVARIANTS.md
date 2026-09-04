@@ -735,10 +735,12 @@ control whose shape is already understood, and **every entry was re-verified aga
   where a definition *lies about itself*. It does not connect the two mechanisms: `confinement.rs`
   still never reads `egress`, so a coherent declaration and the policy actually applied to the
   member remain unrelated, and nothing compares them.
-- **`MemberConfined` is a bare stage.** `crates/lifecycle/src/state.rs::Stage::MemberConfined` — recordable with no
-  evidence, so a tenant can be marked confined without anything having measured it. Everywhere
-  else this repository refuses that shape: `ScopeEvidence` records *how* a scope was established
-  **because a boolean cannot be audited**.
+- ~~**`MemberConfined` is a bare stage.**~~ **Closed 2026-09-03.** Generic `reach` now refuses
+  `member_confined`. Only `LifecycleStore::certify_confinement` advances it, and that method accepts
+  a `ConfinementEvidence` constructible solely from a bound, measured, drift-free attempt against
+  the policy currently in force. The attempt and first stage transition commit in one SQLite
+  transaction. A later observation can be appended but cannot reach the stage twice; later drift
+  leaves the historical certification intact and inspection reports those two facts separately.
 - ~~**The composition audience gate was dropped and not replaced.**~~ **Closed 2026-09-02, by
   removing what it guarded.** Upstream marked each service definition `internal` or `external` and
   asserted the default was `external`, so a forgotten `SERVICE=` key could not land a tenant on an
@@ -1396,3 +1398,13 @@ weaker sandbox; it is a policy naming a row that does not exist, which `assess` 
 approval off. **The sandbox itself is still unexercised** — `dev/prove-workspace.sh` had two
 independent blocks, and only the runtime one is retired; no shipped service declares `sandbox`, so
 no turn has run in that workspace.
+
+**L-11 — Confinement progress is evidence-bearing and historical.** `member_confined` cannot be
+written through generic lifecycle progress. `ConfinementEvidence::from_attempt` admits only a
+clean measurement for the current policy; the attempt already contains a successfully bound
+runtime subject, and `LifecycleStore::certify_confinement` additionally compares its member and
+service with the instance record. The first qualifying observation and the stage transition are
+one transaction. A later clean observation appends evidence without adding a second stage row.
+A later drifted observation does not walk progress backwards: inspection says **historically
+certified** and **outside policy now** as separate facts, because erasing either would turn history
+into a claim about the present.

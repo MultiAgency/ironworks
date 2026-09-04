@@ -59,6 +59,7 @@ transcripts, and the write-ups that *are* the measurement because no transcript 
 | [`0038`](0038-the-rule-that-never-produced-a-verdict.md) | **A rule that had never graded anything.** Found by measuring every rule's firing rate rather than by reading answers: `inconsistent_finding_count` returned from its own loop on the first non-number word, and under that its nouns named nothing this service counts. **Corrected; no verdict moved.** Widening it the obvious way was measured first and would have produced seventeen false failures |
 | [`0041`](0041-an-unrooted-exclude-removed-a-workspace-member.md) | **An unrooted `rsync` exclusion removed `crates/site`.** The destination manifest still named the missing workspace member, so Cargo refused to load it; rooting the generated-directory exclusions produced a complete build tree |
 | [`0042`](0042-protecthome-hid-the-rootless-daemon.md) | **`ProtectHome=true` hid the rootless Docker socket under `/run/user`.** `read-only` preserved the unit's filesystem confinement while allowing its required per-account daemon transport |
+| [`0043`](0043-user-creation-can-outlive-token-minting.md) | **User creation precedes its one-time bearer mint at the IronClaw pin.** A mint failure can leave a tokenless user, and the pin has no reissue endpoint; reconcile and delete the orphan before retrying |
 
 ### Pruned to their findings — transcripts retained
 

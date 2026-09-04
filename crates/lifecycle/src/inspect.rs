@@ -242,7 +242,11 @@ pub enum ConfinementOutcome {
 ///
 /// The remedy is one idempotent command — `lifecycle confine` — which appends a clean measurement
 /// when the settings already match, so this never leaves an operator without a next step.
-fn assess_confinement(axis: &ConfinementAxis, applicability: &Applicability) -> ConfinementReport {
+fn assess_confinement(
+    axis: &ConfinementAxis,
+    applicability: &Applicability,
+    progress: &ProvisionProgress,
+) -> ConfinementReport {
     if matches!(axis, ConfinementAxis::NotRequested) {
         return ConfinementReport {
             outcome: None,
@@ -278,6 +282,15 @@ fn assess_confinement(axis: &ConfinementAxis, applicability: &Applicability) -> 
     };
 
     let mut lines = Vec::new();
+    if progress.has_reached(Stage::MemberConfined) {
+        lines.push(
+            "certification: historically certified; this records a clean observation in the \
+             past and makes no claim about the member's state now."
+                .into(),
+        );
+    } else {
+        lines.push("certification: member_confined has never been certified.".into());
+    }
     let historical = axis.latest().map(ConfinementAttempt::historical);
 
     // ── what history says ───────────────────────────────────────────────────────────
@@ -456,7 +469,7 @@ pub fn inspect(
     // Confinement is a separate axis, folded in at the same precedence as everything else. It is
     // kept apart on the way in and on the way out so a clean authority inventory cannot mask a
     // blocked confinement, or the reverse.
-    let report = assess_confinement(confinement, &applicability(recorded));
+    let report = assess_confinement(confinement, &applicability(recorded), progress);
     match report.outcome {
         Some(ConfinementOutcome::Fail) => failed = true,
         Some(ConfinementOutcome::Blocked) => blocked = true,

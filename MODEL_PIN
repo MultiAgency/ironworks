@@ -21,9 +21,10 @@ qwen/qwen3.5-397b-a17b  # TEE-attested via Chutes, verified end-to-end by NEAR A
 #    anonymising proxy is NOT the same guarantee, and picking it would quietly void this reason.
 #
 # 2. COST. $0.50/M input, $3.30/M output, and cached reads at $0.25/M — a 50% discount. That
-#    discount matters more here than it looks: the alloy is a ~14KB prefix re-sent every turn
-#    (the runtime persists `instructions` and replays them), so the cacheable share of a long
-#    thread is large. See the correction below.
+#    discount matters more here than it looks: the runtime persists the alloy in `instructions`
+#    and replays it every turn, so the cacheable share of a long thread is large. The measured
+#    alloy size, per-turn growth and comparison with `ThreadLimit` live in `docs/INVARIANTS.md` §I;
+#    keep that arithmetic there rather than restating a second value in this pin.
 #
 # 3. LINEAGE. It is the same family and generation as the model this replaces, which is the
 #    weakest of the three reasons and is recorded as lineage, not as evidence.

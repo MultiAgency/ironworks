@@ -51,6 +51,8 @@ use ironworks_records::{
 use std::io::{self, Write};
 use std::time::Duration;
 
+mod registry_publish;
+
 const USAGE: i32 = 64;
 const FAILED: i32 = 2;
 /// A measurement that could not be performed. **Never a pass, and never a FAIL either** — scoring
@@ -172,6 +174,18 @@ enum Mode {
     LifecycleMembers {
         store: String,
     },
+    /// Construct, authority-check and durably publish exactly one tenant registry.
+    RegistryPublishOne {
+        store: String,
+        registry: String,
+        guidance: String,
+        records_credential: String,
+        member_credential: String,
+    },
+    /// Restore the durable prior registry without consuming the rollback artifact.
+    RegistryRollbackOne {
+        registry: String,
+    },
     /// Read-only turn-journal inspection. Opens no runtime, record store, guidance or channel.
     Status,
     /// A dry melt: what this binary would compose, fingerprinted. Never runs a model.
@@ -220,6 +234,9 @@ const USAGE_TEXT: &str = "usage: ironworks coordinate --slug <slug> --guidance <
      \x20      ironworks turn  --slug <slug> --guidance <path> --journal <path> --ask <question>\n\
      \x20      ironworks relay --registry <path> --journal <path> --channel <url>\n\
      \x20        every tenant it serves comes from the registry; one tenant is a registry of one\n\n\
+     \x20      ironworks registry publish-one <slug> --store <path> --registry <path>\n\
+     \x20        --guidance <path> --records-credential <handle> --member-credential <handle>\n\
+     \x20      ironworks registry rollback-one --registry <path>\n\n\
      \x20      ironworks redeliver --slug <slug> --guidance <path> --journal <path> \
      --channel <url> --update <id>\n\n\
      \x20      ironworks status --journal <path>\n\
@@ -247,6 +264,9 @@ fn parse_args() -> Result<Args, Exit> {
     // needs no runtime, no record store, and no guidance — it reads two local files and prints.
     if command == "lifecycle" {
         return parse_lifecycle(&argv[1..]);
+    }
+    if command == "registry" {
+        return parse_registry(&argv[1..]);
     }
     if command == "status" {
         return parse_status(&argv[1..]);
@@ -325,6 +345,95 @@ fn parse_args() -> Result<Args, Exit> {
         crash_at,
         call_log,
     })
+}
+
+fn parse_registry(argv: &[String]) -> Result<Args, Exit> {
+    let usage = || {
+        fail(
+            USAGE,
+            "usage: ironworks registry publish-one <slug> --store <path> --registry <path> \
+             --guidance <path> --records-credential <handle> --member-credential <handle>\n\
+             \x20      ironworks registry rollback-one --registry <path>",
+        )
+    };
+    match argv.first().map(String::as_str) {
+        Some("publish-one") => {
+            let slug = argv.get(1).cloned().ok_or_else(usage)?;
+            if slug.starts_with("--") {
+                return Err(usage());
+            }
+            let (mut store, mut registry, mut guidance) = (None, None, None);
+            let (mut records_credential, mut member_credential) = (None, None);
+            let mut it = argv[2..].iter();
+            while let Some(flag) = it.next() {
+                let mut value = || {
+                    it.next().cloned().ok_or_else(|| fail(USAGE, format!("{flag} needs a value")))
+                };
+                match flag.as_str() {
+                    "--store" => store = Some(value()?),
+                    "--registry" => registry = Some(value()?),
+                    "--guidance" => guidance = Some(value()?),
+                    "--records-credential" => records_credential = Some(value()?),
+                    "--member-credential" => member_credential = Some(value()?),
+                    "--org" | "--member" | "--member-id" | "--channel" | "--service" => {
+                        return Err(fail(
+                            USAGE,
+                            format!(
+                                "{flag} is not accepted: publish-one reads identity, channel and \
+                                 service from lifecycle evidence"
+                            ),
+                        ));
+                    }
+                    other => return Err(fail(USAGE, format!("unknown flag {other}"))),
+                }
+            }
+            Ok(Args {
+                slug,
+                guidance: String::new(),
+                service: String::new(),
+                journal: String::new(),
+                mode: Mode::RegistryPublishOne {
+                    store: store.ok_or_else(|| fail(USAGE, "--store is required"))?,
+                    registry: registry.ok_or_else(|| fail(USAGE, "--registry is required"))?,
+                    guidance: guidance.ok_or_else(|| fail(USAGE, "--guidance is required"))?,
+                    records_credential: records_credential
+                        .ok_or_else(|| fail(USAGE, "--records-credential is required"))?,
+                    member_credential: member_credential
+                        .ok_or_else(|| fail(USAGE, "--member-credential is required"))?,
+                },
+                crash_at: None,
+                call_log: None,
+            })
+        }
+        Some("rollback-one") => {
+            let mut registry = None;
+            let mut it = argv[1..].iter();
+            while let Some(flag) = it.next() {
+                match flag.as_str() {
+                    "--registry" => {
+                        registry = Some(
+                            it.next()
+                                .cloned()
+                                .ok_or_else(|| fail(USAGE, "--registry needs a value"))?,
+                        );
+                    }
+                    other => return Err(fail(USAGE, format!("unknown flag {other}"))),
+                }
+            }
+            Ok(Args {
+                slug: String::new(),
+                guidance: String::new(),
+                service: String::new(),
+                journal: String::new(),
+                mode: Mode::RegistryRollbackOne {
+                    registry: registry.ok_or_else(|| fail(USAGE, "--registry is required"))?,
+                },
+                crash_at: None,
+                call_log: None,
+            })
+        }
+        _ => Err(usage()),
+    }
 }
 
 /// `ironworks status --journal <path>`
@@ -664,6 +773,26 @@ fn run() -> Result<(), Exit> {
             member_credential,
         );
     }
+    if let Mode::RegistryPublishOne {
+        store,
+        registry,
+        guidance,
+        records_credential,
+        member_credential,
+    } = &args.mode
+    {
+        return run_registry_publish_one(
+            &args.slug,
+            store,
+            registry,
+            guidance,
+            records_credential,
+            member_credential,
+        );
+    }
+    if let Mode::RegistryRollbackOne { registry } = &args.mode {
+        return run_registry_rollback_one(registry);
+    }
     if matches!(args.mode, Mode::Status) {
         return run_status(&args.journal);
     }
@@ -688,6 +817,8 @@ fn run() -> Result<(), Exit> {
         | Mode::LifecycleMembers { .. }
         | Mode::LifecycleConfine { .. }
         | Mode::LifecycleAdopt { .. }
+        | Mode::RegistryPublishOne { .. }
+        | Mode::RegistryRollbackOne { .. }
         | Mode::Status
         | Mode::Compose => {
             unreachable!("the read-only commands return before boot")
@@ -1075,8 +1206,190 @@ fn run_lifecycle_adopt(
     Ok(())
 }
 
+/// Publish the one-tenant registry only after both credential handles re-measure the identities
+/// lifecycle recorded. The file may become live before the SQLite stage is recorded; rerunning is
+/// deliberately idempotent across that attended crash window.
+fn run_registry_publish_one(
+    slug: &str,
+    store_path: &str,
+    registry_path: &str,
+    guidance_path: &str,
+    records_credential: &str,
+    member_credential: &str,
+) -> Result<(), Exit> {
+    use ironworks_domain::ScopeResolver;
+    use ironworks_lifecycle::{Authority, LifecycleStore, OpaqueId, Stage};
+    use sha2::Digest;
+
+    let e = |m: String| fail(FAILED, m);
+    let blocked = |m: String| Exit { code: BLOCKED, message: m };
+    let checked_handle = |raw: &str, flag: &str| -> Result<String, Exit> {
+        let Some(name) = raw.strip_prefix("env:") else {
+            return Err(fail(USAGE, format!("{flag} must be an env:NAME handle, never a secret")));
+        };
+        if name.is_empty() || !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            return Err(fail(USAGE, format!("{flag} must be an env:NAME handle")));
+        }
+        Ok(raw.to_owned())
+    };
+    let records_credential = checked_handle(records_credential, "--records-credential")?;
+    let member_credential = checked_handle(member_credential, "--member-credential")?;
+    let slug = Slug::parse(slug.to_owned()).map_err(|why| e(why.to_string()))?;
+    let store = LifecycleStore::open(store_path).map_err(|why| blocked(why.to_string()))?;
+    let spec = store
+        .spec(&slug)
+        .map_err(|why| blocked(why.to_string()))?
+        .ok_or_else(|| e(format!("no lifecycle record for {slug}")))?;
+    let recorded = store.recorded(&slug).map_err(|why| blocked(why.to_string()))?;
+    let reached = recorded.progress.reached();
+    if !recorded.progress.has_reached(Stage::MemberConfined) {
+        return Err(e(format!(
+            "instance {slug} is at {}; publish-one requires a certified member_confined stage",
+            reached.map_or("none", Stage::tag)
+        )));
+    }
+
+    let definition = ironworks_services::service::load(spec.service.as_str())
+        .map_err(|why| e(why.to_string()))?;
+    let guidance_path = std::fs::canonicalize(guidance_path)
+        .map_err(|why| e(format!("cannot resolve guidance {guidance_path}: {why}")))?;
+    let guidance_name = guidance_path
+        .to_str()
+        .ok_or_else(|| e(format!("guidance path {} is not UTF-8", guidance_path.display())))?;
+    let guidance_text = std::fs::read_to_string(&guidance_path)
+        .map_err(|why| e(format!("cannot read guidance {}: {why}", guidance_path.display())))?;
+    Guidance::parse(&guidance_text, slug.as_str(), spec.service.as_str())
+        .map_err(|why| e(why.to_string()))?;
+    if definition.id() != &spec.service {
+        return Err(e("the loaded service does not match the lifecycle service".into()));
+    }
+
+    let records_base = std::env::var("IRONWORKS_RECORDS")
+        .map_err(|_| fail(USAGE, "IRONWORKS_RECORDS is not set (the record store base URL)"))?;
+    let records_handle = CredentialRef::new(CredentialPurpose::RecordScope, &records_credential);
+    let book = Book::new(&records_base, EnvCredentials);
+    let scope = ScopeResolver::resolve(&book, &records_handle).map_err(|why| {
+        blocked(format!("the records credential could not establish an org: {why}"))
+    })?;
+    let recorded_org = recorded
+        .accounted_id(Authority::OrgRegistration)
+        .ok_or_else(|| e(format!("instance {slug} has no recorded organization identity")))?;
+    if recorded_org.as_str() != scope.org().as_str() || spec.org != *scope.org() {
+        return Err(e(format!(
+            "the records credential resolves to org {}, but lifecycle records org {}; refusing \
+             to publish a valid registry with the wrong record scope",
+            scope.org(),
+            recorded_org
+        )));
+    }
+
+    let runtime_base = std::env::var("IRONWORKS_BASE")
+        .map_err(|_| fail(USAGE, "IRONWORKS_BASE is not set (the serving runtime base URL)"))?;
+    let unused_operator =
+        CredentialRef::new(CredentialPurpose::RuntimeMember, "env:IRONCLAW_OPERATOR_TOKEN");
+    let admin = ironworks_reconcile::Admin::new(&runtime_base, &unused_operator);
+    let runtime_handle = CredentialRef::new(CredentialPurpose::RuntimeMember, &member_credential);
+    let live_subject =
+        ironworks_reconcile::MemberConfinement::new(&admin, &EnvCredentials, runtime_handle)
+            .authenticated_subject()
+            .map_err(|why| {
+                blocked(format!("the runtime credential could not establish a subject: {why}"))
+            })?;
+    let recorded_member = recorded
+        .identity(Authority::Member)
+        .ok_or_else(|| e(format!("instance {slug} has no recorded runtime member identity")))?;
+    let recorded_subject = recorded_member.runtime_subject().ok_or_else(|| {
+        e(format!(
+            "instance {slug} has no measured runtime tenant for member {}; re-adopt from the \
+             credential before publishing",
+            recorded_member.id()
+        ))
+    })?;
+    if &live_subject != recorded_subject {
+        return Err(e(format!(
+            "the runtime credential authenticates as {live_subject}, but lifecycle recorded \
+             {recorded_subject}; refusing to publish a valid registry with the wrong runtime scope"
+        )));
+    }
+
+    let value = serde_json::json!({
+        "tenants": [{
+            "slug": slug.as_str(),
+            "channel": spec.channel.as_str(),
+            "service": spec.service.as_str(),
+            "guidance": guidance_name,
+            "records_credential": records_credential,
+            "runtime_credential": member_credential,
+        }]
+    });
+    let mut candidate = serde_json::to_vec_pretty(&value)
+        .map_err(|why| e(format!("cannot encode registry: {why}")))?;
+    candidate.push(b'\n');
+    let parsed = ironworks_domain::TenantRegistry::parse(
+        std::str::from_utf8(&candidate).expect("JSON encoding is UTF-8"),
+    )
+    .map_err(|why| e(format!("constructed registry did not validate: {why}")))?;
+    if parsed.len() != 1 || parsed.tenant(&slug).is_none() {
+        return Err(e("constructed registry did not contain exactly the requested tenant".into()));
+    }
+
+    let live_path = std::path::Path::new(registry_path);
+    if reached.is_some_and(|stage| stage >= Stage::Staged) {
+        let live = std::fs::read(live_path).map_err(|why| {
+            e(format!("instance is already staged but {registry_path} cannot be read: {why}"))
+        })?;
+        if live != candidate {
+            return Err(e(format!(
+                "instance {slug} is already staged and the live registry differs; publish-one \
+                 will not replace an already-recorded binding"
+            )));
+        }
+        println!("PUBLISHED {slug} (already staged; live registry matches)");
+        return Ok(());
+    }
+
+    let outcome = registry_publish::publish_one(live_path, &candidate).map_err(e)?;
+    let digest = sha2::Sha256::digest(&candidate);
+    let registry_id =
+        OpaqueId::new(digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect::<String>());
+    if let Err(why) = store.reach(&slug, Stage::Staged, false, Some(&registry_id), &now_iso()) {
+        return Err(e(format!(
+            "registry publication completed but lifecycle staging did not: {why}. The failure is \
+             visible; rerun publish-one to finish recording it, or run registry rollback-one \
+             --registry {registry_path}"
+        )));
+    }
+    println!("PUBLISHED {slug} registry {registry_id}");
+    match outcome {
+        registry_publish::PublishOutcome::Published { preserved_prior: true } => println!(
+            "  rollback: {}",
+            registry_publish::rollback_path(live_path).map_err(e)?.display()
+        ),
+        registry_publish::PublishOutcome::Published { preserved_prior: false } => {
+            println!(
+                "  rollback: {} (restores no live registry)",
+                registry_publish::rollback_path(live_path).map_err(e)?.display()
+            );
+        }
+        registry_publish::PublishOutcome::AlreadyPublished => {
+            println!("  file already matched; lifecycle staging completed");
+        }
+    }
+    Ok(())
+}
+
+fn run_registry_rollback_one(registry_path: &str) -> Result<(), Exit> {
+    registry_publish::rollback_one(std::path::Path::new(registry_path))
+        .map_err(|why| fail(FAILED, why))?;
+    println!("ROLLED BACK {registry_path}");
+    println!("  lifecycle progress is historical and was not walked backwards");
+    Ok(())
+}
+
 fn run_lifecycle_confine(slug: &str, store_path: &str, dry_run: bool) -> Result<(), Exit> {
-    use ironworks_lifecycle::{Blocked, ConfinementAttempt, ObservedAt, PolicyBinding};
+    use ironworks_lifecycle::{
+        Blocked, ConfinementAttempt, ConfinementEvidence, ObservedAt, PolicyBinding,
+    };
     use ironworks_reconcile::{Applied, Binding, Reading};
 
     let e = |m: String| fail(FAILED, m);
@@ -1177,7 +1490,8 @@ fn run_lifecycle_confine(slug: &str, store_path: &str, dry_run: bool) -> Result<
     // ── measure first ───────────────────────────────────────────────────────────────
     // One read feeds the plan, the initial record and the operator line. A plan built on an unread
     // catalogue would deny an arbitrary set and report success.
-    let (observed, locked, auto_approve) = match bound.read(&policy, &binding, &at) {
+    let (observed, locked, auto_approve, initial_attempt) = match bound.read(&policy, &binding, &at)
+    {
         Reading::Blocked { attempt } => {
             append(&attempt);
             println!("BLOCKED   {slug} member {member}");
@@ -1187,8 +1501,7 @@ fn run_lifecycle_confine(slug: &str, store_path: &str, dry_run: bool) -> Result<
         Reading::Measured { states, locked, auto_approve, attempt } => {
             let initial_clean =
                 attempt.measurement().is_some_and(ironworks_lifecycle::Measurement::is_clean);
-            append(&attempt);
-            (states, locked, (auto_approve, initial_clean))
+            (states, locked, (auto_approve, initial_clean), attempt)
         }
     };
     let (auto_approve, initial_clean) = auto_approve;
@@ -1216,15 +1529,25 @@ fn run_lifecycle_confine(slug: &str, store_path: &str, dry_run: bool) -> Result<
         // saying nothing new. It still has to be scored, because an empty plan does not imply a
         // clean member: `AllowedToolAbsent` is drift that `plan` produces no step for.
         return if initial_clean {
+            let evidence = ConfinementEvidence::from_attempt(initial_attempt, &binding)
+                .expect("the clean current-policy measurement qualifies as evidence");
+            store
+                .certify_confinement(&slug_id, &evidence)
+                .map_err(|why| e(format!("the clean observation could not be certified: {why}")))?;
             print_verified(slug, &member, &observed, auto_approve, bound.subject());
             Ok(())
         } else {
+            append(&initial_attempt);
             println!("DRIFTED   {slug} member {member}");
             println!("  the plan is empty and the member is still off policy — the drift is not");
             println!("  something a settings write can repair. See the recorded observation.");
             Err(Exit { code: FAILED, message: "confinement did not reach policy".into() })
         };
     }
+
+    // The initial dirty observation remains part of the audit trail. A clean no-op took the
+    // certification path above instead, so the qualifying row and stage could commit together.
+    append(&initial_attempt);
 
     // ── apply ───────────────────────────────────────────────────────────────────────
     let stopped = match bound.apply(&plan) {
@@ -1245,9 +1568,9 @@ fn run_lifecycle_confine(slug: &str, store_path: &str, dry_run: bool) -> Result<
     // ── measure again; this is the verdict ──────────────────────────────────────────
     let after_at = ObservedAt::parse(&now_iso()).map_err(|x| e(x.to_string()))?;
     let after = bound.read(&policy, &binding, &after_at);
-    append(after.attempt());
 
     if let Some(message) = stopped {
+        append(after.attempt());
         println!("FAIL      {slug} member {member}");
         println!("  {message}");
         if matches!(after, Reading::Blocked { .. }) {
@@ -1262,7 +1585,8 @@ fn run_lifecycle_confine(slug: &str, store_path: &str, dry_run: bool) -> Result<
     }
 
     match after {
-        Reading::Blocked { .. } => {
+        Reading::Blocked { attempt } => {
+            append(&attempt);
             println!("BLOCKED   {slug} member {member}");
             println!("  the plan was written and the result could not be re-measured.");
             println!("  Nothing here certifies the member: a write is not an observation.");
@@ -1273,9 +1597,15 @@ fn run_lifecycle_confine(slug: &str, store_path: &str, dry_run: bool) -> Result<
         Reading::Measured { states, locked: _, auto_approve, attempt } => {
             let measurement = attempt.measurement().expect("a measured reading has a measurement");
             if measurement.is_clean() {
+                let evidence = ConfinementEvidence::from_attempt(attempt, &binding)
+                    .expect("the clean current-policy measurement qualifies as evidence");
+                store.certify_confinement(&slug_id, &evidence).map_err(|why| {
+                    e(format!("the clean observation could not be certified: {why}"))
+                })?;
                 print_verified(slug, &member, &states, auto_approve, bound.subject());
                 Ok(())
             } else {
+                append(&attempt);
                 println!("DRIFTED   {slug} member {member}");
                 for d in measurement.drift() {
                     println!("  {d}");
@@ -4093,8 +4423,9 @@ mod tests {
                 "{name} would be confined with {:?} reachable — if that is intended, this test is \
                  where the decision gets recorded, and it owes two things first. §A needs a new \
                  accounting of `ModelInput`, because a tools-declaring service puts a model-visible \
-                 path outside `envelope`. And serving must require confinement *evidence*, which \
-                 nothing enforces today: `0035` measured that declaring `tools` puts the runtime \
+                 path outside `envelope`. Serving now requires confinement *evidence* before the \
+                 registry can be staged; `0035` measured why that gate is load-bearing: declaring \
+                 `tools` puts the runtime \
                  into its own loop over the built-in catalogue, and unconfined that loop read 63 KB \
                  of this tenant's records out of `ironclaw.memory.*` and never called the declared \
                  tool. Confinement is the precondition that makes the lane work, not hardening on \
@@ -4303,6 +4634,61 @@ mod tests {
         assert_eq!(err.code, USAGE);
         assert!(err.message.contains("env:NAME"));
         assert!(!err.message.contains(secret));
+    }
+
+    #[test]
+    fn publish_one_accepts_handles_and_refuses_asserted_authority_fields() {
+        let Ok(args) = parse_registry(&[
+            "publish-one".into(),
+            "local-name".into(),
+            "--store".into(),
+            "lifecycle.store".into(),
+            "--registry".into(),
+            "registry.json".into(),
+            "--guidance".into(),
+            "guidance.md".into(),
+            "--records-credential".into(),
+            "env:TENANT_RECORDS".into(),
+            "--member-credential".into(),
+            "env:TENANT_MEMBER".into(),
+        ]) else {
+            panic!("publish-one should parse")
+        };
+        assert!(matches!(args.mode, Mode::RegistryPublishOne { .. }));
+
+        for flag in ["--org", "--member-id", "--channel", "--service"] {
+            let Err(err) = parse_registry(&[
+                "publish-one".into(),
+                "local-name".into(),
+                "--store".into(),
+                "s".into(),
+                "--registry".into(),
+                "r".into(),
+                "--guidance".into(),
+                "g".into(),
+                "--records-credential".into(),
+                "env:R".into(),
+                "--member-credential".into(),
+                "env:M".into(),
+                flag.into(),
+                "asserted".into(),
+            ]) else {
+                panic!("publish-one accepted {flag}")
+            };
+            assert!(err.message.contains("lifecycle evidence"));
+        }
+    }
+
+    #[test]
+    fn rollback_one_takes_only_the_registry_path() {
+        let Ok(args) = parse_registry(&[
+            "rollback-one".into(),
+            "--registry".into(),
+            "/etc/rustworks/registry.json".into(),
+        ]) else {
+            panic!("rollback parses")
+        };
+        assert!(matches!(args.mode, Mode::RegistryRollbackOne { .. }));
     }
 
     #[test]

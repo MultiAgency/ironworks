@@ -209,6 +209,7 @@ dependencies = [
  "ironworks-records",
  "ironworks-services",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

@@ -218,6 +218,12 @@ pub fn plan(progress: &ProvisionProgress, inventory: &AuthorityInventory) -> Nex
         if progress.has_reached(stage) {
             continue;
         }
+        // Confinement is not adoptable from a generic presence claim. Advancing this stage needs
+        // the clean, policy-bound measurement accepted by `certify_confinement`; directing a
+        // caller to `AdoptExisting` here would prescribe the bypass that `reach` refuses.
+        if stage == Stage::MemberConfined {
+            return NextAction::Run(stage);
+        }
         // The first stage not reached. Before running it, ask whether its authority is already
         // out there — the journal being silent is not evidence that it is not.
         let Some(authority) = Authority::ALL.iter().copied().find(|a| a.created_at() == stage)

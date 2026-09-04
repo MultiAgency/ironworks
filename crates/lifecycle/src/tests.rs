@@ -103,9 +103,53 @@ fn walk_to(store: &LifecycleStore, slug: &str, through: Stage) -> Slug {
         if stage > through {
             break;
         }
-        store.reach(&s.slug, stage, false, created_for(stage).as_ref(), NOW).expect("reach");
+        if stage == Stage::MemberConfined {
+            certify_stage(store, &s.slug, NOW);
+        } else {
+            store.reach(&s.slug, stage, false, created_for(stage).as_ref(), NOW).expect("reach");
+        }
     }
     s.slug
+}
+
+fn certify_stage(store: &LifecycleStore, slug: &Slug, now: &str) {
+    use crate::attempt::{ConfinementAttempt, ConfinementEvidence, Measurement};
+    use crate::confinement::{ConfinementPolicy, PolicyBinding};
+    use crate::runtime::{
+        BoundSubject, ObservedAt, RuntimeSubject, RuntimeTenantId, RuntimeUserId,
+    };
+    use ironworks_domain::composition::{Composition, PartRef};
+
+    let member = created_for(Stage::MemberMinted).expect("member id");
+    let subject = RuntimeSubject::new(
+        RuntimeTenantId::parse("runtime-tenant").unwrap(),
+        RuntimeUserId::parse(member.as_str()).unwrap(),
+    );
+    let bound = BoundSubject::bind(member, subject).expect("same member");
+    let definition = ironworks_domain::ServiceDefinition::new(
+        ironworks_domain::ServiceId::parse("account-analysis").unwrap(),
+        1,
+        "test service",
+        Composition::new(vec![PartRef::new("persona")], "guidance", PartRef::new("task")).unwrap(),
+        ironworks_domain::CapabilityProfile::READ_ONLY_RECORDS,
+        None,
+    )
+    .unwrap();
+    let policy = ConfinementPolicy::read_only_analyst();
+    let binding = PolicyBinding::of(&definition, &policy);
+    let at = ObservedAt::parse(now).unwrap();
+    let states = [("builtin.http".to_owned(), "disabled".to_owned())].into_iter().collect();
+    let measurement = Measurement::from_assessment(
+        &policy,
+        &bound,
+        &states,
+        &std::collections::BTreeSet::new(),
+        false,
+        &at,
+    );
+    let attempt = ConfinementAttempt::measured(bound, binding.clone(), at, measurement);
+    let evidence = ConfinementEvidence::from_attempt(attempt, &binding).expect("clean evidence");
+    store.certify_confinement(slug, &evidence).expect("certify");
 }
 
 // ── P2: authority exists, the journal is silent ─────────────────────────────────────────────
@@ -261,17 +305,22 @@ fn a_minted_member_that_is_not_confined_cannot_stage() {
 
     // Positive control: confine first and staging is recorded, so the refusal above is about the
     // gap rather than about `reach` refusing everything.
-    store
-        .reach(
-            &slug,
-            Stage::MemberConfined,
-            false,
-            created_for(Stage::MemberConfined).as_ref(),
-            NOW,
-        )
-        .unwrap();
+    certify_stage(&store, &slug, NOW);
     store.reach(&slug, Stage::Staged, false, created_for(Stage::Staged).as_ref(), NOW).unwrap();
     assert!(store.progress(&slug).unwrap().has_reached(Stage::Staged));
+}
+
+#[test]
+fn a_presence_claim_cannot_adopt_confinement_without_certifying_evidence() {
+    let progress = ProvisionProgress::Provisioning { reached: Stage::MemberMinted };
+    let world = Fixture::default()
+        .present(Authority::MemberConfinement, "a-policy-fingerprint")
+        .observe(&spec("acme"));
+    assert_eq!(
+        plan(&progress, &world),
+        NextAction::Run(Stage::MemberConfined),
+        "the planner prescribed generic adoption for an evidence-bearing stage"
+    );
 }
 
 /// Resume restarts at the first stage not reached, and redoes nothing before it.
@@ -1099,17 +1148,14 @@ fn a_stage_is_never_walked_backwards() {
         Err(LifecycleError::StageWouldRegress { .. })
     ));
 
+    assert!(matches!(
+        store.reach(&slug, Stage::MemberConfined, false, None, NOW),
+        Err(LifecycleError::ConfinementEvidenceRequired { .. })
+    ));
+
     // Positive control: the immediate next stage still succeeds, so the refusals above are about
     // direction rather than about `reach` refusing everything once a stage is set.
-    store
-        .reach(
-            &slug,
-            Stage::MemberConfined,
-            false,
-            created_for(Stage::MemberConfined).as_ref(),
-            NOW,
-        )
-        .expect("the valid next stage must still advance");
+    certify_stage(&store, &slug, NOW);
     assert!(store.progress(&slug).unwrap().has_reached(Stage::MemberConfined));
     assert_eq!(store.history(&slug).unwrap().len(), 5, "no refused attempt was recorded");
 }

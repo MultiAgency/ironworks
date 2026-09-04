@@ -15,8 +15,9 @@ WorkingDirectory=/opt/rustworks
 # target/release explicitly; without this one the loop would serve from a debug build and
 # nothing would say so.
 Environment=IRONWORKS_BIN=/opt/rustworks/target/release/ironworks
+EnvironmentFile=/etc/rustworks/relay.env
 ExecStart=/opt/rustworks/dev/relay-loop.sh \
-    --registry /etc/rustworks/registry.json \
+    --registry /var/lib/rustworks/registry.json \
     --journal /var/lib/rustworks/serve.journal \
     --channel http://127.0.0.1:3994
 # SIGTERM stops the loop between cycles rather than inside one, so a normal restart leaves

@@ -69,7 +69,8 @@ pub mod runtime;
 pub mod state;
 
 pub use attempt::{
-    AttemptVariant, Blocked, CatalogueResult, ConfinementAttempt, Historical, Measurement, Reached,
+    AttemptVariant, Blocked, CatalogueResult, ConfinementAttempt, ConfinementEvidence, Historical,
+    Measurement, Reached,
 };
 pub use authority::{
     Authority, AuthorityFact, AuthorityInventory, Custody, Holding, NextAction, Presence,
@@ -587,6 +588,25 @@ pub enum LifecycleError {
     )]
     StageSkipped { slug: String, attempted: String, predecessor: String },
     #[error(
+        "instance {slug} cannot reach member_confined through generic stage progress; a clean, \
+         current-policy observation must be supplied to certify_confinement"
+    )]
+    ConfinementEvidenceRequired { slug: String },
+    #[error(
+        "confinement evidence is for member {observed}, but instance {slug} records member \
+         {recorded}; refusing to certify another subject"
+    )]
+    ConfinementMemberMismatch { slug: String, recorded: String, observed: String },
+    #[error(
+        "confinement evidence is for service {observed}, but instance {slug} declares service \
+         {recorded}; refusing to certify another service's policy"
+    )]
+    ConfinementServiceMismatch { slug: String, recorded: String, observed: String },
+    #[error(
+        "instance {slug} cannot certify confinement because no runtime member identity is recorded"
+    )]
+    ConfinementMemberMissing { slug: String },
+    #[error(
         "instance {slug} cannot be activated from stage {stage}: activation requires every stage \
          through {last} and a passing smoke"
     )]
@@ -969,6 +989,79 @@ fn read_attempt(conn: &Connection, id: i64) -> Result<attempt::ConfinementAttemp
     }
 }
 
+/// Insert one complete attempt into an existing transaction.
+///
+/// Ordinary ledger appends commit immediately. Certification keeps this transaction open and
+/// advances `member_confined` beside the same factual row, eliminating the crash window between
+/// evidence and progress.
+fn insert_attempt(
+    tx: &rusqlite::Transaction<'_>,
+    slug: &Slug,
+    attempt: &attempt::ConfinementAttempt,
+) -> Result<i64, LifecycleError> {
+    let variant = attempt.variant();
+    let subject = attempt.authenticated();
+    let policy = attempt.policy();
+    let measurement = attempt.measurement();
+    let blocked = match attempt.reached() {
+        attempt::Reached::BindingBlocked { reason } => Some(*reason),
+        attempt::Reached::Bound {
+            catalogue: attempt::CatalogueResult::Blocked { reason }, ..
+        } => Some(*reason),
+        _ => None,
+    };
+
+    tx.execute(
+        "INSERT INTO confinement_attempts(
+             slug, variant, expected, at,
+             subject_tenant, subject_user,
+             service, service_version, policy_fingerprint,
+             catalogued, auto_approve, blocked_kind)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
+        params![
+            slug.as_str(),
+            variant.tag(),
+            attempt.expected().as_str(),
+            attempt.at().as_str(),
+            subject.map(|s| s.tenant().as_str()),
+            subject.map(|s| s.user().as_str()),
+            policy.map(|p| p.service().as_str()),
+            policy.map(|p| i64::from(p.version())),
+            policy.map(|p| p.fingerprint().as_str()),
+            measurement.map(|m| m.catalogued() as i64),
+            measurement.map(|m| i64::from(m.auto_approve())),
+            blocked.map(attempt::Blocked::tag),
+        ],
+    )?;
+    let id = tx.last_insert_rowid();
+    if let Some(measurement) = measurement {
+        for tool in measurement.reachable() {
+            tx.execute(
+                "INSERT INTO confinement_reachable(attempt_id, tool) VALUES(?1,?2)",
+                params![id, tool],
+            )?;
+        }
+        for (ordinal, drift) in measurement.drift().iter().enumerate() {
+            let row = drift_columns(drift);
+            tx.execute(
+                "INSERT INTO confinement_drift(attempt_id, ordinal, kind, tool, state,
+                                               observed, expected)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    id,
+                    ordinal as i64,
+                    row.kind,
+                    row.tool,
+                    row.state,
+                    row.observed,
+                    row.expected
+                ],
+            )?;
+        }
+    }
+    Ok(id)
+}
+
 /// Durable lifecycle state.
 pub struct LifecycleStore {
     conn: Mutex<Connection>,
@@ -1216,6 +1309,11 @@ impl LifecycleStore {
         now: &str,
     ) -> Result<(), LifecycleError> {
         self.require_writable()?;
+        if stage == Stage::MemberConfined {
+            return Err(LifecycleError::ConfinementEvidenceRequired {
+                slug: slug.as_str().to_owned(),
+            });
+        }
         let progress = self.progress(slug)?;
         if let Some(recorded) = progress.reached()
             && recorded >= stage
@@ -1273,6 +1371,100 @@ impl LifecycleStore {
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Append a qualifying confinement observation and advance `member_confined`, atomically.
+    ///
+    /// The first certification advances the stage exactly once. A later clean measurement is
+    /// still useful evidence and is appended, but it does not rewrite stage history. Conversely,
+    /// later drift is recorded through [`Self::record_attempt`] and does not erase the historical
+    /// fact that this member was once certified; inspection reports history and current state as
+    /// separate facts.
+    pub fn certify_confinement(
+        &self,
+        slug: &Slug,
+        evidence: &ConfinementEvidence,
+    ) -> Result<i64, LifecycleError> {
+        self.require_writable()?;
+        let attempt = evidence.attempt();
+        let policy = attempt
+            .policy()
+            .expect("ConfinementEvidence always contains a policy-bound measurement");
+        let conn = self.conn.lock().expect("lifecycle lock");
+        let tx = conn.unchecked_transaction()?;
+
+        let instance: Option<(String, Option<String>)> = tx
+            .query_row(
+                "SELECT service,stage FROM instances WHERE slug=?1",
+                params![slug.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((service, stage_tag)) = instance else {
+            return Err(LifecycleError::NoSuchInstance { slug: slug.as_str().to_owned() });
+        };
+        if service != policy.service().as_str() {
+            return Err(LifecycleError::ConfinementServiceMismatch {
+                slug: slug.as_str().to_owned(),
+                recorded: service,
+                observed: policy.service().as_str().to_owned(),
+            });
+        }
+        let reached = stage_tag
+            .as_deref()
+            .map(|tag| Stage::from_tag(tag).ok_or(LifecycleError::Corrupt { what: "stage" }))
+            .transpose()?;
+        if !reached.is_some_and(|stage| stage >= Stage::MemberMinted) {
+            return Err(LifecycleError::StageSkipped {
+                slug: slug.as_str().to_owned(),
+                attempted: Stage::MemberConfined.tag().to_owned(),
+                predecessor: Stage::MemberMinted.tag().to_owned(),
+            });
+        }
+
+        let recorded_member: Option<String> = tx
+            .query_row(
+                "SELECT opaque_id FROM authority_identities
+                 WHERE slug=?1 AND authority=?2",
+                params![slug.as_str(), Authority::Member.tag()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let Some(recorded_member) = recorded_member else {
+            return Err(LifecycleError::ConfinementMemberMissing {
+                slug: slug.as_str().to_owned(),
+            });
+        };
+        if recorded_member != attempt.expected().as_str() {
+            return Err(LifecycleError::ConfinementMemberMismatch {
+                slug: slug.as_str().to_owned(),
+                recorded: recorded_member,
+                observed: attempt.expected().as_str().to_owned(),
+            });
+        }
+
+        let id = insert_attempt(&tx, slug, attempt)?;
+        if reached == Some(Stage::MemberMinted) {
+            let at = attempt.at().as_str();
+            let fingerprint = policy.fingerprint().as_str();
+            tx.execute(
+                "UPDATE instances SET stage=?2, updated_at=?3 WHERE slug=?1",
+                params![slug.as_str(), Stage::MemberConfined.tag(), at],
+            )?;
+            tx.execute(
+                "INSERT INTO stage_history(slug,stage,at,adopted,created_id)
+                 VALUES(?1,?2,?3,0,?4)",
+                params![slug.as_str(), Stage::MemberConfined.tag(), at, fingerprint],
+            )?;
+            tx.execute(
+                "INSERT INTO authority_identities(
+                     slug,authority,opaque_id,provenance,observed_at,subject_tenant,subject_user
+                 ) VALUES(?1,?2,?3,'created',?4,NULL,NULL)",
+                params![slug.as_str(), Authority::MemberConfinement.tag(), fingerprint, at],
+            )?;
+        }
+        tx.commit()?;
+        Ok(id)
     }
 
     /// Make an instance routable.
@@ -1554,69 +1746,9 @@ impl LifecycleStore {
         attempt: &attempt::ConfinementAttempt,
     ) -> Result<i64, LifecycleError> {
         self.require_writable()?;
-        let variant = attempt.variant();
-        let subject = attempt.authenticated();
-        let policy = attempt.policy();
-        let measurement = attempt.measurement();
-        let blocked = match attempt.reached() {
-            attempt::Reached::BindingBlocked { reason } => Some(*reason),
-            attempt::Reached::Bound {
-                catalogue: attempt::CatalogueResult::Blocked { reason },
-                ..
-            } => Some(*reason),
-            _ => None,
-        };
-
         let conn = self.conn.lock().expect("lifecycle lock");
         let tx = conn.unchecked_transaction()?;
-        tx.execute(
-            "INSERT INTO confinement_attempts(
-                 slug, variant, expected, at,
-                 subject_tenant, subject_user,
-                 service, service_version, policy_fingerprint,
-                 catalogued, auto_approve, blocked_kind)
-             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12)",
-            params![
-                slug.as_str(),
-                variant.tag(),
-                attempt.expected().as_str(),
-                attempt.at().as_str(),
-                subject.map(|s| s.tenant().as_str()),
-                subject.map(|s| s.user().as_str()),
-                policy.map(|p| p.service().as_str()),
-                policy.map(|p| i64::from(p.version())),
-                policy.map(|p| p.fingerprint().as_str()),
-                measurement.map(|m| m.catalogued() as i64),
-                measurement.map(|m| i64::from(m.auto_approve())),
-                blocked.map(attempt::Blocked::tag),
-            ],
-        )?;
-        let id = tx.last_insert_rowid();
-        if let Some(measurement) = measurement {
-            for tool in measurement.reachable() {
-                tx.execute(
-                    "INSERT INTO confinement_reachable(attempt_id, tool) VALUES(?1,?2)",
-                    params![id, tool],
-                )?;
-            }
-            for (ordinal, drift) in measurement.drift().iter().enumerate() {
-                let row = drift_columns(drift);
-                tx.execute(
-                    "INSERT INTO confinement_drift(attempt_id, ordinal, kind, tool, state,
-                                                   observed, expected)
-                     VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                    params![
-                        id,
-                        ordinal as i64,
-                        row.kind,
-                        row.tool,
-                        row.state,
-                        row.observed,
-                        row.expected
-                    ],
-                )?;
-            }
-        }
+        let id = insert_attempt(&tx, slug, attempt)?;
         tx.commit()?;
         Ok(id)
     }

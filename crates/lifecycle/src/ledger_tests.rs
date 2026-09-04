@@ -16,7 +16,9 @@ use super::*;
 fn unlocked() -> std::collections::BTreeSet<String> {
     std::collections::BTreeSet::new()
 }
-use crate::attempt::{AttemptVariant, Blocked, ConfinementAttempt, Historical, Measurement};
+use crate::attempt::{
+    AttemptVariant, Blocked, ConfinementAttempt, ConfinementEvidence, Historical, Measurement,
+};
 use crate::confinement::{ConfinementPolicy, Drift, PolicyBinding, ToolState};
 use crate::runtime::{BoundSubject, ObservedAt, RuntimeSubject, RuntimeTenantId, RuntimeUserId};
 use std::collections::BTreeMap;
@@ -109,6 +111,17 @@ fn measurement(member: &str, entries: &[(&str, &str)], when: &str) -> Measuremen
         false,
         &at(when),
     )
+}
+
+fn clean_evidence(member: &str, when: &str) -> ConfinementEvidence {
+    let current = binding();
+    let attempt = ConfinementAttempt::measured(
+        bound_to(member),
+        current.clone(),
+        at(when),
+        measurement(member, &[("builtin.http", "disabled")], when),
+    );
+    ConfinementEvidence::from_attempt(attempt, &current).expect("clean current-policy evidence")
 }
 
 /// A declared instance walked far enough that a member exists.
@@ -389,6 +402,108 @@ fn an_empty_file_opened_read_only_says_it_is_uninitialised() {
 }
 
 // ── appending ───────────────────────────────────────────────────────────────────────────────
+
+#[test]
+fn only_clean_current_policy_measurements_become_certification_evidence() {
+    let current = binding();
+    let drifted = ConfinementAttempt::measured(
+        bound_to(MEMBER),
+        current.clone(),
+        at(NOW),
+        measurement(MEMBER, &[("builtin.http", "always_allow")], NOW),
+    );
+    assert!(ConfinementEvidence::from_attempt(drifted, &current).is_none());
+
+    let other = PolicyBinding::of(
+        &definition(),
+        &ConfinementPolicy::allowing(["builtin.shell".to_owned()], false),
+    );
+    let stale = ConfinementAttempt::measured(
+        bound_to(MEMBER),
+        other,
+        at(NOW),
+        measurement(MEMBER, &[("builtin.http", "disabled")], NOW),
+    );
+    assert!(ConfinementEvidence::from_attempt(stale, &current).is_none());
+}
+
+#[test]
+fn certification_appends_the_clean_measurement_and_advances_the_stage_atomically() {
+    let dir = Dir::new();
+    let store = LifecycleStore::open(dir.path().join("lifecycle.db")).expect("open");
+    let slug = seeded(&store);
+    let evidence = clean_evidence(MEMBER, NOW);
+
+    store.certify_confinement(&slug, &evidence).expect("certify");
+
+    assert_eq!(
+        store.progress(&slug).unwrap(),
+        ProvisionProgress::Provisioning { reached: Stage::MemberConfined }
+    );
+    assert_eq!(store.confinement_history(&slug, 10).unwrap(), vec![evidence.attempt().clone()]);
+    let recorded = store.recorded(&slug).unwrap();
+    assert_eq!(
+        recorded.identity(Authority::MemberConfinement).unwrap().id().as_str(),
+        binding().fingerprint().as_str()
+    );
+}
+
+#[test]
+fn certification_can_be_observed_again_but_the_stage_is_reached_only_once() {
+    let dir = Dir::new();
+    let store = LifecycleStore::open(dir.path().join("lifecycle.db")).expect("open");
+    let slug = seeded(&store);
+    store.certify_confinement(&slug, &clean_evidence(MEMBER, NOW)).unwrap();
+    store.certify_confinement(&slug, &clean_evidence(MEMBER, "2026-08-27T12:00:05+00:00")).unwrap();
+
+    assert_eq!(
+        store
+            .history(&slug)
+            .unwrap()
+            .iter()
+            .filter(|(s, _, _)| *s == Stage::MemberConfined)
+            .count(),
+        1
+    );
+    assert_eq!(store.confinement_history(&slug, 10).unwrap().len(), 2);
+}
+
+#[test]
+fn a_failed_certification_rolls_back_its_attempt_and_stage_together() {
+    let dir = Dir::new();
+    let store = LifecycleStore::open(dir.path().join("lifecycle.db")).expect("open");
+    let slug = seeded(&store);
+    {
+        let conn = store.conn.lock().expect("lock");
+        conn.execute(
+            "INSERT INTO authority_identities(
+                 slug,authority,opaque_id,provenance,observed_at,subject_tenant,subject_user
+             ) VALUES(?1,?2,'prior','created',?3,NULL,NULL)",
+            params![slug.as_str(), Authority::MemberConfinement.tag(), NOW],
+        )
+        .expect("plant conflicting identity");
+    }
+
+    assert!(store.certify_confinement(&slug, &clean_evidence(MEMBER, NOW)).is_err());
+    assert_eq!(
+        store.progress(&slug).unwrap(),
+        ProvisionProgress::Provisioning { reached: Stage::MemberMinted }
+    );
+    assert!(store.confinement_history(&slug, 10).unwrap().is_empty());
+    assert!(!store.history(&slug).unwrap().iter().any(|(s, _, _)| *s == Stage::MemberConfined));
+}
+
+#[test]
+fn certification_refuses_evidence_for_another_member_without_recording_it() {
+    let dir = Dir::new();
+    let store = LifecycleStore::open(dir.path().join("lifecycle.db")).expect("open");
+    let slug = seeded(&store);
+    let error = store
+        .certify_confinement(&slug, &clean_evidence("user_somebody_else", NOW))
+        .expect_err("wrong member");
+    assert!(matches!(error, LifecycleError::ConfinementMemberMismatch { .. }));
+    assert!(store.confinement_history(&slug, 10).unwrap().is_empty());
+}
 
 #[test]
 fn a_measured_attempt_round_trips_with_its_children() {

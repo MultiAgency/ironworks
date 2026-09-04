@@ -96,6 +96,25 @@ And the IronClaw unit must use `ProtectHome=read-only`, not `true`: systemd incl
     sudo install -m 0644 /opt/rustworks/deploy/user/rustworks-docker.service /etc/systemd/user/
     sudo systemctl daemon-reload
 
+The two serving environment files are separate custody boundaries. Both are read by systemd as
+root before it changes to `User=rustworks`, so neither has to be readable by the service account:
+
+    sudo install -o root -g root -m 0600 /dev/null /etc/rustworks/telegram.env
+    sudoedit /etc/rustworks/telegram.env
+    # exactly: TELEGRAM_BOT_TOKEN=<the BotFather token>
+
+    sudo install -o root -g root -m 0600 /dev/null /etc/rustworks/relay.env
+    sudoedit /etc/rustworks/relay.env
+    # shared endpoints plus every env:NAME handle the one-tenant registry names, for example:
+    # IRONWORKS_BASE=http://127.0.0.1:3997
+    # IRONWORKS_RECORDS=http://127.0.0.1:8443
+    # RELATIONSHIP_DEMO_RECORDS=<records bearer>
+    # RELATIONSHIP_DEMO_MEMBER=<IronClaw member bearer>
+
+Do not put `TELEGRAM_BOT_TOKEN` in `relay.env`; only the adapter calls Telegram. The files may be
+created before or after their unit files are installed, but each must exist before its own unit is
+started. Installing them does not start either service.
+
 Build the pinned IronClaw binary and its worker image from the revision in `IRONCLAW_PIN`, then
 install the binary as `/opt/ironclaw/bin/ironclaw` and export the image that the upstream profile
 expects. Each rootless daemon has a separate image store, so a host-daemon tag alone is not enough:
@@ -200,6 +219,48 @@ That digest is now historical: the corpus has moved and the current composition 
 `3770e0942624bda4`. Re-verify against whatever `ironworks compose` reports in this tree at the
 time you build — the property being checked is that the two architectures agree, not that they
 agree on any particular value.
+
+### Publishing one attended tenant
+
+After adoption and `lifecycle confine` have recorded a certified `member_confined` stage, construct
+the registry from lifecycle state rather than copying identifiers into JSON by hand. Run as the
+`rustworks` account: the live registry is mutable service state under `/var/lib/rustworks`, while
+the root-only credentials remain in `/etc/rustworks/relay.env` and are loaded into this attended
+process without appearing in arguments.
+
+    sudo systemctl stop rustworks-relay.service
+    sudo bash -c 'set -a; . /etc/rustworks/relay.env; set +a; \
+      exec runuser -u rustworks --preserve-environment -- \
+      /opt/rustworks/target/release/ironworks registry publish-one relationship-demo \
+        --store /var/lib/rustworks/lifecycle.store \
+        --registry /var/lib/rustworks/registry.json \
+        --guidance /opt/rustworks/GUIDANCE.md \
+        --records-credential env:RELATIONSHIP_DEMO_RECORDS \
+        --member-credential env:RELATIONSHIP_DEMO_MEMBER'
+
+`publish-one` refuses before writing unless the records handle resolves to the lifecycle org and
+the member handle's complete `/session` subject equals the recorded runtime tenant and user. It
+validates the guidance and constructed one-tenant registry, writes a same-directory mode-0600
+temporary file, syncs the file and directory around every rename, and durably preserves the old
+registry as `registry.json.previous` before publishing. It then records `staged`. A crash after the
+rename but before SQLite recording is visible and recoverable by rerunning the same command; an
+already-identical live file does not overwrite the real rollback artifact.
+
+On the first publication, when no live registry exists, `.previous` is a versioned absence marker
+rather than a fake empty registry. Rolling it back durably removes the live file, restoring the
+actual prior state instead of leaving a process able to serve a file that did not previously exist.
+
+Rollback is an implemented and tested operation, not a hand edit:
+
+    sudo systemctl stop rustworks-relay.service
+    sudo -u rustworks /opt/rustworks/target/release/ironworks registry rollback-one \
+      --registry /var/lib/rustworks/registry.json
+
+It validates the preserved registry, restores it through the same file-sync/directory-sync/rename
+sequence, keeps `registry.json.previous` for another recovery, and does not rewrite historical
+lifecycle progress. Restarting the relay remains an attended operator action. The acceptance test
+publishes a new registry, loads and routes through it, rolls back, and loads and routes through the
+prior registry again.
 
 ## What remains
 

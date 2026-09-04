@@ -236,6 +236,30 @@ pub struct ConfinementAttempt {
     reached: Reached,
 }
 
+/// A clean confinement measurement against the policy currently in force.
+///
+/// This is the only value [`crate::LifecycleStore::certify_confinement`] accepts. A caller cannot
+/// turn a blocked, misbound, drifted, or stale-policy attempt into stage progress: construction
+/// checks all four conditions and keeps the complete attempt so the evidence and the stage can be
+/// committed together.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfinementEvidence {
+    attempt: ConfinementAttempt,
+}
+
+impl ConfinementEvidence {
+    /// Produce evidence only from a bound, measured, drift-free observation of `current`.
+    pub fn from_attempt(attempt: ConfinementAttempt, current: &PolicyBinding) -> Option<Self> {
+        let qualifies = attempt.policy() == Some(current)
+            && attempt.measurement().is_some_and(Measurement::is_clean);
+        qualifies.then_some(Self { attempt })
+    }
+
+    pub fn attempt(&self) -> &ConfinementAttempt {
+        &self.attempt
+    }
+}
+
 /// The stable spelling of a factual variant. **Not a judgment** — it says which shape the row has,
 /// so the enum can be rebuilt from SQL, and nothing more.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
