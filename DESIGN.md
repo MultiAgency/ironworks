@@ -581,9 +581,9 @@ tabulated below need `dev/probe-up.sh` first, except `dev/prove-lifecycle.sh` an
 `dev/prove-tenancy.sh`, which need no runtime and no model key — reconciliation is a read, and
 record separation is a property of the record path rather than of an answer.
 
-**The table is the six that run against a probe, not every proof in `dev/`.** Three others exist
-and are deliberately absent from it, because a check count beside them would read as a result
-somebody has seen: `dev/prove-confinement.sh` needs the runtime but **no model key** (confinement
+**The table is the six that run against a probe, not every proof in `dev/`.** The others are
+deliberately absent from it, because a check count beside them would read as a result somebody has
+seen: `dev/prove-confinement.sh` needs the runtime but **no model key** (confinement
 is entirely the settings API) and still *consumes a member* when it runs — §L-9, approval-off is
 one-way — though as of 2026-09-02 it **mints that member itself** rather than borrowing the
 probe's, so the residual is discarded with it and the stack is reusable across runs (measured: two
@@ -597,9 +597,45 @@ runtime on `hosted-single-tenant-volume-sandboxed` **and** a service declaring
 for what standing it up measured), so the proof now reports the one block that remains — no shipped
 service declares `sandbox`, which PRD §13 records as a product decision nobody has taken. **It is
 still BLOCKED**; what changed is which of its two reasons stands;
+`dev/prove-cutover.sh` needs the runtime **and** a model key, because what it proves is that
+publishing a registry changes which tenant a real relay answers for, and a route that never reaches
+a model is not serving; it mints and confines its own candidate, so it carries
+`prove-confinement.sh`'s residual for the same reason and discards it the same way. It is kept out
+of the table for a reason the table cannot show, and the reason changed on the day it was written.
+Measured over eight sittings on one probe on 2026-09-04, digest checked either side of every run
+and none discarded, it scored **8/8 publication, 8/8 rollback, 7/8 candidate and 5/8 prior — four
+blocked checks, nothing failed**. Every block named `service_unavailable`, the thirty-second cliff
+described below, so the count was a claim about one afternoon's provider latency as much as about
+this repository.
+
+**It could stop blocking on that, and deliberately does not.**
+`docs/experiments/0044-a-refused-turn-recovers-on-the-next-serving-cycle.md` measured a second
+relay cycle resolving fifteen refusals of fifteen as **one logical turn under one idempotency
+key**, across the operator bearer and a confined member, with the cursor barrier measured
+separately and deterministically. A build carrying that cycle was implemented, run against this
+proof, and then not kept (`ba426f9`), because it would make a proof of the cutover also depend on
+recovery working — a blocked serving check would come to mean the runtime refused twice. **That
+build's own score is not recorded and is not quoted here**: it was never written up with its
+counting method, and `0044` measures the recovery mechanism rather than this proof carrying it.
+The proof stays narrow and blocks honestly instead. `0044` remains the evidence for a change this
+proof has not made, and the assertion it would need is `one distinct create key` rather than
+`create=1`;
 and `dev/prove-deployment-isolation.sh` runs as root on a deployment host, which does not exist
-(`deploy/README.md`). A bare count was here and was wrong — it said six while `dev/` held nine —
-so the enumeration below is the claim and no number stands in front of it.
+(`deploy/README.md`). `dev/prove-host.sh` is read-only but needs passwordless root over SSH to the
+live `multi-serve` host and sources its root-owned relay environment to obtain the member
+credential; it has no default for that host's address or account and blocks without
+`PROVE_HOST_ADDRESS` and `PROVE_HOST_USER`, because this repository is public and a serving host's
+SSH endpoint written into it is a targeting aid git history does not take back.
+`dev/test-prove-host.sh` keeps its scoring honest through fake SSH and needs neither a runtime nor
+a host. Every live run is an operator decision taken in the moment. The first has been
+taken, and scored **7 PASS, 1 FAIL, 0 BLOCKED**: both serving units, the tenant's IronClaw, a
+disabled devstore, live confinement at 53 catalogued and 2 reachable with approval off, and the
+recorded registry digest all measured as this repository claims them. The one failure was the
+proof's own — its expected member id had been copied from `deploy/README.md`, which carried the
+UUID truncated, so the host was correct and the instrument invented a difference (§K-8). Check 1
+ran against the address directly because the `Host multi-serve` block was absent from that
+environment, which proves the route to the expected address and user and does not prove the
+alias.
 
 ```
 cargo test --workspace       passing

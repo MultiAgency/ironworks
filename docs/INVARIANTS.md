@@ -670,6 +670,20 @@ cache that had already been removed. Nothing read it.
 
 - **Channel retention.** Recovery via redelivery (E-2, E-5) depends on how long the channel
   retains unacknowledged updates. Believed ~24h for Telegram; **unverified**.
+- **Whether a guidance minimum is the right floor for a dogfooded tenant.**
+  `crates/domain/src/composition.rs::MIN_CONTENT` refuses guidance under 400 characters as "a
+  template nobody filled in", which holds for an external tenant. It inverts for tenant one.
+  Measured 2026-09-05: this tenant is MultiAgency itself (`docs/ACCOUNT-COORDINATION.md`), so
+  `scrap/personas/COORDINATOR.md` is already its organisation-specific layer, and every section a
+  guidance template asks for is carried there — the evidence tiers, the never-equate pairs, the
+  lifecycle words, the vocabulary, the prohibited claims, the reply ordering and the ownership
+  split. The served body is **440 bytes against the 400 floor**; deleting its last sentence (119
+  bytes) leaves 321 and refuses. So the only way to widen that margin is to restate the persona,
+  which is the "one rule into two that must agree" failure the composition warns about, and which
+  had already produced a live contradiction — a two-way evidence/inference split against four
+  mandated tiers. **Short here means non-redundant, not unfilled.** Nothing has decided whether the
+  floor should be conditional, lowered, or left as a bound tenant one simply sits near; this
+  records the tension, not a decision.
 - **Context ceiling. Measured 2026-09-02; the window is no longer the binding constraint.** The
   ~3,100 tokens/turn that stood here was `account-analysis@1`, a 14,337-byte alloy that no longer
   ships. For `relationship-intelligence@2` (25,575 bytes) a chained thread grows **~5,700–5,910
@@ -684,8 +698,13 @@ cache that had already been removed. Nothing read it.
   as currently configured** — the limit above breaks the chain at eight, and the terminal path
   never chains at all (`crates/cli/src/main.rs::drive`), so turn 25 needs a raised limit before it
   can be asked. That makes this a bound on a configuration nobody runs, not on the shipped one.
-- **Single-poller availability.** One token permits one poller, so one process serves every
-  tenant and is a single point of failure for all of them. This caps any service-level promise.
+- **Single-poller availability; the cross-tenant half is decided, not built.** One token still
+  permits one poller. ADR 0009 (`docs/adr/0009-align-the-serving-cell-with-one-tenant-channel-stream.md`)
+  aligns that token, poller and process with one tenant, so once the cells are deployed a failed
+  poller no longer makes every tenant fail. Until then, the shared-poller failure remains. Even
+  after the split, each tenant still has one poller with no failover: it remains a single point of
+  failure for that tenant and caps any per-tenant service-level promise. The cross-tenant cap is
+  closed by the chosen architecture; the per-tenant availability bound is not.
 - **Whether the runtime isolates a response by member.** `GET /api/v1/responses/{id}` is fetched
   with the tenant's own member credential, and **nothing here has measured what happens when the id
   belongs to a different member.** If the runtime isolates, a mis-addressed fetch fails and the

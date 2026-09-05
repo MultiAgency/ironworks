@@ -251,9 +251,10 @@ no_model() { grep -q "not a valid model name\|model provider rejected" <<<"$1"; 
 # States in which the boundary was never set up, so the check measured nothing. The runtime's
 # 30-requests-per-60-seconds limit and its 30s response timeout are upstream of IronWorks;
 # scoring either as FAIL reports a cutover defect that does not exist. Identical to
-# `dev/prove-delivery.sh`'s, which carries the reasoning — including why the 429 alternative is
-# anchored to `HTTP 429`, a narrowing this script's sittings are what measured.
-degraded() { grep -qE "timed out (writing|reading)|rate limited|rate.?limit|HTTP 429|service_unavailable|provider .* unavailable" <<<"$1"; }
+# `dev/prove-delivery.sh`'s, which carries the reasoning — including why the 429 alternative
+# excludes a hex run rather than requiring the literal `HTTP 429`, a narrowing this script's
+# sittings are what measured and a prefix this script's own digests are what defeated.
+degraded() { grep -qE "timed out (writing|reading)|rate limited|rate.?limit|(^|[^0-9a-f])429([^0-9a-f]|$)|service_unavailable|provider .* unavailable" <<<"$1"; }
 # The failing run's own last words. Continuation lines are skipped: the runtime's refusals end
 # with an indented `→ ...` instruction, so taking the last non-empty line would name the advice
 # and never the cause — and a BLOCKED verdict is only worth reading if it says what stopped it.

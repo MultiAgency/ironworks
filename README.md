@@ -14,9 +14,11 @@ A real bot answered a real question through `crates/telegram` on 2026-08-31, and
 each conversation to its own tenant from a registry that refuses as a whole rather than a row. On
 2026-09-01 `coordinate` served the operator's own org from the live Account Service — two real
 records, one answered turn, recovered byte-identically through a real upstream failure. That is
-one turn, not a behavioural claim. It does not provision or deprovision, and nothing runs the
-serving loop anywhere yet — `dev/relay-loop.sh` exists and is undeployed. See the status table in
-`DESIGN.md` for what is measured and what is not built.
+one turn, not a behavioural claim. It does not provision or deprovision. The serving loop
+runs continuously on one host for one tenant, which has answered and delivered, and
+`dev/prove-host.sh` has now reached that host read-only for the first time: seven of its eight
+checks passed, and the eighth failed on the proof's own expected value rather than on anything the
+host reported. See the status table in `DESIGN.md` for what is measured and what is not built.
 
 The first dogfooded product experience is **account coordination** for MultiAgency itself. Its
 stable service id remains `relationship-intelligence`: it reads dated account records across

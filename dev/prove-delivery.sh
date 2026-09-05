@@ -146,7 +146,26 @@ no_model()   { grep -q "not a valid model name\|model provider rejected" <<<"$1"
 # runtime declining, never this script's boundary failing. Deliberately NOT called "the provider
 # is degraded": the provider and the runtime are different parties, and only one of them is
 # upstream of us.
-degraded()   { grep -qE "timed out (writing|reading)|rate limited|rate.?limit|429|service_unavailable|provider .* unavailable" <<<"$1"; }
+#
+# `HTTP 429` and not a bare `429`, because a bare one matches inside a hex digest and turns a
+# clean run into a false BLOCKED. Measured 2026-09-04 in `dev/prove-cutover.sh`, which had copied
+# this line: two of eight sittings blocked on runs that had delivered, both on a token like
+# `request 4297bd26b3b174a1`. **This script is exposed more, not less** — every check passes the
+# output of TWO relay runs to `degraded`, and each prints an alloy digest, a request digest and a
+# `resp_` id, so there are six chances per check rather than three.
+#
+# Narrowing loses no real coverage only if the number is ANCHORED rather than PREFIXED, and the
+# first attempt prefixed it. `crates/ironclaw/src/client.rs::interpret_error` carries the error
+# envelope's `code`, so a rate limit normally arrives as `rate_limit...` and `rate.?limit` already
+# holds it — but its no-envelope branch puts `raw.body` into the text verbatim, and a proxy's own
+# `429 Too Many Requests` page carries the number and nothing else on this line. Requiring the
+# literal `HTTP 429` dropped exactly that case, and dropping it scores an environment failure as
+# FAIL: reporting a defect that is not there, which `dev/prove.sh` names as the worse error.
+#
+# So the number matches only where it is not inside a hex run. That excludes
+# `request 4297bd26b3b174a1` — the digest that produced the false BLOCKEDs — while keeping both
+# `HTTP 429: ` (`crates/records/src/append.rs`) and a bare proxy page.
+degraded()   { grep -qE "timed out (writing|reading)|rate limited|rate.?limit|(^|[^0-9a-f])429([^0-9a-f]|$)|service_unavailable|provider .* unavailable" <<<"$1"; }
 # The failing run's OWN last words, so a BLOCKED verdict names what stopped it. Same shape as
 # `dev/prove.sh`'s: the first `ironworks:` line is a success message, so taking the last non-empty
 # line is what makes a transient distinguishable from a regression.

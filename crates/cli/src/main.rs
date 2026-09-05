@@ -850,6 +850,96 @@ fn write_report(out: &mut impl Write, text: &str) -> Result<(), Exit> {
     }
 }
 
+/// Bytes of model-visible guidance that precede a comment-closing delimiter, if one is there.
+///
+/// [`Guidance::parse`] strips HTML comments, and HTML comments do not nest: a block ends at the
+/// **first** closing delimiter after its opener, never at the matching one. So operator notes that
+/// illustrate the guidance marker by writing it out in full end their own block at the example,
+/// and everything before that delimiter — the instructions, the paths, the commands — is already
+/// model-visible text, composed under the organization-guidance heading. That heading is the
+/// channel a persona is told governs its behaviour, rather than the record text it is told to
+/// treat as data, which is what makes this worse than untidy. It happened in production on
+/// 2026-09-04 and `deploy/README.md` records what it cost.
+///
+/// Nothing refuses it: the marker still binds, and the leaked notes push the content *over* the
+/// minimum rather than under it. No diff shows it either, because the file is correct-looking
+/// markdown. So the one command an operator is told to run before publishing says it out loud.
+///
+/// **Returns a count, never the text.** [`run_compose`] prints digests precisely so a tenant's own
+/// words stay off a terminal, out of a shell history and out of a pasted report; a warning about
+/// those words must not become the one path that prints them.
+fn leaked_note_bytes(content: &str) -> Option<usize> {
+    content.find("-->")
+}
+
+/// The marker a section of `fixtures/tenants/guidance.template.md` carries until it is written.
+///
+/// One spelling, in one place, because the template and this check are a single mechanism: the
+/// test below composes the shipped template and asserts it still trips, so renaming the marker in
+/// either half fails the suite rather than silently retiring the warning.
+const STUB_MARKER: &str = "TO BE WRITTEN";
+
+/// How many unwritten template stubs survive into model-visible guidance.
+///
+/// The template ships reusable method prose above its stubs, and that prose alone clears
+/// [`MIN_CONTENT`](ironworks_domain::composition). So a tenant who copies the template, edits the
+/// marker and publishes without filling anything in is refused by nothing: the minimum exists to
+/// catch exactly this — an empty brief served as a real one — and the shared prose defeats it.
+/// The stubs then compose under the organization-guidance heading, where a persona is told its
+/// instructions come from, telling a model what it was supposed to have been told.
+///
+/// A count rather than a refusal, for the same reason as [`leaked_note_bytes`]: a tenant may
+/// legitimately write this phrase, and refusing would stop a composition over prose. And a count
+/// rather than the text, because [`run_compose`] prints digests precisely so a tenant's own words
+/// stay off a terminal and out of a pasted report.
+fn unwritten_stub_count(content: &str) -> usize {
+    content.matches(STUB_MARKER).count()
+}
+
+/// Say out loud what model-visible guidance holds that its author probably did not intend.
+///
+/// # Why both commands, and only these two
+///
+/// Four places parse guidance. `compose` is advisory and says this because it is the command an
+/// operator is *told* to run before publishing — but being told is not a mechanism, and
+/// [`run_registry_publish_one`] is where a tenant is actually committed to being served. It
+/// already parses the guidance, so the check costs one call there.
+///
+/// [`boot`] and [`boot_tenant`] deliberately stay silent. They run once per serving cycle, so a
+/// warning is noise rather than news, and by the time either runs the composition is already
+/// serving — which is the thing the other two exist to prevent.
+///
+/// Never a refusal, in either caller. Guidance is a tenant's own prose: it may legitimately
+/// contain a delimiter, and `crates/domain/src/composition.rs::MIN_CONTENT` already refuses the
+/// case that is unambiguous. Stopping a publish over punctuation would be the more expensive
+/// error. And counts rather than the text, because both callers otherwise keep a tenant's words
+/// off a terminal and out of a pasted report.
+fn warn_guidance_hazards(command: &str, guidance: &Guidance) {
+    if let Some(bytes) = leaked_note_bytes(guidance.as_str()) {
+        eprintln!(
+            "{command}: WARNING model-visible guidance holds a comment-closing delimiter — a \
+             comment block ended early, and the {bytes} bytes before it compose into the prompt \
+             as organization guidance"
+        );
+        eprintln!(
+            "{command}: WARNING the usual cause is a marker written out in full inside the \
+             operator notes; remove the delimiter rather than the text after it"
+        );
+    }
+    let stubs = unwritten_stub_count(guidance.as_str());
+    if stubs > 0 {
+        eprintln!(
+            "{command}: WARNING model-visible guidance holds {stubs} unwritten template stub(s) \
+             — the shared method prose clears the minimum on its own, so nothing refuses a copy \
+             of the template that was never filled in"
+        );
+        eprintln!(
+            "{command}: WARNING write each section or delete its heading; a stub composes into \
+             the prompt as this organization's own guidance"
+        );
+    }
+}
+
 /// A dry melt: what this binary would compose for one tenant, fingerprinted.
 ///
 /// # Why this is a command
@@ -877,6 +967,7 @@ fn run_compose(args: &Args) -> Result<(), Exit> {
     // another service describes a composition that would never have served.
     let guidance =
         Guidance::parse(&guidance_text, &args.slug, &args.service).map_err(|x| e(x.to_string()))?;
+    warn_guidance_hazards("compose", &guidance);
 
     let composition = definition.composition();
     let alloy = ironworks_domain::melt(composition, &guidance, &ironworks_services::Heap)
@@ -1258,8 +1349,9 @@ fn run_registry_publish_one(
         .ok_or_else(|| e(format!("guidance path {} is not UTF-8", guidance_path.display())))?;
     let guidance_text = std::fs::read_to_string(&guidance_path)
         .map_err(|why| e(format!("cannot read guidance {}: {why}", guidance_path.display())))?;
-    Guidance::parse(&guidance_text, slug.as_str(), spec.service.as_str())
+    let guidance = Guidance::parse(&guidance_text, slug.as_str(), spec.service.as_str())
         .map_err(|why| e(why.to_string()))?;
+    warn_guidance_hazards("registry publish-one", &guidance);
     if definition.id() != &spec.service {
         return Err(e("the loaded service does not match the lifecycle service".into()));
     }
@@ -4396,6 +4488,75 @@ mod tests {
         };
         assert_eq!(err.code, USAGE);
         assert!(err.message.contains("--guidance is required"));
+    }
+
+    /// Both directions, because a check that fires on everything and a check that fires on
+    /// nothing are the same defect: this one has to see the leak the shipped template actually
+    /// produced *and* stay silent on guidance that is merely prose.
+    #[test]
+    fn compose_counts_notes_a_comment_block_leaked_and_stays_silent_otherwise() {
+        // The shape the template produced: an example marker inside the notes closed the block, so
+        // everything up to that delimiter was already model-visible.
+        let notes = "operator notes that were never meant to compose ";
+        let leaked = format!("{notes}--> \n\n# Client guidance\n\nAnswer only from the records.");
+        assert_eq!(
+            leaked_note_bytes(&leaked),
+            Some(notes.len()),
+            "the count must be the leaked prefix, which is what an operator has to remove"
+        );
+
+        // The positive control: guidance that never opened a block has nothing to report.
+        assert_eq!(
+            leaked_note_bytes("# Client guidance\n\nAnswer only from the supplied records."),
+            None
+        );
+    }
+
+    /// The counted bytes are the ones to delete, not the ones that follow. Getting this backwards
+    /// would report the tenant's real guidance as the leak and send an operator to cut it.
+    #[test]
+    fn the_count_is_the_prefix_to_remove_not_the_body_that_follows() {
+        let leaked = "abc--> the body";
+        assert_eq!(leaked_note_bytes(leaked), Some(3));
+    }
+
+    /// Both directions again: an unfilled template has to be seen, and a tenant who actually
+    /// wrote their guidance must not be told they did not.
+    #[test]
+    fn compose_counts_unwritten_stubs_and_stays_silent_on_written_guidance() {
+        let unfilled = "# Client guidance\n\n## Vocabulary\n\nTO BE WRITTEN — what this \
+                        organisation calls an account.\n\n## Scope\n\nTO BE WRITTEN — the rest.";
+        assert_eq!(unwritten_stub_count(unfilled), 2, "one per section left unwritten");
+
+        // The positive control: guidance whose sections were written reports nothing.
+        assert_eq!(
+            unwritten_stub_count(
+                "# Client guidance\n\n## Vocabulary\n\nAn account is a retained client."
+            ),
+            0
+        );
+    }
+
+    /// The template and [`STUB_MARKER`] are one mechanism, so the shipped template is what proves
+    /// it. Renaming the marker in either half fails here rather than retiring the warning quietly.
+    ///
+    /// It asserts *that* the template trips, not how many times: the section count is an editorial
+    /// choice that may legitimately change, and pinning it would fail a correct edit.
+    #[test]
+    fn the_shipped_guidance_template_trips_the_stub_warning() {
+        let path =
+            concat!(env!("CARGO_MANIFEST_DIR"), "/../../fixtures/tenants/guidance.template.md");
+        let text = std::fs::read_to_string(path).expect("the shipped guidance template");
+        let guidance = Guidance::parse(&text, "your-slug", "relationship-intelligence")
+            .expect("the template's own marker, so a copy of it composes the same way");
+
+        assert!(
+            unwritten_stub_count(guidance.as_str()) > 0,
+            "the template ships unwritten stubs in its model-visible body; if this stops holding, \
+             either the stubs left the visible body or the marker was renamed out of step"
+        );
+        // And the template must not itself carry the other defect this command warns about.
+        assert_eq!(leaked_note_bytes(guidance.as_str()), None);
     }
 
     /// No service this binary ships reaches a built-in tool.

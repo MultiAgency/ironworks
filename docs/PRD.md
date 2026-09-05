@@ -755,8 +755,9 @@ and `docs/experiments/README.md` is the record. The graders' own controls are
 
 `relay` handles **one cycle and exits** — that is what keeps every crash boundary a real process
 boundary. `dev/relay-loop.sh` supervises it and `deploy/rustworks-relay.service` runs that, with
-`Restart=always`. Both are committed; **no host is known to run either**, and
-`deploy/README.md` records that the systemd wrapping is the part not tested.
+`Restart=always`. Both are committed, and `multi-serve` runs them for one tenant,
+which has served and delivered a turn. `deploy/README.md` records what that establishes; nothing in
+this repository verifies it, because no automated check reaches that host.
 
 Upstream contract facts that bound any design here, each measured at the revision named in
 `DESIGN.md`:
@@ -917,9 +918,10 @@ below that gate on it refer back here rather than restating it. The requirement 
 > **No tenant's failure is observable by another tenant** — not in latency, not in delivery, not in
 > quota, not in whether their turn happens at all.
 
-Per-tenant journal and loop is the version where the seam's blast radius equals the runtime's, which
-means one boundary instead of two that can disagree. It is the recommended mechanism and it is not
-the requirement.
+ADR 0009 chooses a channel-credential-aligned per-tenant serving cell: one tenant's channel stream,
+adapter, one-entry registry, journal and one-cycle-at-a-time relay supervisor share a failure domain
+with that tenant's runtime. That is the mechanism by which the seam's blast radius equals the
+runtime's. It is a decision, not evidence that the mechanism is built.
 
 ### Must not break
 
@@ -945,11 +947,12 @@ compressed into one "multi-tenant" item, because they protect different failure 
 not prohibit a two-instance synthetic deployment used to measure those mechanisms; that test pair
 is required evidence, not an admitted tenant.
 
-**Open — availability.** The Target above states a requirement, not a design: *no tenant's failure
-is observable by another tenant.* Per-tenant journal and loop is the recommended mechanism and is
-not the requirement, and today's arrangement satisfies neither — one journal, one shared cursor,
-per the Target above. This is an availability gate on a second admitted client tenant (§23, step 5),
-not on synthetic test fixtures.
+**Decided, not built — availability.** ADR 0009 settles the mechanism without weakening the Target:
+*no tenant's failure is observable by another tenant.* Today's arrangement still satisfies neither
+the mechanism nor the property — it has one journal and one shared cursor, per the Target above.
+Implementation and measurement remain an availability gate on a second admitted client tenant
+(§23, step 5), not on synthetic test fixtures. The decision closes §I's single-poller cap once
+deployed; it does not accept that cap as a production risk.
 
 **Open — live deployment isolation proof.** The user unit, configuration preflight and two-client
 probe now encode the two independent gates described under Today. No deployment host is reachable
@@ -1411,28 +1414,41 @@ between Today and Target is the same distinction, and this table is where it is 
 
 | Criterion | State |
 |---|---|
-| a real private tenant operates end to end | **partial** — one tenant, the operator's own, has answered a real question about real records over a real channel. One turn is not an operating tenant, and nothing runs continuously |
+| a real private tenant operates end to end | **partial, and the remaining gap is duration rather than machinery.** One tenant answers over a real channel from a supervised loop: `multi-serve` runs `rustworks-relay` and `rustworks-telegram` for `relationship-demo`, which polled a real room, resolved scope server-side, composed over its records, answered from a confined member and delivered, leaving no unresolved turn. What is still missing is a tenant *operating* — days of traffic, not one turn. `dev/prove-host.sh` now verifies that host's units, live confinement and registry digest, but it observes no turn: the account of what was polled, composed, answered and delivered is still reported rather than checked |
 | tenant and audience scope are selected deterministically | **met** — §B-1 resolves org server-side; `route::resolve` is three-valued and refuses to resolve an ambiguity by picking |
 | only authorized context reaches the agent | **met** — `Ask` has no `org` field and no field for rendered text; `compile_fail` doctests hold that an unverified instance cannot build a turn at all |
 | secrets remain outside model-visible context | **met** — `CredentialRef` holds where a credential lives, never its value; the journal holds identifiers only |
-| reasoning over real business records stays grounded | **not established, and the reason has changed twice.** Four stability probes (`0022`, `0023`, beside `injection` 4/10 in `0019`) put no case on a stable verdict — but `0026` read every recorded failure and found **seven of fifty-nine are the model**, the rest the instrument, and `0028`'s held-out probe scored **9/10 against 10/10 in training**. The answers are better than the probes suggested, and the instrument is most of what the probes measured. The remaining caveat used to be that every correction moved a verdict upward; `0034` retired it by reading the fifty-six answers that *passed* and finding a leniency defect, so the graders are wrong in both directions and the asymmetry was an artefact of only ever searching one. **What is not established is what the criterion says: six defects were found in `absence_as_negative` alone, and a seventh in `ownership_default` by the first search run in the untried direction — so the grader is not yet an instrument a verdict can be quoted from, not because a defect is open but because the rate at which reading finds them is not the rate at which they exist** |
+| reasoning over real business records stays grounded | **not established, and the word that blocks it is "real."** On the book that exists, this is measured. `0026` read all fifty-nine recorded answers at one composition over one ten-record book: thirty-seven pass, and of the twenty-two that do not, **seven are the model, fourteen the instrument, one is ambiguous**. `0028` held out a sample and scored **9/10 against 10/10 in training**. Four stability probes (`0022`, `0023`, beside `injection` 4/10 in `0019`) put no case on a stable verdict, and `0021` scored a composition that never moved three different ways. Every grader defect found has been corrected — `0024`–`0027`, `0029`, `0030`, `0034`, `0038` — each with two-sided controls, and **none is open**; `0038` is the most recent and found its defect by measuring every rule's firing rate over 227 answers rather than by reading answers, which is why it found a rule that had never graded anything. **What is not established is the criterion's own word: the book is ten invented accounts, so nothing here measures transfer to a tenant's own records, and no further reading of this corpus can.** That is a gate a real tenant moves and a grader pass does not |
 | delivery survives expected failures and restarts | **met** — B1–B7 proven across real process restarts, asserting byte-identity of duplicates rather than counts |
 | no cross-tenant leakage occurs | **met at the boundaries measured** — §B-13 measured; `dev/prove-tenancy.sh` runs seven checks. §B-3 is the caveat that keeps this honest: an empty store passes every cross-org test, so each check carries a positive control |
 | human business authority remains intact | **met** — `Access` has no `Write` variant, and no operation widens a capability |
 
-Two of the eight are the ones to watch, and they fail differently. The first is blocked by something
-ordinary — the supervision is written and committed, and no host runs it; the host is reachable
-(operator, 2026-09-02), so this is scheduling rather than an unknown.
+Two of the eight are the ones to watch, and they fail differently. **The first is no longer blocked
+on anything anyone has to build.** The supervision runs on `multi-serve` and has served, so what
+separates *partial* from *met* is a tenant using it over time — which arrives by waiting and
+watching rather than by work. The honest caveat is that nothing here can see that host: every claim
+about it is reported, and the first automated check that reaches it would be worth more than another
+turn.
 
-**The fifth is blocked by what the graders have not been asked, not by a defect anyone has
-named.** Every defect found so far is corrected, most recently `0030`'s negated-inference frame and
-`0034`'s missing lead gate on `ownership_default`, each with the two-sided controls its finding
-specified. What this criterion is *not* blocked by is a shortage of validation: the corpus is one
-synthetic book drawn partly from real coordination patterns and partly invented (operator,
-2026-09-02), so transfer to real work is unmeasured — worth recording, not worth treating as the
-gate. **Six defects were found in `absence_as_negative` alone and a seventh in `ownership_default`,
-that one by the first search run in the other direction, and the tree argues the next exists; that is the
-work, and it is doable here.**
+**The fifth is blocked by the corpus, and this used to be written the other way round.** It said
+the gate was the instrument — that the grader was not yet something a verdict could be quoted from,
+"not because a defect is open but because the rate at which reading finds them is not the rate at
+which they exist." That sentence cannot be discharged by any amount of reading, which makes it a
+gate nothing satisfies rather than a criterion. It also named `0030` and `0034` as the most recent
+corrections after `0038` had already landed, which is what a claim does when nothing re-measures it.
+
+The instrument is a **standing obligation**, not the gate. The argument that another defect exists
+is still good and still specific — `absence_as_negative` alone accounted for six, the next turned up
+in `ownership_default` the moment anyone read the answers that *passed*, and `0038` found a third
+kind by asking which rules had never graded anything. Every search in a direction nobody had tried
+has returned something. That is a reason to keep searching whenever the instrument is touched; it is
+not a reason to withhold what has been measured.
+
+**What actually gates the criterion is its own first word.** The corpus is one synthetic book, drawn
+partly from real coordination patterns and partly invented (operator, 2026-09-02). No reading of
+invented accounts establishes grounding on real ones, so this moves when a tenant's own records go
+through the service and not before — which makes it a criterion §23's first track reaches, not its
+second.
 
 ---
 
@@ -1447,23 +1463,30 @@ What is not built, stated as of the tree this document sits in:
 - **Nothing provisions or deprovisions.** The models are complete and nothing executes them, with
   one exception: `ironworks lifecycle confine` applies confinement against a live runtime and
   re-measures it, so the `member_confined` step is executed today while the other six are not.
-- **No host is known to run the serving loop.** `dev/relay-loop.sh` and
-  `deploy/rustworks-relay.service` are both written and committed; what is missing is an install and
-  a live proof, not the supervision.
-- **One tenant is live**, the operator's own, and it has answered one real question about real
-  records.
+- **The serving loop runs on one host, and most of what this repository says about it is now
+  measured.** `multi-serve` runs `rustworks-relay` and `rustworks-telegram` for one tenant, which
+  has answered and delivered. `dev/prove-host.sh` has reached that host read-only for the first
+  time and scored 7 PASS, 1 FAIL, 0 BLOCKED: the units, live confinement and registry digest
+  measured as recorded, and the one failure was the proof's own expected value rather than anything
+  the host reported. The org's account count and the channel are still operator-reported, no check
+  reaches them, and each further run is an operator decision taken in the moment. `DESIGN.md`
+  "Status" records the run and what it did not establish.
+- **Two tenants exist and neither has been used in anger.** The operator's own org has answered one
+  real question about real records from the workstation; `relationship-demo` has answered on the
+  host. One turn each is not a tenant operating.
 - **No number from the evaluation suite is a pass rate, and the instrument is most of what the
   probes measured.** Three seven-case runs at a composition that never moved scored 6/7, 4/7 and
-  3/7; every case has both passed and failed; `0026` read every recorded failure and found seven of
-  fifty-nine are the model, the rest grader defects; `0028` held out a sample that scored 9/10
-  against 10/10 in training. **No grader defect is currently open** — `0030` and `0034` were the
-  last two and both are corrected with two-sided controls — but `absence_as_negative` alone
-  accounted for six, and the one after it turned up in a different rule the moment anyone searched
-  in the untried direction.
+  3/7; every case has both passed and failed; `0026` read all fifty-nine recorded answers and found
+  thirty-seven pass, seven of the twenty-two failures the model's and fourteen the instrument's;
+  `0028` held out a sample that scored 9/10 against 10/10 in training. **No grader defect is
+  currently open** — `0038` was the last and is corrected with two-sided controls — but
+  `absence_as_negative` alone accounted for six, the one after it turned up in a different rule the
+  moment anyone searched in the untried direction, and `0038` itself came from a third kind of
+  search. Every direction tried has returned something, so assume the next one does too.
   `docs/experiments/README.md` carries the arc in full, one line per measurement, and §21's fifth
-  criterion is where this bears on the product. What matters here: **the grader is not yet an
-  instrument a verdict can be quoted from**, because the rate at which reading finds defects is not
-  the rate at which they exist.
+  criterion is where this bears on the product. What matters here: **these numbers describe one
+  synthetic book at one composition**, and what they cannot describe is a real tenant's records — a
+  limit no further reading of this corpus removes.
 - **`writes` is `Access::None` everywhere**, and the contribution path in §11 is built — grammar,
   proposal buffer, `/confirm` and the single append route. **What does not exist is any measurement
   that a room's notes accumulate into a usable book**, which is the claim §11's Target actually
@@ -1519,23 +1542,29 @@ the milestone after, and §3's horizon is the right long-range target rather tha
 the nearer one matters because signup, the console and guided authoring sit in the trailing paragraph
 below, and a reader who takes §3's horizon as this list's destination will expect them here.
 
-1. **Install and prove the serving loop, single-tenant only.** `dev/relay-loop.sh` and
-   `deploy/rustworks-relay.service` are written and committed; what is missing is an install and a
-   live proof. **The host is reachable** (operator, 2026-09-02), so this is schedulable work rather
-   than an unknown, and it is the shortest path to moving §21's first criterion.
-   Nothing about multi-tenancy matters while nothing serves continuously — but the cursor is
-   shared across every admitted tenant (§13, step 5), so this step is safe for one client and
-   unsafe for two client relays. Synthetic relays used to measure step 5 are not prohibited.
+1. **Run the serving loop for one client and no more.** The supervision is
+   `deploy/rustworks-relay.service` over `dev/relay-loop.sh`, and `deploy/README.md` owns the
+   procedure. The constraint that makes this a step rather than a detail: **the cursor is shared
+   across every admitted tenant** (§13, step 5), so one client relay is safe and two are not.
+   Synthetic relays used to measure step 5 are not prohibited.
 2. **Decide what the page publishes.** *Parallel — this gates a claim, not a tenant.* The grader
    work this step used to ask for is done: `0024` settled the port, `0025`, `0027` and `0029`
-   corrected the four rule defects and the ordering defect, `0026` established that seven of
-   fifty-nine failures are the model, and `0028` held out a sample that scored 9/10. `0030` and
-   `0034` closed the last two named defects. `stored_answers` keeps the offline half rigorous by
-   refusing to let a correction move a recorded verdict silently, and `0016` remains the precedent
-   for why the arithmetic cannot be redone in prose. `0034` also removed the reason to defer this
-   on grounds of bias: the upward-only asymmetry was a one-directional search, and reading the other
-   direction found a leniency defect. **What is left is one judgement** — what the page can honestly
-   show — and the answer is likely a spread rather than a sample.
+   corrected the four rule defects and the ordering defect, `0026` read all fifty-nine recorded
+   answers and separated the seven the model owns from the fourteen the instrument did, and `0028`
+   held out a sample that scored 9/10 against 10/10 in training. `0030`, `0034` and `0038` closed the
+   last three named defects, `0038` by measuring firing rates rather than reading answers.
+   `stored_answers` keeps the offline half rigorous by refusing to let a correction move a recorded
+   verdict silently, and `0016` remains the precedent for why the arithmetic cannot be redone in
+   prose. `0034` also removed the reason to defer this on grounds of bias: the upward-only asymmetry
+   was a one-directional search, and reading the other direction found a leniency defect.
+
+   **The one judgement left is settled by §22 rather than by another measurement.** What the page can
+   honestly show is the spread and the defect history together — the instability, the split between
+   model and instrument, the held-out result, and the list of corrections with none open. A single
+   clean figure would be the less credible page, not the more: §22 publishes the negative space
+   because a buyer handing over their relationship record selects for vendors who state limits
+   unprompted. The page is therefore reachable now, and what it must not do is mint a pass rate,
+   which is the one thing `docs/experiments/README.md` says no number here is.
 3. **Resolve the operator-only binding deferral** (`docs/ACCOUNT-COORDINATION.md`). It ends before
    either of two production events, and admitting a second client tenant is one of them. It does not
    gate step 4's synthetic deployment pair.

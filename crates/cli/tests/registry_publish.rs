@@ -157,6 +157,59 @@ fn expected_candidate(guidance: &Path) -> Vec<u8> {
     bytes
 }
 
+/// Guidance a tenant is committed to serving, checked where the commitment happens.
+///
+/// `compose` warned about this already, but an operator reaches production through `publish-one`,
+/// and being *told* to run the advisory command is not a mechanism. Non-fatal on purpose: the
+/// publish must still succeed, because the alternative is refusing a tenant over prose.
+#[test]
+fn publishing_unwritten_template_stubs_warns_without_refusing() {
+    let dir = Dir::new();
+    let (store_path, registry_path, guidance_path) = prepared(&dir);
+    let stubbed = format!(
+        "<!-- tenant-guidance v1 slug: local-name service: relationship-intelligence -->\n\
+         # Guidance\n\n## Vocabulary\n\nTO BE WRITTEN — what this organisation calls an \
+         account.\n\n## Prohibited claims & actions\n\nTO BE WRITTEN — what it must never \
+         claim.\n{}",
+        "Answer only from supplied records and name every unresolved contradiction.\n".repeat(5)
+    );
+    std::fs::write(&guidance_path, stubbed).unwrap();
+    let (records, records_thread) = serve("200 OK", r#"{"org":"measured-org","accounts":[]}"#);
+    let (runtime, runtime_thread) =
+        serve("200 OK", r#"{"tenant_id":"runtime-name","user_id":"user_observed"}"#);
+
+    let output = publish(&store_path, &registry_path, &guidance_path, &records, &runtime);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "the warning must not refuse the publish: {stderr}");
+    assert!(
+        stderr.contains("registry publish-one: WARNING")
+            && stderr.contains("2 unwritten template stub(s)"),
+        "publish-one must name the count, and name itself as the command: {stderr}"
+    );
+    // The tenant's own words must not be the price of the warning.
+    assert!(!stderr.contains("what this organisation calls an account"), "{stderr}");
+    let _ = records_thread.join();
+    let _ = runtime_thread.join();
+}
+
+/// The positive control: a check that fires on everything is the same defect as one that fires on
+/// nothing, and here the cost of a false fire is an operator ignoring a real one.
+#[test]
+fn publishing_written_guidance_warns_about_nothing() {
+    let dir = Dir::new();
+    let (store_path, registry_path, guidance_path) = prepared(&dir);
+    let (records, records_thread) = serve("200 OK", r#"{"org":"measured-org","accounts":[]}"#);
+    let (runtime, runtime_thread) =
+        serve("200 OK", r#"{"tenant_id":"runtime-name","user_id":"user_observed"}"#);
+
+    let output = publish(&store_path, &registry_path, &guidance_path, &records, &runtime);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(output.status.success(), "{stderr}");
+    assert!(!stderr.contains("WARNING"), "written guidance must warn about nothing: {stderr}");
+    let _ = records_thread.join();
+    let _ = runtime_thread.join();
+}
+
 #[test]
 fn publish_and_rollback_are_accepted_by_the_serving_registry_loader() {
     let dir = Dir::new();

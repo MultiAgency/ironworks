@@ -103,3 +103,21 @@ count, not an envelope size. A number in a document is true exactly as long as s
   harness can invent a match *or* invent a difference, and both are the same defect (§K-8, §F-14).
 - **Verify before you edit.** This tree is often edited while a pass is reading it. Match on
   content, not on a line number you read a minute ago.
+
+## What costs something to run
+
+Most of `dev/` is free and repeatable. These are not, and each one's own header carries the detail —
+read it before running, not after.
+
+- **`dev/prove-confinement.sh` and `dev/prove-cutover.sh` each spend a member.** Approval-off is
+  one-way (§L-9). Both mint their own rather than borrowing the probe's, so the stack stays reusable
+  across runs — but the member is gone either way, and `prove-cutover.sh` also needs a model key.
+- **`dev/prove-boot.sh` destroys the probe**, because a fresh volume requires a fresh volume.
+- **`dev/prove-host.sh` reaches a live host that serves a real tenant.** It is read-only, and it
+  refuses to run until it is told the route rather than carrying one — its header says why. Every
+  run there is the operator's decision in the moment, not once. `deploy/README.md` is the procedure.
+- **Tenant guidance is model-visible, and its operator notes are one delimiter away from the
+  governing channel.** HTML comments do not nest, so a comment-closing sequence written inside the
+  notes ends the block early and composes everything before it into the prompt as the
+  organization's own instructions. This happened in production. `fixtures/tenants/guidance.template.md`
+  carries the rule and the incident; `ironworks compose` now warns on the shape.

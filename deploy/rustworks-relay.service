@@ -1,12 +1,19 @@
 [Unit]
 # The supervisor: one `relay` process per cycle, in series, forever.
 #
-# It depends on the adapter and the store but deliberately does NOT fail when they are down —
-# relay-loop.sh backs off and retries, because the recovery for a cycle that could not reach
-# something is the next cycle, and the journal makes that safe.
+# It depends on the adapter but deliberately does NOT fail when it is down — relay-loop.sh backs
+# off and retries, because the recovery for a cycle that could not reach something is the next
+# cycle, and the journal makes that safe.
+#
+# It names no record store. A tenant's store is a per-tenant credential and endpoint in the
+# registry this unit already passes as --registry, so naming one here asserted a fact the unit
+# cannot know. It used to name `rustworks-devstore.service`, which made every relay pull up the
+# synthetic store whether or not anything read it: measured 2026-09-04 on a host serving from the
+# Account Service, where `systemctl disable` did not hold because `Wants=` restarted it and
+# `systemctl mask` refused while the unit file was installed.
 Description=Rust IronWorks relay loop (one process per cycle)
-After=network-online.target rustworks-telegram.service rustworks-devstore.service
-Wants=rustworks-telegram.service rustworks-devstore.service
+After=network-online.target rustworks-telegram.service
+Wants=rustworks-telegram.service
 
 [Service]
 Type=simple

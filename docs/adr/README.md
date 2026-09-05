@@ -19,6 +19,7 @@ Each file carries `status` in frontmatter so the set can be read without opening
 | [`0006`](0006-derive-the-channel-offset-rather-than-store-it.md) | Derive the channel offset rather than store it | accepted |
 | [`0007`](0007-flushed-stdout-settles-direct-delivery.md) | Treat flushed stdout as direct-turn delivery | accepted |
 | [`0008`](0008-single-tenant-deployment-multi-tenant-code.md) | Deploy one seam per tenant; keep the code multi-tenant | adopted for the sandbox-backed deployment, scope narrowed |
+| [`0009`](0009-align-the-serving-cell-with-one-tenant-channel-stream.md) | Align one tenant's serving cell with one channel stream | accepted |
 
 ## What each one turns on
 
@@ -27,7 +28,8 @@ Each file carries `status` in frontmatter so the set can be read without opening
   each answers one part of keeping that distinction decidable.
 - **0003 and 0006** are about not trusting a convenience the runtime offers: an extension field for
   structured context, and a stored offset that only looks simpler than deriving one.
-- **0001 and 0008** are the scope decisions. `0001`'s framing — replacement rather than fresh
+- **0001, 0008 and 0009** are the scope decisions. `0001`'s framing — replacement rather than fresh
   product — was itself superseded once parity with the Python implementation stopped being the
-  goal, and `docs/PRD.md` §1 states the purpose that replaced it.
+  goal, and `docs/PRD.md` §1 states the purpose that replaced it. `0009` makes `0008` mechanical by
+  aligning the tenant process and journal with the channel credential's single cursor stream.
 - **0007** settles what counts as delivery when there is no channel to deliver into.
