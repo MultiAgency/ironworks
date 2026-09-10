@@ -20,7 +20,7 @@ about the surface.
 
 ## The source, at `4cb47cfaf3`
 
-`crates/product/ironclaw_openai_compat/src/responses.rs:25-27` carries both fields:
+`ironclaw@4cb47cfaf3/crates/product/ironclaw_openai_compat/src/responses.rs:25-27` carries both fields:
 
 ```rust
 pub tools: Option<Vec<serde_json::Value>>,
@@ -94,7 +94,7 @@ only.
 
 **Not established, and it is the one that would gate a deployment.** The probe runs the
 `production` profile. A served deployment runs `hosted-single-tenant-volume-sandboxed`
-(`deploy/rustworks-ironclaw@.service`), and port wiring is a composition-layer decision that the
+(`deploy/ironworks-ironclaw@.service`), and port wiring is a composition-layer decision that the
 profile may or may not carry. **Do not read this run as "external tools are available in
 production."** It says the probe has them.
 

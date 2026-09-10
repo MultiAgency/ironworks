@@ -11,7 +11,11 @@ publish = false
 # whatever the host happens to have.
 [dependencies]
 ironworks-domain = { path = "../domain" }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+ironworks-store = { path = "../store" }
+rusqlite = { version = "0.40.2", features = ["backup", "bundled"] }
+# One SHA-256 in the workspace. `sha2` is already in the lockfile, reached through `ironworks-domain`
+# above, so naming it here adds no transitive dependency — see `src/digest.rs`.
+sha2 = { workspace = true }
 thiserror = { workspace = true }
 
 [lints]

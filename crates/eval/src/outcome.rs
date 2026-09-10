@@ -92,9 +92,18 @@ pub fn no_model(stderr: &str) -> bool {
 }
 
 /// True when the turn outran the runtime's synchronous window.
+///
+/// The phrases are `ironworks_ironclaw::Cause`'s own words for its two timeout variants, lowercased
+/// — `SendTimeout` renders "timed out writing the request" and `ReceiveTimeout` "timed out awaiting
+/// the response". This matched `reading` for the second, which nothing has ever emitted, so a
+/// receive timeout — the common one, and the whole reason `needs_journal_recovery` exists — fell
+/// through to the generic exit-code arm and was reported without its cause. `crates/eval` cannot
+/// depend on `crates/ironclaw` to say this in types; the agreement is held instead by
+/// `crates/ironclaw/src/classify.rs::the_shell_agrees_about_which_causes_block_a_measurement`,
+/// which pins the same words for `dev/lib.sh`.
 pub fn turn_timeout(stderr: &str) -> bool {
     let s = stderr.to_lowercase();
-    s.contains("timed out writing") || s.contains("timed out reading")
+    s.contains("timed out writing") || s.contains("timed out awaiting")
 }
 
 /// True only when **another invocation must adopt the same journalled logical turn**.
@@ -229,6 +238,10 @@ mod tests {
     fn recovery_is_distinguished_from_retry() {
         // Recovery: the turn ran and its answer must be adopted from the journal.
         assert!(needs_journal_recovery("ironworks: timed out writing the request"));
+        // The receive timeout, in `Cause::ReceiveTimeout`'s own words. This is the common one —
+        // the runtime gives up waiting at ~30s while the turn keeps running — and it was the case
+        // this predicate missed, because it matched "timed out reading", which nothing emits.
+        assert!(needs_journal_recovery("ironworks: timed out awaiting the response"));
         assert!(needs_journal_recovery(
             "a turn MAY have run — do NOT retry; recover it from the journal"
         ));

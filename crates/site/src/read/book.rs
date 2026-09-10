@@ -105,8 +105,12 @@ pub fn year_of(book: &Book) -> Option<String> {
     let years: std::collections::BTreeSet<&str> = book
         .iter()
         .flat_map(|r| &r.activities)
-        .filter(|a| a.date.len() >= 4)
-        .map(|a| &a.date[..4])
+        // `get`, not `[..4]`. `len()` counts **bytes** and the slice cuts on them, so a date
+        // beginning with a multibyte character panics — and `crates/graders/src/text.rs` and
+        // `crates/devstore/src/main.rs::percent_decode` both carry a written lesson about exactly
+        // this assumption. That the book is a trusted fixture today is a property of the data, not
+        // of this function.
+        .filter_map(|a| a.date.get(..4))
         .collect();
     (years.len() == 1).then(|| years.iter().next().unwrap().to_string())
 }
@@ -297,7 +301,7 @@ mod tests {
 
     #[test]
     fn the_real_book_loads_and_indexes_its_activities() {
-        let book = load(&ironworks_evidence::root().join("fixtures/account-coordination/book"))
+        let book = load(&crate::test_root().join("fixtures/account-coordination/book"))
             .expect("the coordination book is here");
         assert_eq!(book.len(), 10);
         assert!(book.iter().any(|r| r.id == "NC-003"), "the contradiction record is in the book");

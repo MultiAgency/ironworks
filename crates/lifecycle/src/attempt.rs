@@ -155,7 +155,7 @@ pub struct Measurement {
 impl Measurement {
     /// Run one assessment over one bound subject, policy, catalogue and approval value.
     ///
-    /// **The only constructor**, and it takes raw inputs rather than a finished
+    /// **The only public constructor**, and it takes raw inputs rather than a finished
     /// [`ConfinementFacts`] and `Vec<Drift>`. That is the difference between a value whose drift
     /// provably belongs to its facts and a value where a caller could pair a clean catalogue with
     /// somebody else's drift list.
@@ -166,15 +166,15 @@ impl Measurement {
         locked: &BTreeSet<String>,
         auto_approve: bool,
         at: &ObservedAt,
-    ) -> Self {
+    ) -> Result<Self, BlockedReason> {
         let (facts, drift) =
-            assess_parts(policy, bound.expected(), observed, locked, auto_approve, at.as_str());
-        Self {
+            assess_parts(policy, bound.expected(), observed, locked, auto_approve, at.as_str())?;
+        Ok(Self {
             catalogued: facts.catalogued,
             reachable: facts.reachable,
             auto_approve: facts.auto_approve,
             drift,
-        }
+        })
     }
 
     pub fn catalogued(&self) -> usize {
@@ -303,7 +303,7 @@ impl ConfinementAttempt {
         Self { expected, at, reached: Reached::SubjectMismatch { authenticated } }
     }
 
-    /// The subject is ours, and the catalogue could not be read.
+    /// The subject is ours, and the catalogue could not produce a usable measurement.
     ///
     /// Infallible: [`BoundSubject`] already discharged the identity invariant, so there is nothing
     /// left to check and no way to pass a subject that was never compared.

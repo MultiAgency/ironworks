@@ -8,7 +8,7 @@ surface used by the isolated IronClaw control plane.
 - Runtime: IronClaw 1.4.0 at `4cb47cfaf3fbacd3a2f575a8da654a6542d5fdfe`.
 - Creation route: `POST /api/webchat/v2/admin/users`.
 - Product implementation:
-  `crates/product/ironclaw_assistant/src/admin_user_directory.rs::create_user` at that pin.
+  `ironclaw@4cb47cfaf3/crates/product/ironclaw_assistant/src/admin_user_directory.rs::create_user` at that pin.
 - Client contract: the create response returns `api_token` exactly once; the same pin's frontend
   explicitly reports that token re-issue for an existing user is not supported.
 - Installed control plane: an authenticated, read-only

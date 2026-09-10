@@ -41,7 +41,7 @@ use std::fmt;
 /// What is durably known about the outbound message for one turn.
 ///
 /// The variants are ordered by risk of client-visible duplication, which is the only ordering
-/// that matters when deciding whether a resend is safe. See [`DeliveryState::rank`].
+/// that matters when deciding whether a resend is safe. See `DeliveryState::rank`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeliveryState {
     /// No attempt has been made. The bottom of the lattice.

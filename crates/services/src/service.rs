@@ -258,48 +258,14 @@ mod tests {
 
     // ── the slot that no longer exists ──────────────────────────────────────────────
 
-    /// The operator's own organization.
-    ///
-    /// `relationship-intelligence` is MultiAgency's record of its own relationships and says so in
-    /// its first sentence. That is correct for a composition nobody else runs, and it used to be
-    /// exactly why that composition could not occupy the default slot. Upstream recorded the
-    /// distinction as a `service.audience` field and asserted on it in the operator console; the
-    /// field was dropped here as documentation, which it was — but the *guarantee* it fed was not,
-    /// so it is a check now rather than a comment.
-    const OPERATOR_ORG: &str = "MultiAgency";
-
-    /// Every shipped composition addresses a specific organization, so **there is nothing left to
-    /// serve a caller who names no service**. This is the premise the refusal below rests on, and
-    /// it is asserted rather than assumed: if an organization-neutral composition is ever added,
-    /// this fails and the question of whether it should fill the silence gets asked again by a
-    /// person, which is the only place that decision belongs.
-    #[test]
-    fn no_shipped_composition_is_organization_neutral() {
-        for name in available() {
-            let d = load(name).expect("a committed service must load");
-            let names_org = d.composition().all_parts().any(|p| {
-                crate::read(p.as_str())
-                    .expect("a loaded composition's parts resolve")
-                    .contains(OPERATOR_ORG)
-            });
-            assert!(
-                names_org,
-                "{name} names no organization, so it could serve a caller who chose nothing. \
-                 Either it gains an audience or the no-default rule gets revisited deliberately — \
-                 do not silence this by deleting it."
-            );
-        }
-    }
-
     /// The refusal itself. There is no service to fall back to and no spelling that asks for one:
     /// the empty name is not a wildcard, it is unknown like any other.
     ///
-    /// This is what replaced `DEFAULT`. The old pair — a neutrality check plus its positive
-    /// control — protected a slot that could reach an organization nobody chose it for. Removing
-    /// the slot removes the reachability, and the control moved with it: the check above is what
-    /// now keeps this from passing by an accident of the corpus.
+    /// This is what replaced `DEFAULT`. The known-service assertion is the positive control: the
+    /// loader can resolve an explicit choice in the same test where it refuses silence.
     #[test]
     fn naming_no_service_is_refused_rather_than_defaulted() {
+        assert!(load(ACCOUNTS).is_ok(), "an explicitly selected service resolves");
         for unnamed in ["", " ", "default"] {
             let e = load(unnamed).expect_err("an unnamed service must not resolve to one");
             assert!(

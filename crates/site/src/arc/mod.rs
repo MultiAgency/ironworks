@@ -61,7 +61,6 @@ pub fn build(root: &Path, suite_name: &str, since: &str) -> Result<Built, String
         probes: &probes,
         then: then.as_ref(),
         since,
-        guidance_rel: suite.guidance,
         guidance_moved: guidance_before != guidance_after,
         guidance_added: guidance_before.is_none(),
         head_rev: &head_rev,

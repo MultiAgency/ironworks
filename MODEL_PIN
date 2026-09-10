@@ -78,6 +78,28 @@ qwen/qwen3.5-397b-a17b  # TEE-attested via Chutes, verified end-to-end by NEAR A
 # turns against them succeed. Either the flag means something narrower than "usable" or it is
 # stale. Resolve before making a privacy claim to anyone outside this repo.
 #
+# ── A PIN IS NOT IN EFFECT UNTIL A RUNTIME IS TOLD ───────────────────────────────────────
+#
+# Measured 2026-09-07 on the served host: `model-policy check` reported
+# `selection_enabled=false, default_matches=false, exact_allowlist=false, allowed_count=0`. The
+# runtime had never been told about this pin, so every turn it served answered from IronClaw's own
+# default. Nothing was misreported — no document claimed the policy was enforced — but nothing
+# measured it either, and the file that calls itself a privacy claim was describing an intention.
+# `model-policy apply` corrected it and read the policy back exactly
+# (`docs/experiments/0056-the-served-host-was-never-running-the-pinned-model.md`).
+#
+# **It can drift back and nothing would say so.** `model-policy check` is a manual command on no
+# proof path: `dev/prove-host.sh` measures units, confinement, the registry digest and guidance
+# hazards, and not this. A runtime rebuilt, restored or replaced comes back with its own default
+# and serves. Until that check has a home, treat "the pin is applied" as a fact with a date on it
+# rather than a property of the deployment — and re-run `model-policy check` before repeating any
+# privacy claim that depends on it.
+#
+# What applying it establishes is also narrower than the pin's own reasoning above: it constrains
+# what may be REQUESTED. The command says so itself — "effective provider model and TEE execution
+# are not verified by this check" — and §G-2 records that the runtime reports the model as
+# "reborn" on retrieval, so a served turn is not auditable after the fact either.
+#
 # Context window: 128k. The alloy plus a whole-book envelope is ~29KB (~7k tokens) before the
 # runtime's own ~13k-token baseline, so a long chained thread will approach this. That is a
 # second, independent reason for the chain-breaking policy in DESIGN.md.

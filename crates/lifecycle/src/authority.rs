@@ -67,7 +67,7 @@ impl Authority {
     ///
     /// `TenantData` is the one that may not, and it is a deliberate product decision rather than
     /// an omission. The reference's compensator says so in its own output: the rows *"are NOT
-    /// removed here — run: ./deprovision.sh --execute --confirm <slug>"*. They are the tenant's
+    /// removed here — run: `./deprovision.sh --execute --confirm <slug>`"*. They are the tenant's
     /// business records; destroying them because a later step failed is worse than leaving them,
     /// and destructive removal belongs behind an explicit confirmation.
     pub fn reversible_by_compensation(self) -> bool {

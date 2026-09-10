@@ -113,7 +113,16 @@ mod tests {
     #[test]
     fn a_record_body_cannot_reach_the_page_as_markup() {
         // The property §A-1 depends on: an activity body is evidence to display, never markup to
-        // execute. This is the whole reason the generators never interpolate raw text.
+        // execute.
+        //
+        // **This tests the escaper, not the generators.** The sentence that used to end this
+        // comment — "this is the whole reason the generators never interpolate raw text" — is a
+        // claim about `crates/site`, and `esc` is opt-in at every interpolation there, so a
+        // `format!` that forgot one would leave this test green.
+        //
+        // `crates/site/src/read/render.rs::tests::no_field_of_a_book_or_an_answer_reaches_the_page_as_markup`
+        // is where that claim is actually checked: it renders a real case with the payload in
+        // every field a book and a transcript carry, and fails if any `esc` is dropped.
         let attacker = "<img src=x onerror=alert(1)>";
         assert!(!esc(attacker).contains('<'));
     }

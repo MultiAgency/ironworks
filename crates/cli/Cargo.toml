@@ -6,9 +6,21 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[lib]
+name = "ironworks_cli"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ironworks"
 path = "src/main.rs"
+
+[[bin]]
+name = "ironworks-deployment-proof"
+path = "src/deployment_proof.rs"
+required-features = ["synthetic-qualification"]
+
+[features]
+synthetic-qualification = []
 
 # The package is `ironworks-cli`; its operator-facing binary is simply `ironworks`.
 [dependencies]
@@ -23,7 +35,12 @@ ironworks-reconcile = { path = "../reconcile" }
 ironworks-proposals = { path = "../proposals" }
 ironworks-ironclaw = { path = "../ironclaw" }
 serde_json = { workspace = true }
+serde = { workspace = true }
 sha2 = { workspace = true }
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+
+[dev-dependencies]
+ironworks-testkit = { path = "../testkit" }
 
 [lints]
 workspace = true

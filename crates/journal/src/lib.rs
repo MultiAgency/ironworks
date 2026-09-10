@@ -48,7 +48,7 @@
 //! **not** live here. Whether the channel has been told to stop redelivering a question is a
 //! shared, cross-tenant fact, and it belongs to `ironworks-channel`.
 //!
-//! The two meet through exactly one method — [`TurnProgress::openness`], two values — so the
+//! The two meet through exactly one method — [`TurnProgress::openness`], three values — so the
 //! coordinator that owns the shared cursor can order work without acquiring any tenant's
 //! business context. See [`ironworks_domain::progress`] for why that trait is shaped the way it is.
 //!
@@ -57,9 +57,10 @@
 
 use ironworks_domain::{
     AttemptOutcome, ChannelRef, DeliveryState, IdempotencyKey, NonEmptyReason, Openness, OrgId,
-    PriorThread, Repair, ResponseId, Slug, SuppliedMark, ThreadPointer, ThreadScope, TurnProgress,
+    PriorThread, Repair, ReportedModel, ResponseId, Sha256Digest, Slug, SuppliedMark,
+    ThreadPointer, ThreadScope, TurnProgress, Utc,
 };
-use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -68,13 +69,18 @@ pub use digest::RequestDigest;
 
 /// The schema this implementation writes.
 ///
-/// There is no migration path and none is planned. A journal written by an earlier version is
-/// refused, loudly, by the version check in [`Journal::open`] — which is the same fail-closed
-/// behaviour an unknown *future* version gets, and for the same reason: a journal whose shape we
-/// cannot account for is one whose live conversations we must not guess at.
-const SCHEMA_VERSION: i64 = 6;
+/// Version 7 has one explicit migration: it gains the nullable `reported_model` column and no row
+/// is touched, so every turn it held reads [`ReportedModel::Absent`] — nothing was recorded, so
+/// nothing is claimed, and no evidence is fabricated.
+///
+/// Only that one step back migrates. Version 6 is refused on purpose — the same one-step policy
+/// applied a version later, not a new one: a v6 file also lacks the four confinement-attribution
+/// columns, which this migration does not add. Every other old or future version is refused
+/// because its semantics are not known to this build.
+pub const SCHEMA_VERSION: i64 = 8;
+const MIGRATABLE_SCHEMA_VERSION: i64 = 7;
 
-const SCHEMA: &str = "
+const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -113,7 +119,17 @@ CREATE TABLE IF NOT EXISTS turns (
     -- Why automatic processing stopped. Present exactly when the outcome is
     -- `operator_required`; it is the operator-visible alarm, so nothing may age it away and a
     -- row that has lost it is refused rather than read as a blank.
-    operator_reason TEXT
+    operator_reason TEXT,
+    profile_sha256 TEXT,
+    policy_sha256 TEXT,
+    catalogue_sha256 TEXT,
+    confinement_observed_at TEXT,
+    -- What the runtime said produced the turn, written when it was accepted, because a later
+    -- fetch answers with a placeholder instead (`ReportedModel`, §G-2). NULL is `Absent` — the
+    -- response claimed nothing — and is also what every row written before this column existed
+    -- says, which is the honest reading of those rows rather than a convenient one. The
+    -- placeholder is stored as itself, so a reader can tell not-recoverable from not-claimed.
+    reported_model TEXT
 );
 CREATE INDEX IF NOT EXISTS turns_outcome ON turns(outcome);
 -- One thread per CONVERSATION, not per tenant.
@@ -150,8 +166,19 @@ CREATE TABLE IF NOT EXISTS threads (
 );
 ";
 
+/// What `ironworks-store` needs to know about this file: its schema, where the version is
+/// recorded, and which version this implementation writes.
+const SCHEMA: ironworks_store::Schema =
+    ironworks_store::Schema { sql: SCHEMA_SQL, meta_table: "meta", version: SCHEMA_VERSION };
+
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
+    #[error("the journal snapshot at {path} could not be created: {source}")]
+    Snapshot {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("the journal at {path} could not be opened: {source}")]
     Open {
         path: String,
@@ -179,6 +206,12 @@ pub enum JournalError {
          would risk a live conversation."
     )]
     Version { found: i64, expected: i64 },
+    #[error(
+        "the journal's recorded schema version is {raw:?}, which is not a number. Refusing to \
+         read it as 'no version recorded': that arm stamps this implementation's version onto a \
+         database whose shape was never established, and this file holds the record of which turns ran and which answers reached a client."
+    )]
+    UnreadableVersion { raw: String },
     #[error("no turn is journalled under this key")]
     NoSuchTurn,
     #[error(
@@ -283,6 +316,36 @@ pub struct TurnRecord {
     pub updated_at: String,
     /// What this turn chose before its body was built. Replayed on recovery, never re-decided.
     pub decision: Decision,
+    /// Short-lived confinement evidence attached when this logical turn was first accepted for
+    /// dispatch. `None` is an honest migrated or non-deployed turn, never implicit compliance.
+    pub attribution: Option<CapabilityAttribution>,
+    /// What the runtime reported running this turn, as it said so on acceptance. A migrated row
+    /// reads [`ReportedModel::Absent`], which is true of it: nothing was recorded, so nothing is
+    /// claimed.
+    pub reported_model: ReportedModel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CapabilityAttribution {
+    pub profile_sha256: Sha256Digest,
+    pub policy_sha256: Sha256Digest,
+    pub catalogue_sha256: Sha256Digest,
+    pub observed_at: Utc,
+}
+
+/// Every value that distinguishes an attributed new-turn admission.
+pub struct AttributedAdmission<'a> {
+    pub retrieved_at: &'a str,
+    pub digest: &'a RequestDigest,
+    pub decision: &'a Decision,
+    pub attribution: &'a CapabilityAttribution,
+    pub now: &'a Utc,
+}
+
+struct AdmissionEvidence<'a> {
+    decision: &'a Decision,
+    attribution: Option<&'a CapabilityAttribution>,
+    now: &'a Utc,
 }
 
 impl TurnRecord {
@@ -400,34 +463,44 @@ pub enum Recovery {
 /// its outcome column says. Reading the axes in the other order is how a delivered answer gets
 /// re-driven as an incomplete turn.
 pub fn recover(record: &TurnRecord) -> Recovery {
-    if let TurnOutcome::OperatorRequired { reason, response } = &record.outcome {
-        return Recovery::OperatorRequired { reason: reason.clone(), response: response.clone() };
-    }
-    match record.delivery {
-        DeliveryState::Delivered => return Recovery::Settled { delivery: record.delivery },
-        DeliveryState::KnownUnsent | DeliveryState::Uncertain { .. } => {
-            return Recovery::ReconcileDelivery {
+    // One match on the pair, in precedence order, and **that is what removes the
+    // `unreachable!`**. This was three passes — an `if let` for the alarm, a `match` on delivery,
+    // then a `match` on the outcome — and the third could not name `OperatorRequired` as anything
+    // but impossible, asserting in prose ("decided first") what the first pass had done twelve
+    // lines above. Matching `(outcome, delivery)` lets the compiler see the same thing: the
+    // wildcard in the first arm covers `(OperatorRequired, Pending)`, so no arm is left over.
+    //
+    // The order is the precedence and is load-bearing in both places it matters. An **alarm
+    // outranks delivery evidence**: a turn an operator has to look at is not settled by having
+    // been delivered. And `Delivered` outranks the outcome: delivery is terminal, so a completed
+    // turn that reached a client is settled rather than re-driven.
+    match (&record.outcome, record.delivery) {
+        (TurnOutcome::OperatorRequired { reason, response }, _) => {
+            Recovery::OperatorRequired { reason: reason.clone(), response: response.clone() }
+        }
+        (_, DeliveryState::Delivered) => Recovery::Settled { delivery: record.delivery },
+        (_, DeliveryState::KnownUnsent | DeliveryState::Uncertain { .. }) => {
+            Recovery::ReconcileDelivery {
                 delivery: record.delivery,
                 repair: record.delivery.repair(),
                 response: record.outcome.response().cloned(),
-            };
+            }
         }
-        DeliveryState::Pending => {}
-    }
-    match &record.outcome {
-        TurnOutcome::NotSubmitted => Recovery::Dispatch {
+        (TurnOutcome::NotSubmitted, DeliveryState::Pending) => Recovery::Dispatch {
             key: record.key.clone(),
             retrieved_at: record.retrieved_at.clone(),
         },
-        TurnOutcome::SubmittedUnknown => Recovery::ReplayIdentical {
+        (TurnOutcome::SubmittedUnknown, DeliveryState::Pending) => Recovery::ReplayIdentical {
             key: record.key.clone(),
             retrieved_at: record.retrieved_at.clone(),
             expect: record.request_digest.clone(),
         },
-        TurnOutcome::Accepted { response } => Recovery::Fetch { response: response.clone() },
-        TurnOutcome::Completed { response } => Recovery::Deliver { response: response.clone() },
-        // Answered above, before delivery evidence was consulted.
-        TurnOutcome::OperatorRequired { .. } => unreachable!("decided first"),
+        (TurnOutcome::Accepted { response }, DeliveryState::Pending) => {
+            Recovery::Fetch { response: response.clone() }
+        }
+        (TurnOutcome::Completed { response }, DeliveryState::Pending) => {
+            Recovery::Deliver { response: response.clone() }
+        }
     }
 }
 
@@ -443,51 +516,73 @@ impl std::fmt::Debug for Journal {
     }
 }
 
-/// A store that cannot be read is either one that is not there and could not be made, or one
-/// whose bytes are not a database. The second needs a different sentence: that file may hold
-/// state nothing else has, so the operator instruction is to preserve it rather than clear it
-/// and retry. Collapsing the two is how a recoverable store gets deleted by someone following
-/// the obvious remedy for "could not be opened".
-fn opened(path: &Path, source: rusqlite::Error) -> JournalError {
-    if matches!(&source, rusqlite::Error::SqliteFailure(e, _)
-        if e.code == rusqlite::ErrorCode::NotADatabase)
-    {
-        return JournalError::NotADatabase { path: path.display().to_string() };
+/// An open failure, as the sentence an operator has to act on.
+///
+/// A store that cannot be read is either one that is not there and could not be made, or one whose
+/// bytes are not a database. The second needs a different sentence: that file may hold state
+/// nothing else has, so the operator instruction is to preserve it rather than clear it and retry.
+/// Collapsing the two is how a recoverable store gets deleted by someone following the obvious
+/// remedy for "could not be opened".
+///
+/// `ironworks-store` runs the protocol and returns a cause carrying no path and no prose, because
+/// the three crates that share it keep three different files and the wording is the part that
+/// says which one this is. This is that translation, and it is the only thing about opening a
+/// journal that is not shared.
+fn opened(path: &Path, why: ironworks_store::OpenFailure) -> JournalError {
+    use ironworks_store::OpenFailure as F;
+    let path = path.display().to_string();
+    match why {
+        F::Open(source) => JournalError::Open { path, source },
+        F::NotADatabase => JournalError::NotADatabase { path },
+        F::Exposed(source) => JournalError::Exposed { path, source },
+        F::UnreadableVersion { raw } => JournalError::UnreadableVersion { raw },
+        F::Version { found } => JournalError::Version { found, expected: SCHEMA_VERSION },
+        F::Sqlite(source) => JournalError::Sqlite(source),
     }
-    JournalError::Open { path: path.display().to_string(), source }
 }
 
 impl Journal {
+    /// The connection, whatever a previous panic left behind.
+    ///
+    /// `lock().expect("journal lock")` opened 10 methods, and a poisoned mutex made every one of them
+    /// abort — inside a store whose error enum exists to fail closed and whose whole subject is
+    /// which turns ran and which answers reached a client. Poisoning means *some other* thread panicked while holding this; the
+    /// data behind it is a SQLite connection, which has its own transactional integrity and is not
+    /// left half-written by a panic in Rust code. Taking the guard is therefore the honest
+    /// recovery, and it is one documented decision rather than 10 undocumented ones.
+    fn locked(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Copy a transactionally consistent view into a new owner-only SQLite file.
+    ///
+    /// SQLite's online backup API, rather than copying the database and its WAL, makes this safe
+    /// while a relay is writing. An existing destination is never replaced.
+    pub fn snapshot_to(&self, destination: impl AsRef<Path>) -> Result<(), JournalError> {
+        let destination = destination.as_ref();
+        let source = self.locked();
+        ironworks_store::snapshot_to(&source, destination).map_err(|why| match why {
+            ironworks_store::SnapshotFailure::Reserve(source) => {
+                JournalError::Snapshot { path: destination.display().to_string(), source }
+            }
+            ironworks_store::SnapshotFailure::Sqlite(source) => JournalError::Sqlite(source),
+        })
+    }
+
     /// Open for writing, creating the schema if absent.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalError> {
         let path = path.as_ref();
-        let conn = Connection::open(path)
-            .map_err(|source| JournalError::Open { path: path.display().to_string(), source })?;
-        // Before the schema, so a file that is both readable and non-empty never exists.
-        ironworks_domain::restrict_to_owner(path)
-            .map_err(|source| JournalError::Exposed { path: path.display().to_string(), source })?;
-        // The first statement is where a file that is not a database says so: `open` itself is
-        // lazy and succeeds against any path it can touch.
-        conn.pragma_update(None, "journal_mode", "WAL").map_err(|e| opened(path, e))?;
-        // A crash test that survives fsync is the only kind worth writing.
-        conn.pragma_update(None, "synchronous", "FULL")?;
-        conn.execute_batch(SCHEMA)?;
-        let found: Option<i64> = conn
-            .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .optional()?
-            .and_then(|v| v.parse().ok());
-        match found {
-            None => {
-                conn.execute(
-                    "INSERT INTO meta(key,value) VALUES('schema_version',?1)",
-                    params![SCHEMA_VERSION.to_string()],
-                )?;
+        let conn = ironworks_store::open_durable(path, SCHEMA, |tx, found| {
+            if found != MIGRATABLE_SCHEMA_VERSION {
+                return Ok(false);
             }
-            Some(v) if v == SCHEMA_VERSION => {}
-            Some(found) => return Err(JournalError::Version { found, expected: SCHEMA_VERSION }),
-        }
+            // Additive and touching no row, inside the transaction `open_durable` owns — the one
+            // that also writes the new version. An interrupted migration therefore rolls back with
+            // the version still 7, and the next open re-runs it.
+            tx.execute_batch("ALTER TABLE turns ADD COLUMN reported_model TEXT;")?;
+            Ok(true)
+        })
+        .map_err(|why| opened(path, why))?;
         Ok(Self { conn: Mutex::new(conn), writable: true })
     }
 
@@ -495,23 +590,7 @@ impl Journal {
     /// journal even by mistake. Looking at production must not be able to change it.
     pub fn open_readonly(path: impl AsRef<Path>) -> Result<Self, JournalError> {
         let path = path.as_ref();
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
-            .map_err(|source| JournalError::Open { path: path.display().to_string(), source })?;
-        // Inspection must reject a journal this binary would refuse to serve. Without the
-        // version check, an old schema that happens to retain these columns could look healthy
-        // while carrying semantics this binary no longer understands.
-        let found: Option<i64> = conn
-            .query_row("SELECT value FROM meta WHERE key='schema_version'", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .optional()
-            .map_err(|source| opened(path, source))?
-            .and_then(|v| v.parse().ok());
-        match found {
-            Some(v) if v == SCHEMA_VERSION => {}
-            Some(found) => return Err(JournalError::Version { found, expected: SCHEMA_VERSION }),
-            None => return Err(JournalError::Version { found: -1, expected: SCHEMA_VERSION }),
-        }
+        let conn = ironworks_store::open_readonly(path, SCHEMA).map_err(|why| opened(path, why))?;
         Ok(Self { conn: Mutex::new(conn), writable: false })
     }
 
@@ -535,14 +614,55 @@ impl Journal {
         retrieved_at: &str,
         digest: &RequestDigest,
         decision: &Decision,
-        now: &str,
+        now: &Utc,
     ) -> Result<(), JournalError> {
+        self.begin_inner(
+            scope,
+            key,
+            retrieved_at,
+            digest,
+            AdmissionEvidence { decision, attribution: None, now },
+        )
+    }
+
+    pub fn begin_attributed(
+        &self,
+        scope: &ThreadScope,
+        key: &IdempotencyKey,
+        admission: AttributedAdmission<'_>,
+    ) -> Result<(), JournalError> {
+        self.begin_inner(
+            scope,
+            key,
+            admission.retrieved_at,
+            admission.digest,
+            AdmissionEvidence {
+                decision: admission.decision,
+                attribution: Some(admission.attribution),
+                now: admission.now,
+            },
+        )
+    }
+
+    fn begin_inner(
+        &self,
+        scope: &ThreadScope,
+        key: &IdempotencyKey,
+        retrieved_at: &str,
+        digest: &RequestDigest,
+        evidence: AdmissionEvidence<'_>,
+    ) -> Result<(), JournalError> {
+        let decision = evidence.decision;
+        let attribution = evidence.attribution;
+        let now = evidence.now;
         self.require_writable()?;
-        let conn = self.conn.lock().expect("journal lock");
+        let conn = self.locked();
         conn.execute(
             "INSERT INTO turns(key,instance,org,retrieved_at,request_digest,outcome,attempts,
-                               first_seen,updated_at,prev_response,carried_records)
-             VALUES(?1,?2,?3,?4,?5,'not_submitted',0,?6,?6,?7,?8)
+                               first_seen,updated_at,prev_response,carried_records,
+                               profile_sha256,policy_sha256,catalogue_sha256,
+                               confinement_observed_at)
+             VALUES(?1,?2,?3,?4,?5,'not_submitted',0,?6,?6,?7,?8,?9,?10,?11,?12)
              ON CONFLICT(key) DO NOTHING",
             params![
                 key.as_str(),
@@ -550,16 +670,20 @@ impl Journal {
                 scope.org().as_str(),
                 retrieved_at,
                 digest.as_str(),
-                now,
+                now.as_str(),
                 decision.previous.as_ref().map(ResponseId::as_str),
                 decision.carried,
+                attribution.map(|value| value.profile_sha256.as_str()),
+                attribution.map(|value| value.policy_sha256.as_str()),
+                attribution.map(|value| value.catalogue_sha256.as_str()),
+                attribution.map(|value| value.observed_at.as_str()),
             ],
         )?;
         Ok(())
     }
 
     /// A dispatch attempt provably never left. Still safe to send.
-    pub fn record_unsent(&self, key: &IdempotencyKey, now: &str) -> Result<(), JournalError> {
+    pub fn record_unsent(&self, key: &IdempotencyKey, now: &Utc) -> Result<(), JournalError> {
         self.set_outcome(key, &TurnOutcome::NotSubmitted, now)
     }
 
@@ -567,18 +691,36 @@ impl Journal {
     ///
     /// A one-way door: this is never walked back to `not_submitted`, because the evidence that
     /// produced it does not improve with time.
-    pub fn record_unknown(&self, key: &IdempotencyKey, now: &str) -> Result<(), JournalError> {
+    pub fn record_unknown(&self, key: &IdempotencyKey, now: &Utc) -> Result<(), JournalError> {
         self.set_outcome(key, &TurnOutcome::SubmittedUnknown, now)
     }
 
     /// The runtime named a response.
+    /// Accept a turn, recording what the runtime said produced it.
+    ///
+    /// The model is written **here** and nowhere else, because acceptance is the only moment it
+    /// exists: `model` is echoed on create and comes back as a placeholder on every later fetch
+    /// (§G-2), so a path that recorded it after the fact would record the placeholder. The two
+    /// writes share one transaction for the reason `record_operator_required` gives — a row whose
+    /// outcome moved without its evidence is a row that claims more than was measured.
     pub fn record_accepted(
         &self,
         key: &IdempotencyKey,
         response: &ResponseId,
-        now: &str,
+        reported_model: &ReportedModel,
+        now: &Utc,
     ) -> Result<(), JournalError> {
-        self.set_outcome(key, &TurnOutcome::Accepted { response: response.clone() }, now)
+        self.require_writable()?;
+        let outcome = TurnOutcome::Accepted { response: response.clone() };
+        let conn = self.locked();
+        let tx = conn.unchecked_transaction()?;
+        Self::set_outcome_in(&tx, key, &outcome, now)?;
+        tx.execute(
+            "UPDATE turns SET reported_model=?2 WHERE key=?1",
+            params![key.as_str(), reported_model.wire()],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     /// **The critical transaction.** The response id and the continuation pointer it produced
@@ -602,10 +744,10 @@ impl Journal {
         // with the store degraded supplied nothing, and must not erase what an earlier turn did
         // supply.
         supplied: Option<&SuppliedMark>,
-        now: &str,
+        now: &Utc,
     ) -> Result<(), JournalError> {
         self.require_writable()?;
-        let mut conn = self.conn.lock().expect("journal lock");
+        let mut conn = self.locked();
         let existing: Option<(String, Option<String>)> = conn
             .query_row(
                 "SELECT instance, response_id FROM turns WHERE key=?1",
@@ -629,7 +771,7 @@ impl Journal {
         let tx = conn.transaction()?;
         tx.execute(
             "UPDATE turns SET outcome='completed', response_id=?2, updated_at=?3 WHERE key=?1",
-            params![key.as_str(), pointer.response().as_str(), now],
+            params![key.as_str(), pointer.response().as_str(), now.as_str()],
         )?;
         // No conversation, no thread. A terminal one-shot has no room to continue in, and a row
         // it could never be asked for would be a pointer waiting to be handed to the wrong caller.
@@ -665,7 +807,7 @@ impl Journal {
                     alloy,
                     supplied.map(|m| m.catalog.as_str()),
                     supplied.map(|m| m.records),
-                    now
+                    now.as_str()
                 ],
             )?;
         }
@@ -679,11 +821,28 @@ impl Journal {
         &self,
         key: &IdempotencyKey,
         outcome: &TurnOutcome,
-        now: &str,
+        now: &Utc,
+    ) -> Result<(), JournalError> {
+        self.require_writable()?;
+        let conn = self.locked();
+        Self::set_outcome_in(&conn, key, outcome, now)
+    }
+
+    /// [`Self::set_outcome`] against a connection the caller already holds.
+    ///
+    /// Split out so a caller that must write the outcome *and something else* atomically can put
+    /// both inside one transaction. `record_operator_required` is that caller, and the two writes
+    /// it makes are the pair whose gap left an unreadable row.
+    ///
+    /// The writability check stays on the `&self` wrapper: this takes a live connection, and every
+    /// caller reaches it through one.
+    fn set_outcome_in(
+        conn: &Connection,
+        key: &IdempotencyKey,
+        outcome: &TurnOutcome,
+        now: &Utc,
     ) -> Result<(), JournalError> {
         let (tag, response) = (outcome.tag(), outcome.response());
-        self.require_writable()?;
-        let conn = self.conn.lock().expect("journal lock");
         let prior: Option<Option<String>> = conn
             .query_row("SELECT response_id FROM turns WHERE key=?1", params![key.as_str()], |r| {
                 r.get(0)
@@ -714,19 +873,16 @@ impl Journal {
             "UPDATE turns SET outcome=?2, response_id=COALESCE(?3,response_id),
                               attempts=attempts+1, updated_at=?4
              WHERE key=?1",
-            params![key.as_str(), tag, response.map(ResponseId::as_str), now],
+            params![key.as_str(), tag, response.map(ResponseId::as_str), now.as_str()],
         )?;
         Ok(())
     }
 
     /// One journalled turn.
     pub fn turn(&self, key: &IdempotencyKey) -> Result<Option<TurnRecord>, JournalError> {
-        let conn = self.conn.lock().expect("journal lock");
+        let conn = self.locked();
         conn.query_row(
-            "SELECT key,instance,org,retrieved_at,request_digest,outcome,response_id,attempts,
-                    first_seen,updated_at,delivery,delivery_chunks,operator_reason,
-                    prev_response,carried_records
-             FROM turns WHERE key=?1",
+            &format!("SELECT {TURN_COLUMNS} FROM turns WHERE key=?1"),
             params![key.as_str()],
             row_to_record,
         )
@@ -746,7 +902,7 @@ impl Journal {
         scope: &ThreadScope,
         conversation: &ChannelRef,
     ) -> Result<Option<PriorThread>, JournalError> {
-        let conn = self.conn.lock().expect("journal lock");
+        let conn = self.locked();
         /// One `threads` row as SQLite hands it back, before it becomes a `PriorThread`.
         type Row = (String, String, i64, Option<String>, Option<i64>);
         let found: Option<Row> = conn
@@ -788,10 +944,10 @@ impl Journal {
         &self,
         key: &IdempotencyKey,
         outcome: AttemptOutcome,
-        now: &str,
+        now: &Utc,
     ) -> Result<DeliveryState, JournalError> {
         self.require_writable()?;
-        let conn = self.conn.lock().expect("journal lock");
+        let conn = self.locked();
         let stored: Option<(String, i64)> = conn
             .query_row(
                 "SELECT delivery, delivery_chunks FROM turns WHERE key=?1",
@@ -809,29 +965,40 @@ impl Journal {
         };
         conn.execute(
             "UPDATE turns SET delivery=?2, delivery_chunks=?3, updated_at=?4 WHERE key=?1",
-            params![key.as_str(), after.tag(), chunks, now],
+            params![key.as_str(), after.tag(), chunks, now.as_str()],
         )?;
         Ok(after)
     }
 
     /// Stop automatic work on a turn and raise the operator's alarm.
     ///
-    /// Keeps any response id already known, because [`set_outcome`](Self::set_outcome) refuses to
+    /// Keeps any response id already known, because `set_outcome` refuses to
     /// unlearn one — and rightly: the id is half the evidence for diagnosing a duplicate.
     pub fn record_operator_required(
         &self,
         key: &IdempotencyKey,
         reason: &NonEmptyReason,
-        now: &str,
+        now: &Utc,
     ) -> Result<(), JournalError> {
         let response = self.turn(key)?.ok_or(JournalError::NoSuchTurn)?.outcome.response().cloned();
         let outcome = TurnOutcome::OperatorRequired { response, reason: reason.clone() };
-        self.set_outcome(key, &outcome, now)?;
-        let conn = self.conn.lock().expect("journal lock");
-        conn.execute(
+        // The outcome and its reason become durable together or not at all.
+        //
+        // These used to be two commits: `set_outcome` wrote `outcome='operator_required'` and
+        // released the lock, and a second `UPDATE` then wrote the reason. A crash in that gap left
+        // a row `row_to_record` refuses — "operator-required row without a reason" — and because
+        // `unresolved` collects into one `Result`, that single row made the whole operator alarm
+        // list unreadable. A state whose entire purpose is to raise an alarm could silence every
+        // alarm at once. `commit_completed` already moves its two rows in one transaction, for the
+        // same reason; this path had simply not been given it.
+        let conn = self.locked();
+        let tx = conn.unchecked_transaction()?;
+        Self::set_outcome_in(&tx, key, &outcome, now)?;
+        tx.execute(
             "UPDATE turns SET operator_reason=?2 WHERE key=?1",
             params![key.as_str(), reason.as_str()],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -841,14 +1008,12 @@ impl Journal {
     /// completed turn whose answer is parked for reconciliation is exactly the case an operator
     /// needs to see, and the earlier predicate reported it as resolved.
     pub fn unresolved(&self) -> Result<Vec<TurnRecord>, JournalError> {
-        let conn = self.conn.lock().expect("journal lock");
-        let mut stmt = conn.prepare(
-            "SELECT key,instance,org,retrieved_at,request_digest,outcome,response_id,attempts,
-                    first_seen,updated_at,delivery,delivery_chunks,operator_reason,
-                    prev_response,carried_records FROM turns
-             WHERE NOT (outcome = 'completed' AND delivery = 'delivered')
-             ORDER BY first_seen, key",
-        )?;
+        let conn = self.locked();
+        let mut stmt = conn.prepare(&format!(
+            "SELECT {TURN_COLUMNS} FROM turns
+                 WHERE NOT (outcome = 'completed' AND delivery = 'delivered')
+                 ORDER BY first_seen, key"
+        ))?;
         let rows = stmt.query_map([], row_to_record)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -860,11 +1025,97 @@ impl TurnProgress for Journal {
     fn openness(&self, key: &IdempotencyKey) -> Openness {
         match self.turn(key) {
             Ok(Some(record)) => record.openness(),
-            // A key with no row has no outstanding work. A read failure is reported as settled
-            // for the same reason: an unreadable journal must not silently freeze the cursor and
-            // make the process deaf — it surfaces through `open`, which fails closed.
-            Ok(None) | Err(_) => Openness::Settled,
+            // A key with no row has no outstanding work: an update whose turn does not exist has
+            // nothing outstanding, and a compacted row must not stall the cursor forever.
+            Ok(None) => Openness::Settled,
+            // **A read that failed has established nothing.**
+            //
+            // These two arms were one, and reporting a failed read as `Settled` was a control
+            // failing open. The cursor is the lowest open update across EVERY tenant, so one
+            // transient read error against a live, billed, undelivered turn moved the shared
+            // barrier past it — and once the channel is acknowledged past an update it stops
+            // redelivering it, so the answer is not delayed but gone, silently, for every tenant
+            // behind it too. The comment that defended it — "it surfaces through `open`, which
+            // fails closed" — is true of a file that will not open, and says nothing about a
+            // connection that opened and then failed a read, which is the case that reaches here.
+            //
+            // # Why holding the barrier is safe here and was not in 0033
+            //
+            // 0033 is the counter-argument and it is a real one: refusing without settling held
+            // the cursor forever on a turn that could never be rebuilt, and one stuck conversation
+            // deafened every conversation behind it while the process looked healthy. The
+            // difference is what the hold is attached to.
+            //
+            // That hold was permanent and local — one row, a deterministic verdict that would
+            // never change, everything else in the process serving normally. When the store is
+            // the thing that failed, this hold is the opposite on both axes, transient and
+            // global: **a journal nobody can read is not one anybody is being served from.** Every
+            // serving turn writes here before it dispatches — `begin` records the key and the
+            // digest before a byte leaves — so a store that is not answering is a store that
+            // cannot accept new work either. There is no healthy-process-being-deafened state for
+            // this to create; there is only a stalled process, stalled, and it lifts the moment
+            // the store answers.
+            //
+            // The case that argument does not cover is a single row this version will not parse.
+            // That one *is* local and permanent, and it does hold the barrier until an operator
+            // acts — 0033's shape. It is still the right answer, because the alternative is not
+            // "keep serving": it is advancing the shared offset past a turn that may have been
+            // billed and never delivered, on the strength of a row we just refused to read.
+            // `row_to_record` refuses rather than interprets every unusable column for that
+            // reason, and between two failures that both need an operator, the loud one is the
+            // one that does not also lose the answer.
+            Err(_) => Openness::Unestablished,
         }
+    }
+}
+
+/// The two arms above that have no [`TurnRecord`] behind them at all.
+///
+/// `tests.rs` covers what an *answered* read yields, across every outcome and every delivery
+/// state. These are about the answers that are not readings: no row, and no reply. They were one
+/// arm, and the whole of the defect was that they had been given one meaning.
+#[cfg(test)]
+mod progress {
+    use super::*;
+    use crate::tests::{Tmp, key};
+
+    /// A row written without [`Journal::begin`], which would want a verified instance. It is what
+    /// `begin` writes; the outcome tag is the only thing these tests vary.
+    fn row(j: &Journal, k: &str, tag: &str) {
+        let conn = j.conn.lock().expect("journal lock");
+        conn.execute(
+            "INSERT INTO turns(key,instance,org,retrieved_at,request_digest,outcome,attempts,
+                               first_seen,updated_at)
+             VALUES(?1,'acme','acme-sales','r0','d0',?2,0,'t0','t0')",
+            params![k, tag],
+        )
+        .expect("insert");
+    }
+
+    #[test]
+    fn a_key_with_no_row_is_settled_and_a_key_that_could_not_be_read_is_not() {
+        let t = Tmp::new("progress-split");
+        let j = Journal::open(&t.0).expect("open");
+
+        // No row: nothing outstanding, and it must stay that way. Holding the barrier here would
+        // stall the cursor forever on an update whose row was compacted away — which is the
+        // over-correction this half of the assertion exists to catch.
+        assert_eq!(j.openness(&key("upd-1")), Openness::Settled);
+
+        // A row whose outcome column this version will not interpret. `turn` returns `Err`, so
+        // nothing has been established and the barrier holds.
+        row(&j, "upd-2", "a-tag-from-another-version");
+        assert!(
+            j.turn(&key("upd-2")).is_err(),
+            "the row read back cleanly — this test is measuring nothing"
+        );
+        assert_eq!(j.openness(&key("upd-2")), Openness::Unestablished);
+
+        // POSITIVE CONTROL: the same shape of row, readable. A journal that answered
+        // `Unestablished` to everything would satisfy the assertion above while telling the
+        // cursor nothing at all.
+        row(&j, "upd-3", "not_submitted");
+        assert_eq!(j.openness(&key("upd-3")), Openness::Open);
     }
 }
 
@@ -880,6 +1131,23 @@ fn decode_delivery(tag: &str, chunks: i64) -> Option<DeliveryState> {
     }
 }
 
+/// Every column [`row_to_record`] reads, in one place.
+///
+/// # It was written out twice, and read by position
+///
+/// `Journal::turn` and `Journal::unresolved` each spelled these nineteen names, and the decoder
+/// took them as `r.get(0)` … `r.get(18)`. Nothing coupled the two lists to those offsets — and
+/// `instance` and `org` sit next to each other and are both `TEXT`, so reordering one list would
+/// have compiled, run, and recorded a turn under the wrong tenant. Silent and cross-tenant is the
+/// worst pair of properties a defect can have here.
+///
+/// The decoder now asks by name, so the offsets are rusqlite's problem rather than a reader's.
+const TURN_COLUMNS: &str = "key,instance,org,retrieved_at,request_digest,outcome,response_id,\
+                            attempts,first_seen,updated_at,delivery,delivery_chunks,\
+                            operator_reason,prev_response,carried_records,profile_sha256,\
+                            policy_sha256,catalogue_sha256,confinement_observed_at,\
+                            reported_model";
+
 fn row_to_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<TurnRecord> {
     let bad = |what: &str| {
         rusqlite::Error::FromSqlConversionFailure(
@@ -888,13 +1156,13 @@ fn row_to_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<TurnRecord> {
             format!("the journal holds an unusable {what}").into(),
         )
     };
-    let tag: String = r.get(5)?;
-    let response: Option<String> = r.get(6)?;
+    let tag: String = r.get("outcome")?;
+    let response: Option<String> = r.get("response_id")?;
     let response = match response {
         Some(v) => Some(ResponseId::parse(v).map_err(|_| bad("response id"))?),
         None => None,
     };
-    let operator_reason: Option<String> = r.get(12)?;
+    let operator_reason: Option<String> = r.get("operator_reason")?;
     // An `accepted` or `completed` row with no response id cannot be produced by this code, and a
     // tag from a future version is not something to guess at. Refuse rather than interpret.
     let outcome = match (tag.as_str(), response) {
@@ -912,28 +1180,55 @@ fn row_to_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<TurnRecord> {
         },
         _ => return Err(bad("outcome")),
     };
-    let prev: Option<String> = r.get(13)?;
+    let prev: Option<String> = r.get("prev_response")?;
     let decision = Decision {
         previous: match prev {
             Some(v) => Some(ResponseId::parse(v).map_err(|_| bad("chained-from response id"))?),
             None => None,
         },
-        carried: r.get(14)?,
+        carried: r.get("carried_records")?,
     };
-    let delivery = decode_delivery(&r.get::<_, String>(10)?, r.get(11)?)
+    let delivery = decode_delivery(&r.get::<_, String>("delivery")?, r.get("delivery_chunks")?)
         .ok_or_else(|| bad("delivery state"))?;
+    let reported_model =
+        ReportedModel::read(r.get::<_, Option<String>>("reported_model")?.as_deref());
+    let attribution_fields: (Option<String>, Option<String>, Option<String>, Option<String>) = (
+        r.get("profile_sha256")?,
+        r.get("policy_sha256")?,
+        r.get("catalogue_sha256")?,
+        r.get("confinement_observed_at")?,
+    );
+    let attribution = match attribution_fields {
+        (None, None, None, None) => None,
+        (Some(profile), Some(policy), Some(catalogue), Some(observed_at)) => {
+            Some(CapabilityAttribution {
+                profile_sha256: Sha256Digest::parse(profile)
+                    .map_err(|_| bad("profile fingerprint"))?,
+                policy_sha256: Sha256Digest::parse(policy)
+                    .map_err(|_| bad("policy fingerprint"))?,
+                catalogue_sha256: Sha256Digest::parse(catalogue)
+                    .map_err(|_| bad("catalogue fingerprint"))?,
+                observed_at: Utc::parse(observed_at)
+                    .map_err(|_| bad("confinement observation time"))?,
+            })
+        }
+        _ => return Err(bad("partial confinement attribution")),
+    };
     Ok(TurnRecord {
-        key: IdempotencyKey::parse(r.get::<_, String>(0)?).map_err(|_| bad("idempotency key"))?,
-        instance: Slug::parse(r.get::<_, String>(1)?).map_err(|_| bad("instance"))?,
-        org: OrgId::parse(r.get::<_, String>(2)?).map_err(|_| bad("org"))?,
-        retrieved_at: r.get(3)?,
-        request_digest: RequestDigest::from_hex(r.get::<_, String>(4)?),
+        key: IdempotencyKey::parse(r.get::<_, String>("key")?)
+            .map_err(|_| bad("idempotency key"))?,
+        instance: Slug::parse(r.get::<_, String>("instance")?).map_err(|_| bad("instance"))?,
+        org: OrgId::parse(r.get::<_, String>("org")?).map_err(|_| bad("org"))?,
+        retrieved_at: r.get("retrieved_at")?,
+        request_digest: RequestDigest::from_hex(r.get::<_, String>("request_digest")?),
         outcome,
         delivery,
-        attempts: r.get(7)?,
-        first_seen: r.get(8)?,
-        updated_at: r.get(9)?,
+        attempts: r.get("attempts")?,
+        first_seen: r.get("first_seen")?,
+        updated_at: r.get("updated_at")?,
         decision,
+        attribution,
+        reported_model,
     })
 }
 

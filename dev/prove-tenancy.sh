@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# COST: free — no runtime, no model key, nothing spent.
 # Prove two tenants served by one store cannot reach each other's records.
 #
 #   dev/prove-tenancy.sh          # this; needs no runtime and no model key
@@ -34,30 +35,24 @@
 # fixture rather than the Account Service, so it speaks for the contract and not the deployment.
 #
 # Verdicts follow the operator convention: PASS / FAIL / BLOCKED, exiting 0 / 2 / 3.
-set -uo pipefail
-
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
-cd "$ROOT" || exit 3
+# shellcheck source=dev/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 PORT="${PROVE_TENANCY_PORT:-3994}"
 A_TOKEN="dev-token-tenant-a"; A_ORG="tenant-a"; A_REC="NW-001"
 B_TOKEN="dev-token-tenant-b"; B_ORG="tenant-b"; B_REC="SV-004"
 STORE_PID=""
+# shellcheck disable=SC2329  # invoked indirectly, through `on_exit`.
 cleanup() {
   [ -n "$STORE_PID" ] && kill "$STORE_PID" 2>/dev/null
   rm -f "${TMPDIR:-/tmp}/ironworks-tenancy.$$"
 }
-trap cleanup EXIT
+on_exit cleanup
 
-pass=0; failed=0; blocked=0
-verdict() {
-  printf '%-9s %-34s %s\n' "$2" "$1" "${3:-}"
-  case "$2" in PASS) pass=$((pass+1));; FAIL) failed=$((failed+1));; BLOCKED) blocked=$((blocked+1));; esac
-}
+need_jq
 
 cargo build -q -p ironworks-devstore 2>/dev/null || {
-  verdict "build" BLOCKED "cargo build failed"; exit 3; }
+  give_up "build" "cargo build failed"; }
 
 # REFUSE TO MEASURE A STORE THIS SCRIPT DID NOT START. If anything already answers on the port,
 # our own store never binds, every request goes to the stranger, and the run reports on a config
@@ -65,25 +60,16 @@ cargo build -q -p ironworks-devstore 2>/dev/null || {
 # textbook BLOCKED — the measurement could not be performed. (Observed: a store left behind by a
 # concurrent session answered here, its tokens differed, and five checks "failed" against it.)
 if curl -fsS --max-time 2 "http://127.0.0.1:$PORT/health" >/dev/null 2>&1; then
-  verdict "store.port" BLOCKED \
+  give_up "store.port" \
     "something already answers on $PORT; set PROVE_TENANCY_PORT to a free port"
-  exit 3
 fi
 
 # One store, two orgs, one book each. The fixtures are the reference's ported proof pair.
-./target/debug/ironworks-devstore --port "$PORT" \
+STORE_PID="$(start_fixture "http://127.0.0.1:$PORT/health" \
+  ./target/debug/ironworks-devstore --port "$PORT" \
   --book "$A_ORG=fixtures/tenants/tenant-a.account.json" --identity "$A_TOKEN=$A_ORG" \
-  --book "$B_ORG=fixtures/tenants/tenant-b.account.json" --identity "$B_TOKEN=$B_ORG" \
-  >/dev/null 2>&1 </dev/null &
-STORE_PID=$!
-disown 2>/dev/null || true
-
-for _ in $(seq 1 30); do
-  curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 && break
-  sleep 0.2
-done
-curl -fsS "http://127.0.0.1:$PORT/health" >/dev/null 2>&1 || {
-  verdict "store.up" BLOCKED "devstore did not come up on $PORT"; exit 3; }
+  --book "$B_ORG=fixtures/tenants/tenant-b.account.json" --identity "$B_TOKEN=$B_ORG")"
+[ -n "$STORE_PID" ] || give_up "store.up" "devstore did not come up on $PORT"
 
 # `http <token> <path>` prints "<http status> <body>" so a check can assert on both — and prints
 # NOTHING AT ALL when no HTTP response came back, which is the distinction every caller below
@@ -142,8 +128,12 @@ check_denied "isolation.b_cannot_read_a" "$B_TOKEN" "$A_REC" "$A_ORG"
 # disjointness trivially true, so emptiness is a FAIL here and not a pass.
 a_out="$(http "$A_TOKEN" list_accounts)"
 b_out="$(http "$B_TOKEN" list_accounts)"
-a_ids="$(printf '%s' "$a_out" | grep -o '"account_id":"[^"]*"' | sort)"
-b_ids="$(printf '%s' "$b_out" | grep -o '"account_id":"[^"]*"' | sort)"
+# `jq`, not `grep -o '"account_id":"[^"]*"'`. That pattern cannot tell a key from a value: it
+# matches an `account_id` anywhere in the document, including inside a record body, so a record
+# quoting another tenant's id would have read as a shared listing — a FAIL invented by the reader
+# rather than measured. `.accounts[]` says which field, at which depth.
+a_ids="$(json_field '[.accounts[].account_id] | sort | .[]' "$a_out")"
+b_ids="$(json_field '[.accounts[].account_id] | sort | .[]' "$b_out")"
 if [ -z "$a_out" ] || [ -z "$b_out" ]; then
   verdict "isolation.listings_disjoint" BLOCKED "the store did not answer"
 elif [ -z "$a_ids" ] || [ -z "$b_ids" ]; then
@@ -187,7 +177,4 @@ case "$gone" in
 esac
 
 echo
-echo "$pass passed, $failed failed, $blocked blocked"
-[ "$failed" -gt 0 ] && exit 2
-[ "$blocked" -gt 0 ] && exit 3
-exit 0
+summary

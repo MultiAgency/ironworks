@@ -18,8 +18,7 @@
 //! and forces its unrecoverable window. Determinism is also why `facts` is a `BTreeMap`.
 
 use crate::ids::OrgId;
-use crate::record::{AccountRecord, Timestamp};
-use sha2::{Digest, Sha256};
+use crate::record::{Account, AccountRecord, Timestamp};
 
 /// A rendered envelope. Constructed only by [`build`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -41,13 +40,7 @@ impl Envelope {
     /// The journal stores this rather than the envelope itself — recovery must be able to prove
     /// it rebuilt the same body without the journal ever holding a tenant's records.
     pub fn digest(&self) -> String {
-        Sha256::new()
-            .chain_update(self.0.as_bytes())
-            .finalize()
-            .iter()
-            .take(8)
-            .map(|b| format!("{b:02x}"))
-            .collect()
+        crate::composition::digest16(self.0.as_bytes())
     }
 }
 
@@ -134,25 +127,41 @@ fn sanitize_speaker(raw: &str) -> Option<String> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
-/// Fields printed in this order when recorded. `owner`, `stage` and `value_band` are the
+/// One account, exactly as the model is shown it — and exactly as it is fingerprinted.
+///
+/// Fields are printed in this order when recorded. `owner`, `stage` and `value_band` are the
 /// tenant's team's own pipeline bookkeeping and are shown so the analyst does not re-derive what
-/// the team already knows — but they are deliberately absent from the gap list, which stays
-/// about qualification evidence.
-/// The same rendering, reachable for fingerprinting.
+/// the team already knows — but they are deliberately absent from the gap list, which stays about
+/// qualification evidence.
 ///
 /// `supply::fingerprint` must digest exactly what the model is shown, or "the book has not moved"
-/// would mean something different to the two of them. Sharing the function is what keeps that
-/// true rather than nearly true.
-pub(crate) fn render_account_for_digest(
-    record: &AccountRecord,
-    fact_fields: Option<&[String]>,
-) -> String {
-    render_account(record, fact_fields)
-}
-
-fn render_account(record: &AccountRecord, fact_fields: Option<&[String]>) -> String {
-    let a = &record.account;
-    let mut lines = vec![format!("- account_id: {}", record.id), format!("  name: {}", a.name)];
+/// would mean something different to the two of them. Sharing this function is what keeps that
+/// true rather than nearly true — which is why it is `pub(crate)` rather than having a wrapper
+/// that only forwarded, and onto which those two paragraphs had drifted.
+pub(crate) fn render_account(record: &AccountRecord, fact_fields: Option<&[String]>) -> String {
+    // Exhaustive on purpose. `Account` is `#[serde(default)]` throughout, so the store may add a
+    // field and every record still parses — which means a field can reach the seam, be carried,
+    // and never reach the model with nothing to notice. Destructuring makes that a compile error
+    // instead: a new field must be given a line here or explicitly ignored.
+    let Account {
+        name,
+        domain,
+        industry,
+        employees,
+        headquarters,
+        stated_problem,
+        current_tooling,
+        budget,
+        timeline,
+        decision_process,
+        economic_buyer,
+        owner,
+        stage,
+        value_band,
+        facts,
+        updated_at,
+    } = &record.account;
+    let mut lines = vec![format!("- account_id: {}", record.id), format!("  name: {name}")];
     let mut recorded: Vec<String> = Vec::new();
 
     let field =
@@ -162,20 +171,20 @@ fn render_account(record: &AccountRecord, fact_fields: Option<&[String]>) -> Str
                 recorded.push(v);
             }
         };
-    field(&mut lines, &mut recorded, "domain", a.domain.clone());
-    field(&mut lines, &mut recorded, "industry", a.industry.clone());
-    field(&mut lines, &mut recorded, "employees", a.employees.map(|n| n.to_string()));
-    field(&mut lines, &mut recorded, "headquarters", a.headquarters.clone());
-    field(&mut lines, &mut recorded, "owner", a.owner.clone());
-    field(&mut lines, &mut recorded, "stage", a.stage.clone());
-    field(&mut lines, &mut recorded, "value_band", a.value_band.clone());
-    field(&mut lines, &mut recorded, "stated_problem", a.stated_problem.clone());
-    field(&mut lines, &mut recorded, "current_tooling", a.current_tooling.clone());
-    field(&mut lines, &mut recorded, "budget", a.budget.clone());
-    field(&mut lines, &mut recorded, "timeline", a.timeline.clone());
-    field(&mut lines, &mut recorded, "decision_process", a.decision_process.clone());
-    field(&mut lines, &mut recorded, "economic_buyer", a.economic_buyer.clone());
-    field(&mut lines, &mut recorded, "updated_at", a.updated_at.as_ref().map(|t| t.to_string()));
+    field(&mut lines, &mut recorded, "domain", domain.clone());
+    field(&mut lines, &mut recorded, "industry", industry.clone());
+    field(&mut lines, &mut recorded, "employees", employees.map(|n| n.to_string()));
+    field(&mut lines, &mut recorded, "headquarters", headquarters.clone());
+    field(&mut lines, &mut recorded, "owner", owner.clone());
+    field(&mut lines, &mut recorded, "stage", stage.clone());
+    field(&mut lines, &mut recorded, "value_band", value_band.clone());
+    field(&mut lines, &mut recorded, "stated_problem", stated_problem.clone());
+    field(&mut lines, &mut recorded, "current_tooling", current_tooling.clone());
+    field(&mut lines, &mut recorded, "budget", budget.clone());
+    field(&mut lines, &mut recorded, "timeline", timeline.clone());
+    field(&mut lines, &mut recorded, "decision_process", decision_process.clone());
+    field(&mut lines, &mut recorded, "economic_buyer", economic_buyer.clone());
+    field(&mut lines, &mut recorded, "updated_at", updated_at.as_ref().map(|t| t.to_string()));
 
     for c in &record.contacts {
         let engaged = if c.engaged.unwrap_or(false) { "engaged" } else { "not engaged" };
@@ -202,9 +211,9 @@ fn render_account(record: &AccountRecord, fact_fields: Option<&[String]>) -> Str
     let declared: Vec<&str> =
         fact_fields.map(|f| f.iter().map(String::as_str).collect()).unwrap_or_default();
     let rest: Vec<&str> =
-        a.facts.keys().map(String::as_str).filter(|k| !declared.contains(k)).collect();
+        facts.keys().map(String::as_str).filter(|k| !declared.contains(k)).collect();
     for key in declared.iter().copied().chain(rest) {
-        let Some(value) = a.facts.get(key) else { continue };
+        let Some(value) = facts.get(key) else { continue };
         let rendered = match value {
             serde_json::Value::Null => continue,
             serde_json::Value::String(s) if s.is_empty() => continue,
@@ -264,7 +273,7 @@ mod tests {
 
     #[test]
     fn a_promoted_activity_renders_with_the_person_who_shared_it() {
-        let rendered = render_account_for_digest(&attributed_book(), None);
+        let rendered = render_account(&attributed_book(), None);
         assert!(
             rendered.contains(
                 "activity [2026-09-01 shared-note shared by alice]: \
@@ -279,7 +288,7 @@ mod tests {
         // The compatibility half, and the one that matters for a book that predates attribution:
         // every existing activity has no contributor, and a placeholder would be an author this
         // system invented.
-        let rendered = render_account_for_digest(&attributed_book(), None);
+        let rendered = render_account(&attributed_book(), None);
         assert!(
             rendered.contains("activity [2026-08-01 call]: Kickoff call with the team."),
             "{rendered}"

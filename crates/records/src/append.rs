@@ -23,9 +23,8 @@
 //! [`ServiceInstance`]: ironworks_domain::ServiceInstance
 
 use crate::credential::{CredentialSource, Secret};
-use ironworks_domain::record::AccountId;
+use ironworks_domain::record::{AccountId, Date};
 use ironworks_domain::{ContributorId, CredentialPurpose, CredentialRef, OrgId};
-use std::time::Duration;
 
 /// What one confirmed promotion asks the store to record.
 ///
@@ -37,8 +36,12 @@ pub struct Append<'a> {
     /// same proposal produce the same id, which is what makes a retry a replay.
     pub activity_id: &'a str,
     pub account: &'a AccountId,
-    /// `YYYY-MM-DD`.
-    pub occurred_at: &'a str,
+    /// The day the note is recorded against.
+    ///
+    /// A [`Date`] and not a `&str` whose grammar was stated in this comment. The store refuses a
+    /// malformed one with `invalid_occurred_at` — a round trip and a refusal code to learn what a
+    /// ten-byte shape check already knows.
+    pub occurred_at: &'a Date,
     /// The person's exact bytes.
     pub body: &'a str,
     pub contributor: &'a ContributorId,
@@ -143,22 +146,8 @@ impl<C: CredentialSource> std::fmt::Debug for AppendClient<C> {
 
 impl<C: CredentialSource> AppendClient<C> {
     pub fn new(base: impl Into<String>, credentials: C) -> Self {
-        // The same per-phase timeouts the read client uses, and for the sharper version of the
-        // same reason: on a write, "did anything happen" is the whole question, and a
-        // phase-agnostic timeout cannot say whether the request was attempted.
-        let config = ureq::Agent::config_builder()
-            .timeout_global(None)
-            .timeout_resolve(Some(Duration::from_secs(5)))
-            .timeout_connect(Some(Duration::from_secs(5)))
-            .timeout_send_request(Some(Duration::from_secs(10)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .timeout_recv_body(Some(Duration::from_secs(30)))
-            // A 409 is an answer to be read, not a transport failure. Reading it as one would
-            // turn a permanent conflict into a retryable outage.
-            .http_status_as_error(false)
-            .build();
         Self {
-            agent: ureq::Agent::new_with_config(config),
+            agent: crate::agent(),
             base: base.into().trim_end_matches('/').to_owned(),
             credentials,
         }
@@ -186,7 +175,7 @@ impl<C: CredentialSource> AppendClient<C> {
         let payload = serde_json::json!({
             "activity_id": append.activity_id,
             "account_id": append.account.as_str(),
-            "occurred_at": append.occurred_at,
+            "occurred_at": append.occurred_at.as_str(),
             "body": append.body,
             "contributor": append.contributor.as_str(),
             "expected_org": append.expected_org.as_str(),

@@ -102,6 +102,7 @@ fn measurement(member: &str, entries: &[(&str, &str)]) -> Measurement {
         false,
         &at(),
     )
+    .expect("complete catalogue")
 }
 
 fn measured_attempt(

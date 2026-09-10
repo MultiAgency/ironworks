@@ -1,7 +1,7 @@
 # Invariants
 
 The behavioural specification for Rust IronWorks, extracted from the current implementation
-(`~/agency/ironworks`) and from measurements against a pinned runtime.
+(`~/agency/ironworks-py`) and from measurements against a pinned runtime.
 
 Per [ADR 0001](adr/0001-reimplement-ironworks-in-rust.md), replacement is judged by **preserved
 guarantees**, not structural similarity. This file is that list.
@@ -61,10 +61,9 @@ hang — the exact failure the rule exists to prevent:
 - **Context binding is an authority path.** *Which records an instance may read* is granted at
   provisioning and enforced server-side (B-1, B-6, B-7).
 
-**`approvals` has no invariants, because the capability does not exist.** Current capabilities are
-frozen at `writes: none`, so nothing in the corpus constrains an approval. It stays in the
-taxonomy as a named absence: when propose-and-confirm arrives, it arrives without precedent and
-will need invariants written rather than extracted.
+**`approvals` is the deterministic propose-and-confirm path, not model write authority.** The
+speaker selects exact bytes, a separately bound actor confirms them, and only deterministic code
+appends them. The service remains frozen at `writes: none`.
 
 ### The rule that decides fail-closed versus degrade
 
@@ -396,6 +395,14 @@ have run. Only the first is forbidden.
 current implementation's belief. Replaying an identical body under the same key returns the
 original id (21 ms vs 984 ms — served from the index, not re-executed). The only obstacle was a
 clock read inside envelope construction. See ADR 0005.
+*Corollary — the retryable window closes at the same moment.* Before the id is durable, ambiguity
+is retried by replay (E-5a, E-6) and the next cycle resolves it. After it, the outcome is a
+property of a response that will not change, so a **terminal** one holding no answer — failed,
+cancelled, incomplete, parked, or an answer the delivery gate refuses — cannot be retried into
+success by any operation this seam has: fetching returns the same bytes, and a new logical turn is
+forbidden. Retrying it is not caution, it is E-18's stuck cursor with extra steps; those settle.
+The one exception is the outcome that is **not** terminal — a turn still running is E-7's case and
+stays open, because there a later read genuinely can differ.
 
 **E-6 — Ambiguity is the default classification.** "Provably unsent" requires positive evidence;
 everything else counts as sent, because guessing wrong in that direction costs a second billed
@@ -598,12 +605,20 @@ cannot produce a clean green that proves nothing.
 
 ## G. Runtime dependency
 
-Measured against the pinned revision.
+**`DESIGN.md`'s "The upstream contract" owns these facts and carries each one's `[measured @ rev]`
+marker; this section owns what each one *obliges the seam to do*.** Where the two disagree, the
+provenance is over there, and a bump moves those markers one fact at a time
+(`docs/UPGRADE.md` step 6). Reading a contract fact out of this section and quoting it without its
+revision is how §G-5 below came to lag by a whole behaviour.
 
 **G-1** HTTP 200 does not mean success; a turn can return 200 with `status: "failed"`.
 **G-2** `model` is echoed on create but reported as `"reborn"` on retrieve — **which model
 produced a stored answer is unverifiable after the fact.** The pin is a construction-time
-invariant only.
+invariant only. *The obligation this creates, and it is now discharged:* the seam reads the field
+**on acceptance and nowhere else**, because that is the only moment it is a model name, and stores
+it as `ironworks_domain::ReportedModel` — which keeps `Placeholder` and `Absent` apart from a name
+so a placeholder can never be read back as the model that served a tenant. Unverifiable *through
+the API* remains true, and is what D4 registers upstream.
 **G-3** `401` is `text/plain`; `400`/`404`/`409` are JSON-enveloped.
 **G-4** An idempotency key is refused if it contains a colon, path separator, control character,
 surrounding whitespace, or exceeds 256 bytes.
@@ -614,7 +629,13 @@ so the turn runs to completion server-side and the answer is recovered by replay
 idempotency key (ADR 0005), never by polling, because no response id was returned to poll.
 *This entry previously read "returns whatever status it has", which the pinned source contradicts
 at both revisions; `DESIGN.md` corrected it first and this copy lagged.*
-**G-6** Rate limit is 30 requests / 60 seconds **per user**, shared with the chat surface.
+**G-6** Rate limit is 30 requests / 60 seconds **per user**, shared with the chat surface. *The
+obligation, and it had been missed:* a `429` is an **admission rejection**, so nothing ran and the
+turn is safe to retry under the same key. `interpret_error` had no arm for it and fell through to
+`Unknown(Rejected)` on create — *a turn MAY have run; it must not be repeated* — which strands a
+turn that never started, on the one refusal a loop of short invocations meets routinely. It is now
+`NotSent(Cause::RateLimited)` whatever the send phase says, and that cause **blocks a measurement**
+rather than failing one. Nothing paces requests against the budget; that is still owed.
 **G-7** `usage.cost` is a computed estimate priced from IronClaw's own per-model table, and for the
 pinned model it is wrong in **both** directions. Never reconcile spend from it. *Mechanism measured
 at 1.4.0 (`docs/experiments/0040-the-cost-field-misses-the-pin-twice.md`); the table keys
@@ -689,60 +710,162 @@ cache that had already been removed. Nothing read it.
   ships. For `relationship-intelligence@2` (25,575 bytes) a chained thread grows **~5,700–5,910
   tokens per turn** — 19,940 at turn 1 rising to 60,063 at turn 8, measured across one
   ten-question conversation on the relay path. Against a 128k window that would bind near turn 19,
-  but `ThreadLimit::new(8)` (`crates/cli/src/main.rs::thread_limit`) cuts the chain at eight turns first.
+  but `ThreadLimit::new(8)` (`crates/cli/src/lib.rs::thread_limit`) cuts the chain at eight turns first.
   **So compaction is never reached: what ends a conversation is a turn count, not the window.**
   Chain-breaking remains a correctness threshold and not only an economic one — what changed is
   that the economic half now has a measurement, and the ceiling sits unreachable behind it.
+  **Measured on `production`, and the served profile carries a larger prompt.**
+  `docs/experiments/0052-the-inspector-flattens-the-prompt-it-shows-you.md` finding 3c put one turn
+  through both profiles at one pin: the composed prompt holds 60 components and 54 capabilities on
+  `hosted-single-tenant-volume-sandboxed` against 58 and 53 on `production` — the extra capability
+  is `builtin.shell` — and is **1,893 estimated tokens larger**. The alloy is identical, so this is
+  the runtime's own material and not the seam's. That figure is a single turn's prompt estimate and
+  **is not this bullet's per-turn growth rate**; the two are different quantities and must not be
+  added. What it establishes is that the rate above was measured on a profile nobody serves, and
+  that nobody has measured it on the one we do. The conclusion the bullet rests on — that the turn
+  count binds before the window — has margin measured in tens of turns and is not in question.
 - **Long-thread safety.** Whether the safety tail still governs past turn 25 under realistic
   traffic. The first attempt was invalidated by filler conditioning. **Unreachable in one thread
   as currently configured** — the limit above breaks the chain at eight, and the terminal path
-  never chains at all (`crates/cli/src/main.rs::drive`), so turn 25 needs a raised limit before it
+  never chains at all (`crates/cli/src/lib.rs::drive`), so turn 25 needs a raised limit before it
   can be asked. That makes this a bound on a configuration nobody runs, not on the shipped one.
-- **Single-poller availability; the cross-tenant half is decided, not built.** One token still
-  permits one poller. ADR 0009 (`docs/adr/0009-align-the-serving-cell-with-one-tenant-channel-stream.md`)
-  aligns that token, poller and process with one tenant, so once the cells are deployed a failed
-  poller no longer makes every tenant fail. Until then, the shared-poller failure remains. Even
-  after the split, each tenant still has one poller with no failover: it remains a single point of
-  failure for that tenant and caps any per-tenant service-level promise. The cross-tenant cap is
-  closed by the chosen architecture; the per-tenant availability bound is not.
-- **Whether the runtime isolates a response by member.** `GET /api/v1/responses/{id}` is fetched
-  with the tenant's own member credential, and **nothing here has measured what happens when the id
-  belongs to a different member.** If the runtime isolates, a mis-addressed fetch fails and the
-  damage stops at a confusing error; if it does not, one tenant's client can retrieve another's
-  answer. IronWorks does not currently depend on the answer — `TurnRecord::belongs_to`
-  (`crates/journal/src/lib.rs::TurnRecord::belongs_to`) compares instance **and** org before
-  recovery acts on a row, pinned by
-  `crates/journal/src/tests.rs::a_turn_belongs_only_to_the_instance_and_org_that_wrote_it`, which
-  asserts both axes separately — so the seam refuses the cross-wired fetch before making it. That
-  makes this a bound on **defence in depth**, not a live exposure: it says how much a future defect
-  on that path would cost. Looked for in `docs/experiments/` and in §L; not found.
-  **Measured 2026-09-02 and the bound is favourable —
-  `docs/experiments/0037-what-the-seam-never-asked-for.md` check 7.** A member minted by
+- **Single-poller availability; the cross-tenant mechanism is built but not qualified.** One token
+  still permits one poller. ADR 0009 (`docs/adr/0009-align-the-serving-cell-with-one-tenant-channel-stream.md`)
+  aligns that token, poller and process with one tenant. The deployment now carries templated
+  relay, Telegram, IronClaw and attestation units, strict one-entry registries, distinct per-cell
+  paths and an activation preflight that refuses port collisions. The two-daemon proof has
+  positive controls for independent same-named Docker objects and denial in both cross-socket
+  directions. It has not yet produced the required PASS for stopped-adapter, blocked-turn,
+  rate-limit and open-cursor independence, so admission of a second client remains closed. Even
+  after that measurement, each tenant has one poller with no failover, which remains a single
+  point of failure for that tenant and caps any per-tenant service-level promise.
+- **What a proof taken on the probe transfers to the served host.** The two stacks do not differ
+  in configuration on the authority axis — **they run different constructors.** `ironclaw serve`
+  has four boot arms and only `production` resolves its runtime policy from `[policy]` in the
+  config file; the served `hosted-single-tenant-volume-sandboxed` reaches a constructor that
+  hardcodes its deployment mode, runtime profile and org constraints and reads no `[policy]` key
+  at all. `dev/docker-compose.probe.yml` boots the first; `deploy/ironworks-ironclaw@.service`
+  boots the second. The contract fact and its anchors are in `DESIGN.md`'s upstream contract; the
+  reading is `docs/experiments/0051-the-probe-and-the-served-host-resolve-authority-differently.md`,
+  which **measured nothing.**
+  The standing consequence is the bound: **a result from the default probe overlay does not
+  transfer to the served host on any axis the resolved runtime policy reaches**, and the two
+  instances already recorded — the caveat above and `0039`'s catalogue axis — are effects of this
+  cause rather than separate facts. `dev/probe-up.sh --sandboxed` runs the served constructor and
+  is the only overlay that does. What is unmeasured is the extent: **nobody has enumerated which
+  axes differ**, only two that do.
+
+### Recently closed known shapes
+
+- **The runtime isolates a response by member.** `GET /api/v1/responses/{id}` is fetched with the
+  tenant's own member credential, and what happens when the id belongs to a *different* member was
+  the open quantity. **Measured 2026-09-02 and the bound is favourable** —
+  `docs/experiments/0037-what-the-seam-never-asked-for.md` check 7: a member minted by
   `POST /api/webchat/v2/admin/users` fetching another member's response id receives
   `404 param: "response_id"`, and `GET /api/webchat/v2/threads/{same id}/timeline` receives `404`
-  as well, while the owner's own fetch of that id returns `200` in the same sitting as the positive
-  control. The runtime does isolate. This closes the quantity, and changes nothing else: §B-13 and
-  §B-14 still forbid *resting* on it, and it was measured on the `production` profile rather than
-  the served one.
+  as well, while the owner's own fetch returns `200` in the same sitting as the positive control.
+  This closes the quantity and changes nothing else: §B-13 and §B-14 still forbid *resting* on it,
+  and IronWorks does not depend on the answer either way —
+  `crates/journal/src/lib.rs::TurnRecord::belongs_to` compares instance **and** org before recovery
+  acts on a row, pinned by
+  `crates/journal/src/tests.rs::a_turn_belongs_only_to_the_instance_and_org_that_wrote_it`, which
+  asserts both axes separately, so the seam refuses the cross-wired fetch before making it. It was
+  measured on the `production` profile rather than the served one, which is the transfer bound §I
+  still carries above.
+- **Inspection readiness is separate from authority evidence.** A `NotStarted` instance with every
+  authority measured absent still returns `Verdict::Pass`, preserving the positive control that
+  distinguishes measured absence from silence. It now also reports `Readiness::NotReady` and exits
+  4, so the same evidence cannot present an unactivated service as operationally ready
+  (`crates/lifecycle/src/inspect.rs::Inspection::readiness`).
+- **A confinement verdict requires a known host-egress denial witness.** A policy that denies
+  `builtin.http` cannot verify unless the catalogue actually reports that row; disabled is the
+  positive control, reachable is drift, and absence is unverifiable
+  (`crates/lifecycle/src/confinement.rs::missing_catalogue_witness`). The witness semantics are in
+  the policy fingerprint, so older baselines are stale, and registry publication requires the
+  latest current-member observation to qualify under the current fingerprint.
 
 ### Gaps with a known shape
 
 Those above are quantities nobody has measured. These are different: each is a defect or a missing
-control whose shape is already understood, and **every entry was re-verified against the tree**.
+control whose shape is already understood, and **every entry was re-verified against the tree on
+2026-09-06**, except those carrying a later date of their own — an entry added or struck after a
+sweep says so in its own text, because a sweep cannot have covered something that did not exist
+when it ran. Widening the sweep date to cover them would be the restated promise the next paragraph
+is about.
 
-- **A report that evaluated nothing renders PASS.** A `NotStarted` instance with every authority
-  measured absent returns `Verdict::Pass`, exit 0, and an operator looping over slugs reads that as
-  healthy. *The obvious fix is wrong:* that `Pass` is **asserted**, as the positive control in
-  `an_empty_inventory_does_not_pass_vacuously` (`crates/lifecycle/src/tests.rs::an_empty_inventory_does_not_pass_vacuously`) — the half
-  that distinguishes *measured absence* from *silence*, whose other half requires silence to yield
-  `Blocked`. Flipping it collapses the control into the thing it controls for. Whatever replaces
-  it must still be able to demonstrate that difference. This is the §F-14 rule violated in one
-  shape by the machinery built to uphold it.
-- **A confinement verdict can be vacuous.** Empty catalogues are refused, but a truncated
-  all-disabled catalogue still verifies. `crates/lifecycle/src/confinement.rs` has no control
-  requiring a *known egress tool be observed disabled*, so a verdict can pass on a catalogue that
-  never listed the thing that matters. §L-7 is adjacent and not the same: that one is about the
-  executable surface, this one about the verdict.
+**The date is the claim, and it replaces a promise this document could not keep.** That sentence
+used to assert re-verification in the present tense, and on 2026-09-06 two entries were false in
+opposite directions: one listed a gap that had been closed, and one described as impossible a
+capability the system had gained. Nothing catches that — `ironworks-claims` checks that a cited
+path exists and that a `path::symbol` resolves, never that a claim *about* the code still holds, so
+an entry saying "X has no attribute A" keeps passing after X gains A. A list of what is broken is
+how anyone chooses what to work on, so a stale entry does not merely mislead: it generates work
+that already exists. Re-verify and move the date; do not restate the promise.
+
+- ~~**A `404` on a request field is scored as "the turn may have run".**~~ **Filed as a defect on
+  2026-09-06 and withdrawn on 2026-09-07: the classification is correct and the proposed fix was
+  wrong.** It read the `404` on a dead `previous_response_id` as the same pre-dispatch refusal the
+  `400` arm handles, and asked why `crates/ironclaw/src/client.rs::interpret_error` did not treat it
+  alike. It carried its own escape clause — *whether any `404` from that route can follow a
+  dispatched turn* — and the pinned source fires it. `param: "response_id"` is emitted from **both**
+  sides of the dispatch boundary
+  (`ironclaw@4cb47cfaf3/crates/product/ironclaw_openai_compat/src/responses_workflow.rs:607`): the
+  `previous_response_id` miss at `:588`, before submit, and `record_accepted_ack` returning `None`
+  at `:631`, twenty-four lines *after* it and after the ack was already `Accepted` — plus the
+  external-tool registration, the projection reader inside the wait loop, and the idempotency-replay
+  read path. The envelopes are identical, so **`param` cannot separate them and neither can the
+  status.** `Unknown` is the only honest verdict and the seam already returns it. **The entry is
+  struck rather than deleted because the reasoning that produced it was published here.**
+
+  Three things the same reading settled, none of which was written down:
+  **`param: "input"`** is a genuine pre-dispatch signal — a `BindingRequired` rejection, nothing ran.
+  **A `404` carrying no JSON envelope** is an unmounted route and never reached the handler.
+  And the sanctioned way to disambiguate is not the envelope but the **idempotency key**: a
+  same-key, same-body retry either returns the response of the turn that ran or proceeds as a fresh
+  submit, because a replay with a recorded ack takes the read-only branch and does not resubmit.
+  **The seam already recovers exactly that way**, so this confirms ADR 0005 rather than amending it.
+
+  What remains true from the withdrawn entry is the *consequence*, and it has a different cause:
+  after a cutover a conversation's first turn replays **byte-identically**, so it re-sends the same
+  unresolvable pointer and takes the same `404`, holding its room's cursor. That is a property of
+  replaying a dead pointer, not of misclassification, and the composition bump measured in
+  `docs/experiments/0054-a-cutover-orphans-every-conversation-and-the-order-of-the-bump-decides-what-it-costs.md`
+  is the operational answer.
+
+- **`clippy clean` means clippy did not *error*, not that it emitted no warnings.** `DESIGN.md`'s
+  status block claims `cargo clippy --all-targets   clean`, and
+  `crates/claims/src/toolchain.rs` decides that on the **exit status** — its own comment says so:
+  *"the output is not the measurement; the exit status is"*. `cargo clippy` exits `0` on a
+  warn-level lint. The workspace denies `unsafe_code`, `clippy::todo`, `clippy::unimplemented` and
+  `rustdoc::broken_intra_doc_links`, so those do fail it; everything else rustc warns about does
+  not. **Demonstrated accidentally on 2026-09-10:** an `unused import: Verdict` introduced while
+  editing `toolchain.rs` was reported by `cargo clippy` on that crate and the control reported
+  `clippy clean` in the same tree seconds later. The fix is a policy decision rather than a patch —
+  denying warnings workspace-wide would make any warning anywhere a control failure — so it is
+  recorded here rather than taken unilaterally.
+
+- **"The confinement baseline is profile-relative" is true of the measurement and enforced by
+  nothing.** §L-1 and `docs/experiments/0039-the-catalogue-has-two-axes.md` record that the
+  catalogue varies by booted profile — 53/52 rows on `production` against 54/53 sandboxed, the axis
+  being `builtin.shell`. **No mechanism compares an observation to the profile it was taken on.**
+  `crates/lifecycle/src/confinement.rs::ConfinementPolicy::fingerprint` hashes the version tag, the
+  allowed set, the required witnesses and `auto_approve`, and the allowed set comes from
+  `crates/lifecycle/src/confinement.rs::ConfinementPolicy::for_profile` — a total function of the
+  **service's** declared `runtime_tools`, not of the deployment profile.
+  `crates/lifecycle/src/confinement.rs::ConfinementFacts` records `catalogued` and `reachable` and
+  nothing measures them against a baseline, and the attestation's catalogue digest rides onto the
+  turn record while `crates/domain/src/attestation.rs::ConfinementAttestation::validate_for` checks
+  slug, member, profile and policy digests and freshness — not that one.
+
+  What actually stops a stale observation being published across a profile change is **member
+  identity**: a fresh runtime means re-minted members,
+  `crates/lifecycle/src/lib.rs::LifecycleStore::latest_applicable` filters on the recorded member and
+  returns nothing, and `crates/cli/src/lib.rs::run_registry_publish_one` refuses. That gate is real
+  and it is **incidental** — it would not fire for a profile change that preserved member ids, and
+  the publication would carry a confinement observation measured against a different catalogue.
+  Closing it means either validating the catalogue digest or folding the observed catalogue into the
+  fingerprint; both are decisions in their own right and neither should ride along inside a cutover.
+
 - **The authority a service declares is not the authority confinement enforces.** `"egress"` is
   parsed into the service's capability profile (`crates/services/src/service.rs::WireCapabilities::egress`, carried into the profile by `crates/services/src/service.rs::from_raw`) and
   `confinement.rs` never reads it. Two mechanisms that both exist, unconnected — so a service
@@ -768,19 +891,43 @@ control whose shape is already understood, and **every entry was re-verified aga
   organization-neutral service had no user and was deleted, and a configuration naming no service
   is refused rather than filled in — `--service` is required, the registry field already was,
   and a guidance marker omitting `service:` is an error. A forgotten key is a refusal, which is
-  what the audience gate was for. `no_shipped_composition_is_organization_neutral`
-  (`crates/services/src/service.rs`) fires if a neutral composition is ever added, so the question
-  returns to a person rather than to a default.
-- **Durable state has no off-box backup.** Nothing in `deploy/` mentions backup or restore, and the
-  record-store paths are in no backup set. There is no rehearsed restore to have confidence in.
-- **No turn can be attributed to a capability state.** *"Did this turn respect its capability set?"*
+  what the audience gate was for. A later organization-neutral service would not change that:
+  silence still is not an operator's selection.
+- ~~**Durable state has no off-box backup.**~~ **Mechanism closed 2026-09-06; qualification is
+  still open.** `ironworks state snapshot` takes online SQLite backups of each configured journal,
+  proposal store and the fleet lifecycle store, admits only exact files below narrow configured
+  roots, binds each strict registry to its canonical guidance, writes a digest/schema/custody
+  manifest, and uploads the root-only staging tree through an operator-supplied restic repository.
+  `ironworks state verify-snapshot` validates those properties offline and now refuses a manifest
+  that merely omits a tenant database. No off-box upload or restore rehearsal has been run in this
+  tree, so recoverability remains unmeasured and an unavailable repository remains BLOCKED. There
+  is no timer or automated pruning until the attended upload and restore paths have passed.
+- ~~**No turn can be attributed to a capability state.**~~ **Closed 2026-09-06.** The entry below
+  is left as it was written, because the reasoning it records is why the attestation path has the
+  shape it has. What closed it: the `turns` table now carries `profile_sha256`, `policy_sha256`,
+  `catalogue_sha256` and `observed_at` behind a migration, read back as
+  `crates/journal/src/lib.rs::CapabilityAttribution`; the identity types moved to
+  `crates/domain/src/attestation.rs::ConfinementAttestation` and
+  `crates/domain/src/attestation.rs::Sha256Digest`, so neither the journal nor the serving path has
+  to reach into operator-side `lifecycle` to derive one. It is wired into the served deployment
+  rather than only available: `deploy/ironworks-attest@.service` refreshes a short-lived
+  attestation per cell and the relay unit passes it. Two details are load-bearing and were not
+  obvious from the gap as stated — only **admission of a new logical turn** consumes the
+  attestation, so an expired one blocks starting a turn without stranding any recovery branch; and
+  the emitting command refuses outright when confinement has drifted, so an attestation is never
+  written about a member that no longer matches its policy.
+
+  *The remaining half is unchanged and is still a decision rather than a gap: nothing on the
+  serving path reads a `CapabilityProfile` before the model call.*
+
+  ~~*"Did this turn respect its capability set?"*
   is not a question this architecture can answer. The `turns` table
   (`crates/journal/src/lib.rs`) has no capability, policy or confinement column; confinement
   observations live in `confinement_attempts` in a **different database**
   (`crates/lifecycle/src/lib.rs`), keyed by instance slug and member id, with no turn key, no
   response id and no foreign key to the journal. The strongest external statement available is
   *"instance X was measured confined to policy fingerprint F at time T"* beside *"instance X ran
-  turn K at time T′"* — a turn can be bracketed between two observations, never attributed to one.
+  turn K at time T′"* — a turn can be bracketed between two observations, never attributed to one.~~
   Nothing on the serving path reads a `CapabilityProfile` either: it is attenuated once at instance
   construction and never consulted again before the model call, so the capability model is enforced
   structurally and out-of-band rather than by a gate in the request path. That is a deliberate
@@ -794,11 +941,18 @@ control whose shape is already understood, and **every entry was re-verified aga
   instead by `TenantEntry::append()` returning `Option<&CredentialRef>`
   (`crates/domain/src/registry.rs::TenantEntry::append`), which is a second, unmodelled axis. Two
   places to look for one question.
-- **Two config files, two opposite postures on unknown keys.** A service definition refuses them:
+- ~~**Two config files, two opposite postures on unknown keys.**~~ **Closed 2026-09-06.** The two
+  postures now agree: `crates/domain/src/registry.rs::WireEntry`, `WireContributor` and
+  `WireRegistry` each carry `#[serde(deny_unknown_fields)]`, matching what
+  `crates/services/src/service.rs` already did, and the registry wire types carry a comment saying
+  the strictness is deliberately local to them and does not change how external API responses are
+  decoded. The reasoning below stands as the argument that closed it.
+
+  ~~A service definition refuses them:
   `#[serde(deny_unknown_fields)]` on every struct in `crates/services/src/service.rs`, so an
   unknown key is a hard load failure. The tenant registry accepts them silently:
   `crates/domain/src/registry.rs::WireEntry` has no `deny_unknown_fields` and `#[serde(default)]`
-  on every field, so an unrecognised key in `registry.json` is discarded without comment. A
+  on every field, so an unrecognised key in `registry.json` is discarded without comment.~~ A
   *misspelled* required key degrades to an empty string and is caught by the `required()` guard, so
   misspelling fails closed — but adding an unknown key is silent, and nothing in either file
   acknowledges the asymmetry.
@@ -887,19 +1041,19 @@ record is the record of one run, and editing it to reflect a later one destroys 
 the gap was ever there.
 
 **What this implementation does not do, stated here so §K is not read as a completeness claim.**
-Lifecycle is **accounted for but never acted on**, and the distinction is the whole of §F's
-status. What is built is the **state model**, not a single operation that writes it: no code
-outside `examples/seed.rs` calls `declare`, `reach` or `activate`. Built in that sense: F-1's
+Lifecycle is acted on only through narrow explicit operator commands: credential-backed adoption,
+measured confinement and strict registry publication. Complete export is separate. There is no
+end-to-end provision or deprovision command: external authority creation, measured activation,
+destructive administration and the residual-authority ledger are not implemented. Built in the
+lifecycle model: F-1's
 authorities — as **five** variants where F-1's sentence names four, the extra being `TenantData`,
 which F-2's own stage list implies with `data_initialization_settled` and F-1 omits; F-2's ordered stages with
-resume at the first not reached; F-12's exit-code contract; F-14. Partly: F-13 — the mode is set
+resume at the first not reached; F-12's exit-code contract, with lifecycle inspection's orthogonal
+`NOT_READY` exit 4 when authority evidence passes before activation; F-14. Partly: F-13 — the mode is set
 before any content exists, but by create-then-chmod, so the empty-file window F-13 names is
-narrowed rather than closed; closing it means owning file creation. Unbuilt: everything that
-*executes* — nothing provisions, deprovisions, revokes, or expires, so F-4 through F-11 have no
-code, and the §J entries that depend on execution have nothing to enforce. No approvals — and
-`AuthorityPath::Approvals` reports `implemented()` as `false` rather than being absent, because
-an unimplemented capability that already has a name is one somebody eventually passes. No effect
-execution: `Access` has no `Write` variant. No workflows. Telegram is built and has answered a
+narrowed rather than closed; closing it means owning file creation. The deterministic
+propose-and-confirm approval path is built. No model effect execution: `Access` has no `Write`
+variant. No workflows. Telegram is built and has answered a
 real question (`crates/telegram`, 2026-08-31), but **no delivery proof runs against it** — every
 crash boundary in `dev/` is provoked against the disposable channel fixture, so what is measured
 is the contract both speak and not the real transport. No offline mode, deliberately: the record
@@ -1300,7 +1454,8 @@ non-overridable, or globally locked; never erase the two locked-row exception ei
 
 *Custody-backed is a property of this endpoint, not of the runtime, and there is a measured
 counter-example.* The tenant model-selection policy — `PUT /api/webchat/v2/llm/model-policy`,
-`{provider_id, workspace_default, allowed_models}` — requires `caller.operator_config`
+`{workspace_default, allowed_models}` with `provider_id` derived from the active provider —
+requires `caller.operator_config`
 (`ironclaw@4cb47cfaf3/crates/product/ironclaw_operator/src/llm_admin/llm_config_service.rs:841-846`)
 and answers a member `403 Operator WebUI configuration privileges required`. Measured 2026-09-02
 (`docs/experiments/0037-what-the-seam-never-asked-for.md` check 8): under a narrow policy a
@@ -1417,6 +1572,21 @@ weaker sandbox; it is a policy naming a row that does not exist, which `assess` 
 approval off. **The sandbox itself is still unexercised** — `dev/prove-workspace.sh` had two
 independent blocks, and only the runtime one is retired; no shipped service declares `sandbox`, so
 no turn has run in that workspace.
+
+**That sentence is retired
+(`docs/experiments/0059-the-sandbox-works-once-the-model-is-told-the-tools-other-name.md`,
+2026-09-08).** `dev/prove-workspace.sh` scores 3 PASS against a sandboxed probe using a proof-only
+service that declares `sandbox`: a worker wrote `/workspace`, had no Docker socket, and two later
+turns on fresh journals — no `previous_response_id` between them — read the same 64-hex value back.
+The per-user workspace is `sandbox-workspaces/users/<id>/` under the runtime's **data** directory,
+not under `IRONCLAW_REBORN_WORKSPACE_ROOT`.
+
+**Three qualifications travel with it, and none is optional.** The proof names the tool's wire
+spelling in its asks, because the runtime otherwise refuses its own model's output
+(`docs/UPSTREAM.md` D10) — remove that and the measurement goes back to BLOCKED. The probe needed a
+Docker daemon new enough for `gateway_mode_ipv4=isolated`, which the served host's version is not
+known to satisfy. And **this member was never confined**: a confined member's sandbox remains
+unmeasured, so this retires "unexercised" and touches no clause of §L-10's policy claim above.
 
 **L-11 — Confinement progress is evidence-bearing and historical.** `member_confined` cannot be
 written through generic lifecycle progress. `ConfinementEvidence::from_attempt` admits only a

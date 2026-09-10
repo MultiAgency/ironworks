@@ -11,8 +11,9 @@ use std::time::Duration;
 /// never retried here or anywhere above.
 const UNSENT_RETRIES: u32 = 3;
 
-/// A credential. Redacted in `Debug` and it implements no `Display`, so leaking it takes a
-/// deliberate `expose()` rather than a stray `{:?}` in a log line.
+/// A credential. Redacted in `Debug` and it implements no `Display`, and the only way out is
+/// `Credential::authorization_header` — so leaking it takes deliberate work rather than a stray
+/// `{:?}` in a log line.
 #[derive(Clone)]
 pub struct Credential(String);
 
@@ -20,8 +21,17 @@ impl Credential {
     pub fn new(raw: impl Into<String>) -> Self {
         Self(raw.into())
     }
-    fn expose(&self) -> &str {
-        &self.0
+
+    /// The one sanctioned way to *use* this value: as an `Authorization` header.
+    ///
+    /// `expose` stays private, and this is the reason it can. The two request builders below both
+    /// wrote `format!("Bearer {}", …expose())` inline, so the secret left its newtype twice at
+    /// call sites — while `crates/records/src/credential.rs::Secret`,
+    /// `crates/channel-http/src/lib.rs::AdapterToken` and `crates/reconcile/src/lib.rs::OperatorToken`
+    /// all keep exactly this method for exactly this reason. A caller receives a header it can
+    /// only send, never the credential to store, log or compare.
+    fn authorization_header(&self) -> String {
+        format!("Bearer {}", self.0)
     }
 }
 
@@ -148,6 +158,14 @@ fn interpret_error(raw: &Raw, sent: bool) -> TurnFailure {
         // Rejected on validation; the handler never dispatched a turn.
         return TurnFailure::NotSent(Cause::Rejected { code, message });
     }
+    if raw.status == 429 {
+        // **`NotSent` whatever `sent` says.** A 429 is an admission rejection, so the turn was
+        // never considered — and the previous fall-through made it `Unknown(Rejected)` on create,
+        // which says "a turn MAY have run; it must not be repeated". That is the expensive
+        // direction of the error `0050` found in the other one: it strands a turn nothing ran,
+        // and a loop of short invocations against a 30-request budget (§G-6) meets it routinely.
+        return TurnFailure::NotSent(Cause::RateLimited);
+    }
     wrap(Cause::Rejected { code, message })
 }
 
@@ -172,7 +190,7 @@ impl Runtime for Ironclaw {
             let sent = self
                 .agent
                 .post(self.url("/api/v1/responses"))
-                .header("Authorization", &format!("Bearer {}", self.credential.expose()))
+                .header("Authorization", &self.credential.authorization_header())
                 .header("Content-Type", "application/json")
                 .header("Idempotency-Key", key.as_str())
                 .send(body.as_str());
@@ -191,7 +209,13 @@ impl Runtime for Ironclaw {
                                 "the runtime accepted a turn but named no response id".into(),
                             )));
                         };
-                        return Ok(Accepted { id, outcome: model::to_outcome(doc) });
+                        let reported_model =
+                            ironworks_domain::ReportedModel::read(doc.model.as_deref());
+                        return Ok(Accepted {
+                            id,
+                            outcome: model::to_outcome(doc),
+                            reported_model,
+                        });
                     }
                     interpret_error(&raw, true)
                 }
@@ -213,7 +237,7 @@ impl Runtime for Ironclaw {
         let resp = self
             .agent
             .get(self.url(&format!("/api/v1/responses/{id}")))
-            .header("Authorization", &format!("Bearer {}", self.credential.expose()))
+            .header("Authorization", &self.credential.authorization_header())
             .call()
             .map_err(|e| {
                 // A read is idempotent, so "unsent" carries no risk here — but the caller only
@@ -277,6 +301,23 @@ mod tests {
         match f.cause() {
             Cause::Rejected { code, .. } => assert_eq!(code, "invalid_request"),
             other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_429_is_provably_unsent_and_blocks_a_measurement() {
+        // Admission rejection: the turn was never considered, so it is safe to retry under the
+        // same key. This used to fall through to `Unknown(Rejected)` on create — "a turn MAY have
+        // run" — which strands a turn that nothing ran, on the one failure a loop of short
+        // invocations meets routinely (§G-6: 30 requests / 60 seconds, per user).
+        let body = r#"{"error":{"message":"Too many requests.",
+            "type":"rate_limit_error","code":"rate_limited"}}"#;
+        for sent in [true, false] {
+            let f = interpret_error(&raw(429, body), sent);
+            assert_eq!(f, TurnFailure::NotSent(Cause::RateLimited), "sent={sent}");
+            assert!(f.provably_unsent(), "a rate-limited turn is safe to retry");
+            // BLOCKED, not FAIL: nothing was established about the request.
+            assert!(f.cause().blocks_measurement());
         }
     }
 

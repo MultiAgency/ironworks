@@ -3,8 +3,8 @@
 Vocabulary is in `CONTEXT.md`. Hard-to-reverse decisions are in `docs/adr/`. This file is the
 shape of the system: the types, the layering, and the state machine.
 
-Prior art is `~/agency/ironworks` — a working Python implementation of the same product. This is
-not a port. What that codebase is worth is not its code but its scar tissue: nearly every method
+Prior art is `~/agency/ironworks-py` — a Python implementation of the same product, deployed and no
+longer developed (ADR 0011). This is not a port. What that codebase is worth is not its code but its scar tissue: nearly every method
 in `multi/seam/bridge_state.py` and `bridge_core.py` carries a docstring naming the defect it
 closed. Those docstrings are the specification. Read them before changing anything here that
 looks gratuitous.
@@ -90,9 +90,28 @@ file.
 - Status is a six-variant enum: `queued`, `in_progress`, `completed`, `failed`, `cancelled`,
   `incomplete`. Only `completed` may advance a thread — and with `tools` in play `completed` does
   not mean *answered*, because a parked run reports it too (bullet above).
-- **[measured @ 1.3.0] HTTP 200 does not mean success.** A turn that fails returns 200 with
-  `status: "failed"`, an empty `output`, and a sanitized `error` (`internal_error` / "An internal
-  error occurred." — no provider detail leaks through).
+- **[measured @ 1.3.0, source-read @ 1.4.0] HTTP 200 does not mean success.** A turn that fails
+  returns 200 with `status: "failed"`, an empty `output`, and a sanitized `error`
+  (`internal_error` / "An internal error occurred.").
+  *The source read is the stronger claim, and it is why no producer of a durable operator reason
+  quotes this field.* Sanitization is structural rather than applied: `code` is a closed enum, and
+  the envelope's `message` is **derived from that code** rather than passed through — the
+  constructor discards the incoming error's own message
+  (`ironclaw@4cb47cfaf3/crates/product/ironclaw_openai_compat/src/responses.rs:222-248`,
+  `ironclaw@4cb47cfaf3/crates/product/ironclaw_openai_compat/src/error.rs:48-62`), and the
+  *deserializer* refuses a message that does not match its code. So no provider body, URL, request
+  id or model text can reach it. **And both fields are effectively one constant:** the two sites
+  that build the envelope both hardcode the internal kind, so `internal_error` is the only value a
+  client observes — which
+  `docs/experiments/0013-the-pin-fails-silently-not-closed.md` measured standing in for a provider
+  *rate limit*. It is a label, never a diagnosis.
+- **[source-read @ 1.4.0] A run can be cancelled, and this seam never does it.**
+  `POST /api/v1/responses/{id}/cancel`
+  (`ironclaw@4cb47cfaf3/crates/product/ironclaw_openai_compat/src/router.rs:122-129`); the response
+  then reports `status: "cancelled"` and carries **no** `error` object. Recorded because a
+  cancelled response is therefore an act taken *outside* this process, which is why
+  `crates/cli/src/lib.rs::settlement` treats it as needing a person rather than a retry —
+  `dev/prove-continuation.sh` uses the route to make that path deterministic.
 - **[measured @ 1.3.0] `model` is echoed on create but not on retrieval.** `GET` reports the
   literal string `"reborn"`. Which model produced a stored answer is therefore **unverifiable
   after the fact**: the pin is a construction-time invariant on the request and can never be
@@ -174,6 +193,30 @@ file.
   error parser that assumes one shape breaks on the most common failure there is.
 - Cross-user `previous_response_id` resume is explicitly undefined upstream — it surfaces as a
   turn-level failure, not a `404`. Isolation must not rest on it.
+- **[measured @ 1.4.0] A `previous_response_id` that exists nowhere returns `404 not_found`,
+  `field: response_id`** — enveloped, and refused before anything runs. That is the neighbouring
+  case to the bullet above and it *is* defined: what is undefined is a *cross-user* resume, not a
+  *missing* one. Reached by destroying a runtime's storage and driving the same journal at a fresh
+  one (`docs/experiments/0054-a-cutover-orphans-every-conversation-and-the-order-of-the-bump-decides-what-it-costs.md`),
+  which is what any profile or host cutover does to every conversation holding a thread pointer.
+- **[source-read @ 1.4.0] Runtime policy is resolved by the booted composition profile, and only
+  `production` resolves it from configuration.** This one is read outside
+  `ironclaw_openai_compat/`, because it is decided before any request arrives. `ironclaw serve`
+  has four boot arms (`ironclaw@4cb47cfaf3/crates/app/ironclaw_cli/src/runtime/mod.rs:720`).
+  `production` reaches
+  `ironclaw@4cb47cfaf3/crates/app/ironclaw_composition/src/input.rs:1113`, which **fails the build**
+  unless `[policy].deployment_mode` and `[policy].default_profile` are both present. The served
+  profile takes a different arm entirely, ending at
+  `ironclaw@4cb47cfaf3/crates/app/ironclaw_composition/src/deployment.rs:455`, which hardcodes
+  `DeploymentMode::HostedMultiTenant`, `RuntimeProfile::HostedSafe` and
+  `OrgPolicyConstraints::default()` and reads no `[policy]` key at all.
+  `dev/docker-compose.probe.yml` boots `production`; `deploy/ironworks-ironclaw@.service` boots
+  `hosted-single-tenant-volume-sandboxed`. **So the proved stack and the served stack do not differ
+  in configuration on this axis — they run different constructors**, and the served one takes no
+  configuration on it. The standing consequence is in §I of `docs/INVARIANTS.md`; the reading is
+  `docs/experiments/0051-the-probe-and-the-served-host-resolve-authority-differently.md`, which
+  measured nothing and says so. `probe-up.sh --sandboxed` runs the served constructor and is the
+  only overlay that does.
 
 ## Layering
 
@@ -187,27 +230,49 @@ records ironclaw channel  channel-http services journal proposals reconcile
    └───────┴────────┴──────────┴───────────┴────────┴───────┴────┘  │  │
                               domain                       lifecycle ────┘
                        (depends on nothing)              (operator-side)
+
+        channel, journal, proposals ──→ store ──→ domain
+        (each keeps one durable file)   (the SQLite open protocol, once)
 ```
 
-Twenty crates. `domain` depends on nothing; every other serving-path library depends only on
-`domain` (`reconcile` also on `records` and `lifecycle`, because translating one into the other is
-its whole job); `cli` composes them.
+Twenty-three crates. `domain` depends on nothing. **`store` is the one library a *serving-path*
+library may depend on**, and it depends only on `domain`: `channel`, `journal` and `proposals` each
+keep a durable local file and each opened it by the same eight steps, so the SQLite open protocol
+was three copies that had already drifted on how a damaged `schema_version` reads. Every other
+serving-path library depends only on `domain` (`reconcile` also on `records` and `lifecycle`,
+because translating one into the other is its whole job); `cli` composes them.
+
+`devhttp` is the same shape one level down and outside the diagram: `devstore` and `devchannel` had
+one request reader and one response writer written twice, so it holds them once. It is named here
+rather than left to the table because a reader who has just been told `store` is the only such
+library would otherwise find a second one. **`telegram` does not use it**, and that is deliberate:
+its manifest records that it depends on no IronWorks crate, *"which is what keeps the serving path
+unable to acquire a second, looser route to a channel"* — a constraint that outranks removing a
+third copy of a header loop.
+
+**What `store` deliberately does not hold is the schema, the table names and every message.** A
+refusal is read by an operator deciding whether to move a file aside, and the three files are
+different things to lose — which turns ran and what was billed; words someone typed and is waiting
+to confirm; how far a channel has been acknowledged. Sharing the mechanism is the point; sharing
+the sentences would be a regression, so `crates/store/src/lib.rs::OpenFailure` carries no path and
+no prose and each caller maps it into its own error enum. The protocol itself is
+`crates/store/src/lib.rs::open_durable`.
 
 `lifecycle` and `reconcile` are **operator-side** and no serving-path crate depends on either. The
 turn journal owns durability for a turn; `lifecycle` owns what an operator intended and what the
 world reports, and outlives any turn by months.
 
-**Six crates are measurement-side** and sit outside the diagram: no serving-path crate depends on
-any of them, and they exist so a claim about the system can be checked mechanically rather than
-asserted in prose.
+**The crates below are measurement-side** and sit outside the diagram: no serving-path crate
+depends on any of them, and they exist so a claim about the system can be checked mechanically
+rather than asserted in prose.
 
 | Crate | Holds | Depends on |
 |---|---|---|
 | `graders` | the answer-quality graders and every control that pins them | **nothing** |
-| `eval` | `ironworks-eval`: runs a suite, classifies a turn, writes a transcript | `graders`, `evidence` |
-| `evidence` | the book fingerprint and the regrade ledger | `domain` |
+| `eval` | `ironworks-eval`: runs a suite, classifies a turn, writes a transcript | `graders`, `evidence`, `domain`, `services` |
+| `evidence` | the book fingerprint, the regrade ledger, and the evidence state (`E_t`) and increment document (`D_t`) an iterative loop carries between roles | `domain`, `store` |
 | `page` | the shared palette, escaping and document shell | **nothing** |
-| `site` | `ironworks-site`: the published page, the arc, the reader, the 404 | `domain`, `graders`, `evidence`, `page` |
+| `site` | `ironworks-site`: the published page, the arc, the reader, the 404 | `domain`, `services`, `evidence`, `page` |
 | `claims` | `ironworks-claims`: fails when prose disagrees with the tree | — |
 
 `graders` declares no dependencies at all, and that is the load-bearing one: **a grader that could
@@ -216,10 +281,17 @@ all three, which is why it is a separate crate rather than a module. The grader 
 no dependencies at all: the rules it replaces were regexes, and writing them out kept `regex` (and
 `fancy-regex`, which two of the patterns would have needed for lookaround) out of the lockfile.
 
-`site` depends on `graders`, and that edge is deliberate rather than convenience: the published
-page **states a refusal rate**, and it must be computed by the same instrument that graded the
-answers rather than by a second reading of them. The direction is the safe one — the page depends
-on the grader, never the reverse — so nothing a page needs can reach back into what a grader sees.
+`site` does **not** depend on `graders`, and the edge that used to be here is worth naming because
+its justification outlived it. The page was going to state a refusal rate computed by the same
+instrument that graded the answers; `docs/FRONTEND.md` records why no statistic is quoted — the
+gate that would count injection refusals fires on answers that quote the payload *in order to
+refuse it*. What `site` does depend on is `services`, because the page states the alloy digest and
+computes it with the same functions the binary composes with rather than reading it out of that
+binary's output (`crates/site/src/arc/data.rs::compose`).
+
+**Owns** is the IO a crate declares — everything in its `[dependencies]` that is neither a
+workspace crate nor one of `serde`, `serde_json`, `sha2`, `thiserror`, which carry no effect.
+`crates/claims` derives both this column and **Depends on** above it from the manifests.
 
 | Crate | Holds | Owns |
 |---|---|---|
@@ -227,16 +299,20 @@ on the grader, never the reverse — so nothing a page needs can reach back into
 | `services` | persona fragments, skills and service definitions, embedded at build time | — |
 | `records` | the record-store adapter: credential → scope, then scoped reads | `ureq` |
 | `ironclaw` | the IronClaw protocol: exact request bytes, polling, failure classification | `ureq` |
+| `store` | the SQLite open protocol, once: owner-only, WAL, `synchronous = FULL`, schema creation and version settlement — and no schema, table name or message, which stay with the crate that owns the file | `rusqlite` |
 | `channel` | channel semantics: the derived cursor, the cross-tenant barrier, dispositions, compaction | `rusqlite` |
 | `channel-http` | the channel transport: poll with an offset, per-chunk send | `ureq` |
 | `journal` | durable turn state, delivery evidence, thread pointers | `rusqlite` |
 | `proposals` | what a person asked to promote and has not yet confirmed | `rusqlite` |
+| `evidence` | observations about a candidate, appended and never rewritten, and the bounded increment planned against them | `rusqlite` |
 | `lifecycle` | operator-side state: intent, provisioning progress, observed authority, confinement policy | `rusqlite` |
 | `reconcile` | translating authoritative systems into lifecycle observations — Account Service, IronClaw members, fleet enumeration, confinement | `ureq` |
+| `testkit` | the HTTP stub and the scratch directory this workspace's **tests** share. A `dev-dependencies` edge only, so it reaches no runtime graph and no shipped binary | — |
+| `devhttp` | the HTTP the two fixtures below both need: one bounded request reader and one response writer, and nothing else. Not used by `telegram`, whose manifest records that it depends on no IronWorks crate | — |
 | `devstore` | a disposable record store, for the live proofs | — |
 | `devchannel` | a disposable channel, for the delivery proofs | — |
 | `telegram` | the channel contract on one side, the Telegram Bot API on the other | `ureq` |
-| `cli` | the operator binary, `ironworks` | — |
+| `cli` | the operator binary, `ironworks` | `rusqlite` |
 
 **The rule Cargo enforces: `domain` and `services` name no IO dependency.** No `ureq`, no `rusqlite`,
 no filesystem, no clock, no credential values. `domain` does carry `serde`, because record shapes
@@ -274,12 +350,18 @@ Every identifier is a newtype with a private field, no `Default`, and one fallib
 The point is not tidiness — it is that the invalid value has no way into the program.
 
 ```rust
-Pin, ModelName, IroncClawRev      // no Default: a default is the one value that outranks config
-OrgId, Slug, ServiceName          // validated charset, non-empty
+ModelPin, IronclawPin                // no Default: a default is the one value that outranks config
+OrgId, Slug, ServiceId               // validated charset, non-empty
 AccountId, ContactId, ActivityId
 ResponseId, IdempotencyKey
-UpdateId, ChatId, MessageId
+ActorRef, ContributorId, RuntimeIdentity
 ```
+
+The pins are `crates/domain/src/pins.rs::ModelPin` and `::IronclawPin`; the slug-shaped ids
+`crates/domain/src/ids.rs::OrgId`; the record ids `crates/domain/src/record.rs::AccountId`. The one
+identifier that does **not** carry a fallible constructor is `crates/channel/src/lib.rs::UpdateId` —
+a channel's own numbering, opaque and monotone, taken from a `u64` rather than parsed, because it is
+not ours to invent or to validate.
 
 Three of these deserve more than a newtype.
 
@@ -301,8 +383,9 @@ moment of use, so nothing in the domain model has a secret to leak — a careles
 keyring path. Redaction is still needed for text we did not construct, such as an upstream error
 body, but it stops being the only defence.
 
-`CredentialPurpose` is `RuntimeMember` or `RecordScope`, so a credential minted for one cannot be
-passed where the other belongs.
+`CredentialPurpose` distinguishes `OperatorConfiguration`, `RuntimeMember`, `RecordScope` and
+`RecordAppend`, so a credential minted for one authority path cannot be passed where another
+belongs. Operator configuration is intentionally not a serving credential.
 
 ### `RecordScope` — tenancy in the key, as a type
 
@@ -342,16 +425,22 @@ discipline survived it in the proof scripts, which report `PASS / FAIL / BLOCKED
 `list | grep` under `pipefail` reports the pipeline's status whatever grep found, and a caller
 reading that as a boolean concludes the opposite of the truth (§F-12).
 
-Two differences from the deleted draft, both forced by the caller rather than chosen:
+`lifecycle inspect` also reports **readiness** as a separate lifecycle axis. `READY` means the
+instance reached `activated`; it does not mean a serving process was observed, and it says nothing
+about whether an optional confinement observation was requested. A clean authority verdict for an
+unstarted or partly provisioned instance therefore remains `PASS` evidence but exits **4** with
+`NOT_READY`. Evidence retains precedence: a contradiction exits 2 and an incomplete measurement
+exits 3. This fourth code is deliberately not `BLOCKED`, because the requested measurement did
+happen.
+
+Two omissions from the deleted draft are deliberate:
 
 - **`Skipped` is gone.** Nothing skips: an inspection either measured something or reports why it
   could not, and `Blocked` already covers the second. A variant meaning *we did not look* beside
   one meaning *we could not* is two names for the same operator action.
-- **`AcceptedRisk(NonEmptyReason)` exists and nothing constructs it.** It is where an operator's
-  explicit classification of a known risk will live, and the reason sits *in the variant* so it
-  cannot be produced without one — a waiver nobody can account for later is the same as no waiver
-  (§F-8). It is defined ahead of its producer specifically so unmanaged authority is never
-  normalized into it, which is the "make a gate green by forgetting" move §F-9 forbids.
+- **An accepted-risk verdict is absent until the residual-authority ledger exists.** A reason in a
+  value would prove only that a caller supplied a sentence, not that an operator recorded a
+  classification. Defining the green verdict first would create the bypass §F-9 forbids.
 
 The rule that decides the ordering: **`Fail` outranks `Blocked`.** A measured contradiction is
 worse news than an unmeasured one, and the operator should see the sharper fact first.
@@ -581,7 +670,7 @@ tabulated below need `dev/probe-up.sh` first, except `dev/prove-lifecycle.sh` an
 `dev/prove-tenancy.sh`, which need no runtime and no model key — reconciliation is a read, and
 record separation is a property of the record path rather than of an answer.
 
-**The table is the six that run against a probe, not every proof in `dev/`.** The others are
+**The table is the proofs that run against a probe, not every proof in `dev/`.** The others are
 deliberately absent from it, because a check count beside them would read as a result somebody has
 seen: `dev/prove-confinement.sh` needs the runtime but **no model key** (confinement
 is entirely the settings API) and still *consumes a member* when it runs — §L-9, approval-off is
@@ -594,9 +683,15 @@ states — 50 disabled + 2 locked — is the minted member's and was not what th
 runtime on `hosted-single-tenant-volume-sandboxed` **and** a service declaring
 `runtime_tools: "sandbox"`; as of 2026-09-02 `dev/probe-up.sh --sandboxed` supplies the first
 (`dev/docker-compose.probe-sandboxed.yml`, and `docs/experiments/0039-the-catalogue-has-two-axes.md`
-for what standing it up measured), so the proof now reports the one block that remains — no shipped
-service declares `sandbox`, which PRD §13 records as a product decision nobody has taken. **It is
-still BLOCKED**; what changed is which of its two reasons stands;
+for what standing it up measured), and the proof-only binary supplies the second. **It now scores
+3 PASS on 2026-09-08** — the first exercise of the sandbox
+(`docs/experiments/0059-the-sandbox-works-once-the-model-is-told-the-tools-other-name.md`), which
+retires the "still BLOCKED" this block used to record. **Three things travel with that pass**: its
+asks name the tool's wire spelling, without which the runtime refuses its own model's output
+(`docs/UPSTREAM.md` D10); the probe's daemon had to be Docker 28 or newer; and the member was not
+confined, so a confined sandbox is still unmeasured. **No shipped service declares `sandbox`** —
+PRD §13's product decision is untaken and unaffected by any of this;
+`dev/prove-cutover.sh` needs the runtime **and** a model key, because what it proves is that
 `dev/prove-cutover.sh` needs the runtime **and** a model key, because what it proves is that
 publishing a registry changes which tenant a real relay answers for, and a route that never reaches
 a model is not serving; it mints and confines its own candidate, so it carries
@@ -620,8 +715,11 @@ counting method, and `0044` measures the recovery mechanism rather than this pro
 The proof stays narrow and blocks honestly instead. `0044` remains the evidence for a change this
 proof has not made, and the assertion it would need is `one distinct create key` rather than
 `create=1`;
-and `dev/prove-deployment-isolation.sh` runs as root on a deployment host, which does not exist
-(`deploy/README.md`). `dev/prove-host.sh` is read-only but needs passwordless root over SSH to the
+and `dev/prove-deployment-isolation.sh` runs as root against two clients' rootless daemons, and
+the **second client** is what does not exist (`deploy/README.md`): `multi-serve` serves one tenant,
+so the proof's positive control — same-named sentinels in two daemons, each service user denied by
+the other's socket — has nothing to run between. ADR 0008 is the decision this leaves standing as a
+design claim. `dev/prove-host.sh` is read-only but needs passwordless root over SSH to the
 live `multi-serve` host and sources its root-owned relay environment to obtain the member
 credential; it has no default for that host's address or account and blocks without
 `PROVE_HOST_ADDRESS` and `PROVE_HOST_USER`, because this repository is public and a serving host's
@@ -641,6 +739,7 @@ alias.
 cargo test --workspace       passing
 cargo clippy --all-targets   clean
 cargo fmt --check            clean
+cargo doc --no-deps          clean
 alloy digest                 3770e0942624bda4   coordination-eval, 25,575 bytes
 
                              last run 2026-09-02, one probe, one sitting
@@ -671,14 +770,22 @@ beside these scripts is a claim about the provider's latency that day as much as
 repository**, which is why the date is in the block rather than in prose beside it.
 
 **The digest names its tenant now, because it never could have named none.** The alloy is
-guidance-dependent — `tenant-a` gives `d1acc6cb381b1875`, `tenant-b` `74540e4c87c3a845`, `eval`
-`5e75679666c8bf7e` — so `alloy digest <hex>` with no tenant beside it was under-specified from the
-first line it was written on. The value that stood here, `67f80eb2d20172fa` over 14,337 bytes, was
+guidance-dependent — `eval` gives `5e75679666c8bf7e` over `fixtures/eval.guidance.md` — so
+`alloy digest <hex>` with no tenant beside it was under-specified from the first line it was
+written on. The value that stood here, `67f80eb2d20172fa` over 14,337 bytes, was
 `account-analysis@1`: a service deleted on 2026-09-02, whose digest no composition in this tree can
 now produce. `docs/INVARIANTS.md` §K keeps that figure deliberately, as dated evidence of what §K
 was earned against; this block is where a current one lives, and a current one has a tenant.
 
-### One turn, end to end
+The two figures that stood beside `eval` here — `tenant-a` and `tenant-b` — went the same way as
+`account-analysis@1` and for the same reason: their guidance fixtures were deleted when
+`fixtures/tenants/` became a template plus `fixtures/tenants/README.md`, so no composition in this
+tree reproduces either. `eval` is the one that survives because `fixtures/eval.guidance.md` does.
+That a digest here can stop being reproducible without anything failing is the shape §K's
+"asserted and unguarded" caveat describes: `crates/claims` derives a crate count from the tree and
+cannot derive this.
+
+## One turn, end to end
 
 The path an inbound message takes, in order. Every other section here describes one part of it;
 this is the only place the whole path is in one piece. **The unit is a turn, not a tool call** —
@@ -726,7 +833,7 @@ sequenceDiagram
     IC->>R: completed { text, usage }
 
     R->>J: commit_completed — response id and thread pointer, or neither
-    Note over R: malformed_answer(text) → print, do NOT deliver
+    Note over R: malformed_answer(text) → print, settle OperatorRequired, do NOT deliver
     R->>TG: send(chunks)
     TG->>P: answer
     R->>J: record_delivery_attempt
@@ -740,9 +847,9 @@ sequenceDiagram
 | 3 | Journal the whole batch before working any of it | `crates/channel/src/lib.rs::note_batch` |
 | 4 | Route `update.channel` against registry claims | `crates/domain/src/route.rs::resolve` |
 | 5 | Mint the key, disposition the update | `crates/channel/src/lib.rs::disposition` |
-| 6 | Boot the tenant: definition, guidance, unverified instance | `crates/cli/src/main.rs::boot_tenant` |
+| 6 | Boot the tenant: definition, guidance, unverified instance | `crates/cli/src/lib.rs::boot_tenant` |
 | 7 | **Control** — resolve credential → org, server-side; fails closed | `crates/domain/src/instance.rs::verify` |
-| 8 | Recovery before anything new | `crates/cli/src/main.rs::drive` |
+| 8 | Recovery before anything new | `crates/cli/src/lib.rs::drive` |
 | 9 | **Data source** — fetch records; degrades, except scope drift | `crates/records/src/lib.rs::catalog` |
 | 10 | **Chokepoint** — compose the alloy, render the envelope | `crates/domain/src/instance.rs::build_turn` |
 | 11 | Envelope rendering: no clock, no credentials, no IO, so a crashed body rebuilds byte-identically (ADR 0005) | `crates/domain/src/envelope.rs::build` |
@@ -761,14 +868,13 @@ reach the model only through a `RecordScope` only a verified instance can mint) 
 process, against another database). That is deliberate — but it is why *"did this turn respect its
 capability set?"* has no per-turn answer, which §I of the invariants records as a gap.
 
-### Crash boundaries
+## Crash boundaries
 
 **Fifteen**, numbered as the reference corpus numbers them
-(`~/agency/ironworks/multi/seam/test_bridge_recovery.py`). The numbering is used throughout this
+(`~/agency/ironworks-py/multi/seam/test_bridge_recovery.py`). The numbering is used throughout this
 repository and in `docs/PRD.md` and `docs/INVARIANTS.md`; this table is where it is defined, and
-every row's definition was read out of that file rather than inferred. **`B<n>` is a crash
-boundary; `§B-<n>` is an isolation invariant in `docs/INVARIANTS.md`.** They are one hyphen apart
-and unrelated.
+every row's definition was read out of that file rather than inferred. `B<n>` and `§B-<n>` are not
+the same thing; `CONTEXT.md`'s Shorthand table is where that is defined.
 
 | | Crash point, as the reference defines it | Here |
 |---|---|---|
@@ -786,7 +892,7 @@ and unrelated.
 | **B10b** | store readable by group or world | **enforced.** `0o600` asserted on all four stores — channel, turn journal, lifecycle ledger, proposals — plus `crates/domain/src/custody.rs` |
 | **B11** | route vanished while the turn was in flight | parked for an operator, never relabelled, never re-run — `…::b11_a_route_that_vanished_mid_turn_parks_the_update_and_never_relabels_it` |
 | **B11b** | route vanished on an already-**delivered** row | **dissolved, twice over.** The reference's defect was relabelling the row and overwriting `delivered_at` and the response id. Here `crates/channel/src/lib.rs::disposition` refuses any change to a row that is not `unclaimed` (`AlreadyDispositioned`), so a disposition is write-once — and the delivery evidence is not in that row at all, it is in the turn journal under the idempotency key. Two stores, and nothing routes over either |
-| **B12** | age-compacting the alarm | **dissolved, and strictly stronger.** The reference had to exempt `RECOVERY_BLOCKED` by name. Here the turn journal has **no compaction at all** — no `DELETE FROM turns` anywhere — so `Journal::unresolved` keeps reporting an unsettled turn forever, and channel compaction only ever removes `not_addressed` and `unroutable`, which by `Disposition::cost_a_turn` are the two that cost nothing |
+| **B12** | age-compacting the alarm | **dissolved, and strictly stronger.** The reference had to exempt `RECOVERY_BLOCKED` by name. Here the turn journal has **no compaction at all** — no `DELETE FROM turns` anywhere — so `Journal::unresolved` keeps reporting an unsettled turn forever, and channel compaction removes only what was settled on arrival and never billed — `not_addressed`, `unroutable` and `command` (`crates/channel/src/lib.rs::COMPACTABLE`). A command is answered deterministically by this process and mints no turn, so by `Disposition::cost_a_turn` it cost nothing; whether it made a proposal, and what became of showing it, is the proposal store's record, not this row's. `crates/channel/src/tests.rs::compaction_forgets_exactly_what_was_never_billed` pins the set against both predicates, because `command` was once left out of it |
 
 **B1-B7 are proven**, B1-B4 and B5/B7 across real process death in three proof scripts — and
 **B3 is proven twice**, once for a fresh turn and once for a chained one, because those recover by
@@ -839,7 +945,8 @@ prevent** — in the other direction, for once.
   constructible only through `ServiceInstance<Verified>`. See §K of `docs/INVARIANTS.md`.
 - **Lifecycle observation.** Operator intent, recorded progress and observed external authority
   are three separate axes; reconcilers exist for the Account Service, individual members, fleet
-  member enumeration, and confinement. Nothing adopts, provisions or repairs.
+  member enumeration, and confinement. Adoption is an explicit credential-backed operator action;
+  nothing provisions or repairs external authority.
 - **Confinement policy, application and verification** against IronClaw 1.4.0, with its limits
   stated — §L of `docs/INVARIANTS.md`. `ironworks lifecycle confine` applies a plan and then
   re-measures it, taking its verdict from a fresh observation rather than from its own writes.
@@ -878,7 +985,8 @@ prevent** — in the other direction, for once.
   conversation — the second chained, carrying the book by thread rather than re-sending it (6,111
   bytes down to 277). One turn took a real `service_unavailable` and was **recovered on the next
   cycle by byte-identical replay**, the first time ADR 0005 has been observed outside a
-  `--crash-at` harness. Four cycles is not an uptime claim, and nothing is deployed anywhere.
+  `--crash-at` harness. Four cycles is not an uptime claim, and this run was against the probe:
+  it says nothing about a served host, which came later and carries its own proof above.
 - **One real operator turn.** On 2026-09-01 `coordinate` served the operator's own org from the
   live Account Service through the unchanged `Book` contract — two real records, one answered
   turn, and a byte-identical replay that recovered a real upstream `service_unavailable` without
@@ -886,8 +994,10 @@ prevent** — in the other direction, for once.
 
 **Not built.**
 
-- **Provisioning and deprovisioning.** Nothing creates or destroys authority. Lifecycle *observes*;
-  §F of the invariants is unbuilt.
+- **End-to-end provisioning and deprovisioning.** The operator binary has narrow commands for
+  credential-backed adoption, measured confinement, strict registry publication and complete
+  export. It does not create external authority, activate from a deployment measurement, destroy
+  authority, or maintain the residual-authority ledger §F requires.
 - **Automatic confinement repair.** `ironworks lifecycle confine` is an explicit operator
   command; the reconciler still only reports drift and never repairs it on its own.
 - **Approvals, workflows, effect execution.** `Access` has no `Write` variant.
@@ -909,10 +1019,14 @@ prevent** — in the other direction, for once.
   declares it**, so nothing exercises the path end to end. The derivation is tested offline in
   three places (`for_profile` both ways in `ironworks-lifecycle`, `policy_for` against a real
   lifecycle store in `cli`, and a negative over every shipped service). What is *not* tested is
-  the live half: `dev/prove-workspace.sh` needs a runtime on
-  `hosted-single-tenant-volume-sandboxed`, and `dev/docker-compose.probe.yml` runs `production`.
-  So that proof cannot run against the probe at all — it needs the systemd path in `deploy/`,
-  which `deploy/README.md` records as never having been performed.
+  the live half — and **the live half is now measured, for the proof-only service only**.
+  `dev/prove-workspace.sh` scores 3 PASS
+  (`docs/experiments/0059-the-sandbox-works-once-the-model-is-told-the-tools-other-name.md`), so a
+  sandbox turn is no longer a thing this repository has never run. **This bullet's own subject is
+  untouched**: no *shipped* service declares `sandbox`, the member in that run was not confined, and
+  what the derivation does to a confined member's live catalogue is still tested only offline. The
+  status block above carries the pass with its date and its three qualifications, and
+  `docs/INVARIANTS.md` §L-10 agrees.
 - **A qualified account-coordination result.** `fixtures/account-coordination` supplies an
   invented ten-account book and controlled graders for the operator's actual service, and `0020`
   records the first seven-case grade over that book — but it is **not a product claim**. It is one
@@ -923,10 +1037,15 @@ prevent** — in the other direction, for once.
   account-analysis parity result belonged to the retired replacement review and is not carried
   forward; that service declared `evaluation: null`, carried no answer-quality claim, had no user,
   and was deleted on 2026-09-02 along with the default slot it existed to hold.
-- **A machine-enforced operator-only binding.** Account coordination names MultiAgency but is
-  currently confined by deployment and explicit guidance/service selection, not by comparing the
-  verified org with an operator-org configuration. This must land before a second tenant exists or
-  before the service is relayed into any room the operator does not solely occupy.
+- ~~**A machine-enforced operator-only binding.**~~ **Built.** A registry entry carries the org an
+  operator recorded the tenant as, and `crates/cli/src/lib.rs::boot_tenant` refuses to serve when
+  the record store resolves that tenant's credential to a different one. The value is
+  `ironworks_domain::registry::ExpectedOrg`, which is deliberately not an `OrgId` — it can be
+  compared against a verified org and shown in a refusal, and cannot become a scope key, because a
+  caller-supplied one is what §B-1 exists to prevent. Generalised from *operator*-only to
+  *tenant*-bound under ADR 0010, which is what removed the premise that a shipped composition is
+  always MultiAgency's own. **It is enforced, not measured:** no live run has exercised the
+  refusal, and `dev/` has no proof that provokes it.
 - **An operator surface** beyond `compose`, `coordinate`, `turn`, `relay`, `redeliver`,
   `status`, `lifecycle inspect`, `lifecycle members` and `lifecycle confine`. `status` displays `Journal::unresolved`
   read-only; it does not reconcile or clear anything. There is still no `doctor`.

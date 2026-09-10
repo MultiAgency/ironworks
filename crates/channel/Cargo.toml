@@ -20,6 +20,7 @@ publish = false
 # open, or settled.
 [dependencies]
 ironworks-domain = { path = "../domain" }
+ironworks-store = { path = "../store" }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 thiserror = { workspace = true }
 

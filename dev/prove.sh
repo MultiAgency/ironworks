@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# COST: real model turns against the probe, and a share of the runtime's rate-limit
+# budget. Needs a probe and a model key.
 # Prove the live chain, the refusals that bound it, and recovery across process death.
 #
 #   dev/probe-up.sh          # runtime + disposable record store
@@ -56,11 +58,8 @@
 # and a second logical turn would necessarily carry a different response id.
 #
 # Verdicts follow the operator convention: PASS / FAIL / BLOCKED, exiting 0 / 2 / 3.
-set -uo pipefail
-
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
-cd "$ROOT"
+# shellcheck source=dev/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 STORE_PORT="${PROBE_STORE_PORT:-3996}"
 NEG_PORT="${PROVE_NEG_PORT:-3995}"
@@ -70,40 +69,24 @@ SLUG="eval"
 SERVICE="relationship-intelligence"
 ASK="Name the single account with a confirmed budget. One line."
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ironworks-prove.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
-
-pass=0; failed=0; blocked=0
-verdict() {
-  printf '%-9s %-30s %s\n' "$2" "$1" "${3:-}"
-  case "$2" in PASS) pass=$((pass+1));; FAIL) failed=$((failed+1));; BLOCKED) blocked=$((blocked+1));; esac
-}
+# shellcheck disable=SC2329  # invoked indirectly, through `on_exit`.
+cleanup() { rm -rf "$WORK"; }
+on_exit cleanup
 
 # ── preconditions ────────────────────────────────────────────────────────────────────────
-[ -n "${IRONWORKS_BASE:-}" ] && [ -n "${IRONWORKS_TOKEN:-}" ] || {
-  echo "prove: IRONWORKS_BASE / IRONWORKS_TOKEN are unset. Run dev/probe-up.sh and export the" >&2
-  echo "       lines it prints." >&2
-  exit 3
-}
-curl -fsS --max-time 3 "$IRONWORKS_BASE/api/health" >/dev/null 2>&1 || {
-  verdict "runtime.reachable" BLOCKED "$IRONWORKS_BASE did not answer /api/health"; exit 3; }
-curl -fsS --max-time 3 "http://127.0.0.1:$STORE_PORT/health" >/dev/null 2>&1 || {
-  verdict "store.reachable" BLOCKED "no record store on :$STORE_PORT (dev/probe-up.sh)"; exit 3; }
+need_env IRONWORKS_BASE IRONWORKS_TOKEN
+need_runtime
+need_store
 cargo build -q -p ironworks-cli -p ironworks-devstore 2>/dev/null || {
-  verdict "build" BLOCKED "cargo build failed"; exit 3; }
+  give_up "build" "cargo build failed"; }
 BIN=./target/debug/ironworks
 STORE_BIN=./target/debug/ironworks-devstore
 HEALTHY="http://127.0.0.1:$STORE_PORT"
 
 neg_store() {
-  ( exec "$STORE_BIN" --port "$NEG_PORT" --book "$SLUG=fixtures/book" \
-      --identity "$STORE_TOKEN=$SLUG" "$1" "$2" ) >/dev/null 2>&1 </dev/null &
-  local pid=$!
-  disown 2>/dev/null || true
-  for _ in $(seq 1 30); do
-    curl -fsS --max-time 1 "http://127.0.0.1:$NEG_PORT/health" >/dev/null 2>&1 && { echo "$pid"; return; }
-    sleep 0.2
-  done
-  kill "$pid" 2>/dev/null; echo ""
+  start_fixture "http://127.0.0.1:$NEG_PORT/health" \
+    "$STORE_BIN" --port "$NEG_PORT" --book "$SLUG=fixtures/book" \
+    --identity "$STORE_TOKEN=$SLUG" "$1" "$2"
 }
 
 # turn <journal> <call-log> <store-url> <records-token> [crash-at]
@@ -116,37 +99,6 @@ turn() {
       --journal "$j" --call-log "$cl" ${extra[@]+"${extra[@]}"} 2>&1
 }
 
-no_model() { grep -q "not a valid model name\|model provider rejected" <<<"$1"; }
-# The model PROVIDER, upstream of the runtime, rate limits. It surfaces here as a send timeout or
-# an unknown turn outcome — which are real and important states, handled correctly by the code
-# under test, but they are not evidence about the chain. Measured: the runtime answers
-# /api/health in ~2ms while its own log reports `Provider nearai_chat rate limited`. A proof that
-# scored this as FAIL would be reporting a defect in IronWorks for something upstream of it.
-#
-# `service_unavailable` is the SAME CLASS and was missing. It is the runtime's 30-second wait
-# timeout (`DEFAULT_RESPONSES_WAIT_TIMEOUT`, DESIGN.md): the provider outran the wait, the runtime
-# returned 503, and the turn kept running server-side. Nothing in IronWorks did anything wrong —
-# the seam recovers it by byte-identical replay, which is a different check's job to prove. Left
-# unmatched it scored `chain.end_to_end` and `recover.b2_before_dispatch` as FAIL on a run where
-# the provider was merely slow: measured 11 refusals in 17 asks of the shipped question
-# (`docs/experiments/0036-the-demo-question-lands-on-the-thirty-second-cliff.md`), which turned a
-# green suite red without a line of this repository changing.
-#
-# **This does not make the run a pass.** A BLOCKED `chain.end_to_end` is still the positive
-# control the two isolation refusals need, so a sitting that blocks it measured nothing about
-# isolation either — §J's rule, and the same reading `docs/INVARIANTS.md` §K records for the
-# 1.4.0 qualification. It reports the right thing rather than the wrong one.
-degraded() {
-  grep -qE "timed out (writing|reading)|rate limited|provider .* unavailable|service_unavailable" <<<"$1"
-}
-creates()  { awk -F'\t' '$1=="create"' "$1" 2>/dev/null | wc -l | tr -d ' '; }
-fetches()  { awk -F'\t' '$1=="fetch"'  "$1" 2>/dev/null | wc -l | tr -d ' '; }
-keys()     { awk -F'\t' '$1=="create"{print $2}' "$1" 2>/dev/null | sort -u | wc -l | tr -d ' '; }
-resp_of()  { grep -oE 'resp_[0-9a-f]+' <<<"$1" | head -n1; }
-# The failing run's OWN last words. An earlier version grepped the first `ironworks:` line, which
-# is the "scope verified" success message — so every FAIL reported the wrong sentence and a
-# transient looked identical to a regression.
-why()      { grep -v '^$' <<<"$1" | tail -n1 | cut -c1-88; }
 # A recovery check needs its crash to actually happen. If the deliberate exit (75) did not occur,
 # the boundary was never set up — the runtime timed out, or refused, or rate-limited — and the
 # check has measured nothing. That is BLOCKED, not FAIL: scoring it as a failure reports a defect
@@ -171,7 +123,7 @@ fi
 # ── 2. the chain ─────────────────────────────────────────────────────────────────────────
 out="$(turn "$WORK/1.db" "$WORK/1.log" "$HEALTHY" "$STORE_TOKEN")"; rc=$?
 if no_model "$out"; then verdict "chain.end_to_end" BLOCKED "runtime has no usable model key"
-elif degraded "$out"; then verdict "chain.end_to_end" BLOCKED "the model provider is degraded: $(why "$out")"
+elif unsettled "$out"; then verdict "chain.end_to_end" BLOCKED "$(unsettled_why "$out")"
 elif [ $rc -eq 0 ] && grep -q "scope $SLUG verified by" <<<"$out" \
   && grep -q "40 record(s) \[complete\]" <<<"$out" && grep -q "response resp_" <<<"$out"; then
   verdict "chain.end_to_end" PASS "$(tail -n1 <<<"$out" | cut -c1-52)"
@@ -202,16 +154,16 @@ else
   out="$(turn "$WORK/4.db" "$WORK/4.log" "http://127.0.0.1:$NEG_PORT" "$STORE_TOKEN")"; rc=$?
   kill "$pid" 2>/dev/null
   if no_model "$out"; then verdict "degrade.record_outage" BLOCKED "runtime has no usable model key"
-  elif degraded "$out"; then verdict "degrade.record_outage" BLOCKED "upstream is degraded or outran the 30s wait"
+  elif unsettled "$out"; then verdict "degrade.record_outage" BLOCKED "$(unsettled_why "$out")"
   elif [ $rc -eq 0 ] && grep -q "0 record(s) \[DEGRADED\]" <<<"$out" \
     && grep -q "response resp_" <<<"$out"; then
     verdict "degrade.record_outage" PASS "verified scope kept; served with no records"
   else verdict "degrade.record_outage" FAIL "expected a degraded turn, rc=$rc | $(why "$out")"; fi
 fi
 
-# The runtime allows 30 requests per 60 seconds per user, and each check above is a create plus
-# polls. Pace the recovery checks so a rate limit cannot masquerade as a recovery failure.
-sleep 5
+# Pace the recovery checks so a rate limit cannot masquerade as a recovery failure. The window and
+# the reasoning are in `dev/lib.sh::pace`, once, rather than above one of nine bare sleeps.
+pace
 
 # ── 6. B2: crash before dispatch ─────────────────────────────────────────────────────────
 # The key and the body digest are durable; nothing was sent. The restart dispatches the ORIGINAL
@@ -220,8 +172,8 @@ J="$WORK/b2.db"; L="$WORK/b2.log"
 one="$(turn "$J" "$L" "$HEALTHY" "$STORE_TOKEN" before-dispatch)"; rc1=$?
 two="$(turn "$J" "$L" "$HEALTHY" "$STORE_TOKEN")"; rc2=$?
 if no_model "$two"; then verdict "recover.b2_before_dispatch" BLOCKED "runtime has no usable model key"
-elif degraded "$one$two"; then
-  verdict "recover.b2_before_dispatch" BLOCKED "upstream is degraded or outran the 30s wait"
+elif unsettled "$one$two"; then
+  verdict "recover.b2_before_dispatch" BLOCKED "$(unsettled_why "$one$two")"
 elif ! crashed "$rc1"; then
   verdict "recover.b2_before_dispatch" BLOCKED "the crash point was never reached: $(why "$one")"
 elif [ $rc1 -eq 75 ] && [ $rc2 -eq 0 ] \
@@ -234,7 +186,7 @@ else
     "rc=$rc1/$rc2 create=$(creates "$L") keys=$(keys "$L") | $(why "$one$two")"
 fi
 
-sleep 5
+pace
 
 # ── 7. B3: crash after acceptance, before the id is durable ──────────────────────────────
 # The architectural improvement. The runtime accepted a turn we never recorded. The restart
@@ -246,8 +198,8 @@ discarded="$(grep -oE 'DISCARDING response resp_[0-9a-f]+' <<<"$one" | grep -oE 
 two="$(turn "$J" "$L" "$HEALTHY" "$STORE_TOKEN")"; rc2=$?
 recovered="$(resp_of "$(grep -m1 'response resp_' <<<"$two")")"
 if no_model "$one$two"; then verdict "recover.b3_replay_identical" BLOCKED "runtime has no usable model key"
-elif degraded "$one$two"; then
-  verdict "recover.b3_replay_identical" BLOCKED "upstream is degraded or outran the 30s wait"
+elif unsettled "$one$two"; then
+  verdict "recover.b3_replay_identical" BLOCKED "$(unsettled_why "$one$two")"
 elif ! crashed "$rc1"; then
   verdict "recover.b3_replay_identical" BLOCKED "the crash point was never reached: $(why "$one")"
 elif [ $rc1 -eq 75 ] && [ $rc2 -eq 0 ] \
@@ -261,7 +213,7 @@ else
     "rc=$rc1/$rc2 create=$(creates "$L") keys=$(keys "$L") | $(why "$one$two")"
 fi
 
-sleep 5
+pace
 
 # ── 8. B4: crash after the id is durable ─────────────────────────────────────────────────
 # The response is known, so the restart fetches it. `create` is never called again.
@@ -271,8 +223,8 @@ durable="$(grep -oE 'response resp_[0-9a-f]+ is durable' <<<"$one" | grep -oE 'r
 before="$(creates "$L")"
 two="$(turn "$J" "$L" "$HEALTHY" "$STORE_TOKEN")"; rc2=$?
 if no_model "$one$two"; then verdict "recover.b4_fetch_not_create" BLOCKED "runtime has no usable model key"
-elif degraded "$one$two"; then
-  verdict "recover.b4_fetch_not_create" BLOCKED "upstream is degraded or outran the 30s wait"
+elif unsettled "$one$two"; then
+  verdict "recover.b4_fetch_not_create" BLOCKED "$(unsettled_why "$one$two")"
 elif ! crashed "$rc1"; then
   verdict "recover.b4_fetch_not_create" BLOCKED "the crash point was never reached: $(why "$one")"
 elif [ $rc1 -eq 75 ] && [ $rc2 -eq 0 ] \
@@ -285,7 +237,7 @@ else
     "rc=$rc1/$rc2 create=$(creates "$L") fetch=$(fetches "$L") | $(why "$one$two")"
 fi
 
-sleep 5
+pace
 
 # ── 9. B5: stdout accepted the answer before delivery became durable ────────────────────
 # The unavoidable direct-terminal window. The restart may print an identical duplicate, but it
@@ -297,8 +249,8 @@ durable="$(resp_of "$(grep -m1 'response resp_' <<<"$one")")"
 two="$(turn "$J" "$L" "$HEALTHY" "$STORE_TOKEN")"; rc2=$?
 status="$($BIN status --journal "$J" 2>&1)"; rc3=$?
 if no_model "$one$two"; then verdict "recover.b5_terminal_delivery" BLOCKED "runtime has no usable model key"
-elif degraded "$one$two"; then
-  verdict "recover.b5_terminal_delivery" BLOCKED "upstream is degraded or outran the 30s wait"
+elif unsettled "$one$two"; then
+  verdict "recover.b5_terminal_delivery" BLOCKED "$(unsettled_why "$one$two")"
 elif ! crashed "$rc1"; then
   verdict "recover.b5_terminal_delivery" BLOCKED "the crash point was never reached: $(why "$one")"
 elif [ $rc1 -eq 75 ] && [ $rc2 -eq 0 ] && [ $rc3 -eq 0 ] \
@@ -314,9 +266,6 @@ else
 fi
 
 # ── verdict ──────────────────────────────────────────────────────────────────────────────
-printf '\n%d passed, %d failed, %d blocked\n' "$pass" "$failed" "$blocked"
-printf 'call counts are taken at the runtime adapter boundary and survive each restart.\n'
-printf 'chain requests are counted from the first non-health store request; /health is excluded.\n'
-[ "$failed" -gt 0 ] && exit 2
-[ "$blocked" -gt 0 ] && exit 3
-exit 0
+summary \
+  'call counts are taken at the runtime adapter boundary and survive each restart.' \
+  'chain requests are counted from the first non-health store request; /health is excluded.'

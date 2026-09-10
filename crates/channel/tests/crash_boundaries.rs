@@ -23,6 +23,41 @@
 //! How many model runs happened, how many fetches, how many sends and whether their text was
 //! **byte-identical**, the durable delivery state, the derived cursor, and what the channel was
 //! told. A count alone would pass for an implementation that sent a second, different answer.
+//!
+//! # Settling is here too, and it is not a boundary
+//!
+//! A turn whose response holds nothing deliverable stops automatic work and releases the cursor
+//! ([`At::AnswerUndeliverable`]). That is not a crash point — it is the state every crash point
+//! above is trying not to become permanent — but it belongs in this file for the same reason B5–B7
+//! do: only the two journals *together* can say whether releasing the offset lost an answer or
+//! stopped one stuck conversation from deafening the rest.
+
+/// Two ordered instants, in the one form the timestamp columns hold.
+///
+/// These were the string literals `&t0()` and `&t1()` — placeholders that are not timestamps at all
+/// and would sort arbitrarily against a real one in the column `ORDER BY first_seen, key` reads.
+/// Nothing caught that, because the parameter was `&str`.
+fn t0() -> ironworks_domain::Utc {
+    ironworks_domain::Utc::parse("2026-08-27T00:00:00+00:00").expect("canonical")
+}
+fn t1() -> ironworks_domain::Utc {
+    ironworks_domain::Utc::parse("2026-08-27T00:00:01+00:00").expect("canonical")
+}
+fn t2() -> ironworks_domain::Utc {
+    ironworks_domain::Utc::parse("2026-08-27T00:00:02+00:00").expect("canonical")
+}
+/// What the runtime named. Not the pin — nothing here compares against it — but a `Named` value,
+/// because these fixtures model a runtime that answered, and the other two variants are the shape
+/// that says the measurement did not happen.
+fn reported() -> ironworks_domain::ReportedModel {
+    ironworks_domain::ReportedModel::read(Some("test-model"))
+}
+fn t3() -> ironworks_domain::Utc {
+    ironworks_domain::Utc::parse("2026-08-27T00:00:03+00:00").expect("canonical")
+}
+fn t9() -> ironworks_domain::Utc {
+    ironworks_domain::Utc::parse("2026-08-27T00:00:09+00:00").expect("canonical")
+}
 
 use ironworks_channel::{ChannelError, ChannelJournal, Disposition, UpdateId};
 use ironworks_domain::{
@@ -138,6 +173,14 @@ enum At {
     /// that no longer exists looks like from here. Not a crash: the process survives and must
     /// decide what the refusal means. **B11.**
     SendRefused,
+    /// The turn ran and its response holds nothing a person may be shown — a model control token
+    /// in the answer, a partial answer, a failed or cancelled run. Not a crash and not a transport
+    /// problem: the response is durable and terminal, so every later fetch returns the same thing,
+    /// and the process must stop automatic work rather than re-read it forever.
+    ///
+    /// This is the path `crates/cli/src/lib.rs::finish` takes for `Failed`, `Cancelled`,
+    /// `Incomplete` and a completed answer the delivery gate refuses.
+    AnswerUndeliverable,
     Never,
 }
 
@@ -146,6 +189,9 @@ enum Step {
     Handled,
     AlreadySettled,
     Reconcile(Repair),
+    /// Automatic work has stopped and an operator is required. Distinct from `AlreadySettled`,
+    /// which means the answer went out: nothing was ever sent here.
+    SettledForOperator,
     Crashed,
 }
 
@@ -199,7 +245,7 @@ impl<'w> Process<'w> {
         }
         let rows: Vec<(UpdateId, ChannelRef)> =
             batch.iter().map(|(id, ch)| (UpdateId::new(*id), ChannelRef::new(*ch))).collect();
-        self.channel.note_batch(&rows, "t0").expect("journal the batch");
+        self.channel.note_batch(&rows, &t0()).expect("journal the batch");
 
         let mut out = Vec::new();
         for (n, (id, _)) in rows.iter().enumerate() {
@@ -226,7 +272,7 @@ impl<'w> Process<'w> {
             Disposition::Unclaimed => {
                 let key = mint_key(id);
                 self.channel
-                    .disposition(id, &Disposition::Turn(key.clone()), "t1")
+                    .disposition(id, &Disposition::Turn(key.clone()), &t1())
                     .expect("disposition");
                 key
             }
@@ -240,7 +286,7 @@ impl<'w> Process<'w> {
         let scope = scope();
         if self.turns.turn(&key).expect("read").is_none() {
             self.turns
-                .begin(&scope, &key, "2026-08-27T00:00:00Z", &digest(), &Decision::default(), "t1")
+                .begin(&scope, &key, "2026-08-27T00:00:00Z", &digest(), &Decision::default(), &t1())
                 .expect("begin");
         }
         let mut record = self.turns.turn(&key).expect("read").expect("begun");
@@ -249,7 +295,7 @@ impl<'w> Process<'w> {
         {
             let response = self.world.run(&key);
             self.turns
-                .commit_completed(&key, &scope.pointer(response), Some(&room()), ALLOY, None, "t2")
+                .commit_completed(&key, &scope.pointer(response), Some(&room()), ALLOY, None, &t2())
                 .expect("commit");
             record = self.turns.turn(&key).expect("read").expect("committed");
         }
@@ -259,14 +305,36 @@ impl<'w> Process<'w> {
         match ironworks_journal::recover(&record) {
             Recovery::Settled { .. } => Step::AlreadySettled,
             Recovery::ReconcileDelivery { repair, .. } => Step::Reconcile(repair),
+            // Decided ahead of everything else by `recover`, so a settled turn never re-enters the
+            // fetch-and-deliver path on any later cycle.
+            Recovery::OperatorRequired { .. } => Step::SettledForOperator,
             Recovery::Deliver { response } => {
                 let text = self.world.fetch(&response);
+                if at == At::AnswerUndeliverable {
+                    // The answer was fetched and read, and it is not deliverable. That is
+                    // established, not suspected: the response is terminal, so the next cycle
+                    // fetches the same bytes and reaches the same verdict. Settling is what
+                    // releases the shared cursor — left open, this one row holds the offset for
+                    // every tenant in the process.
+                    self.turns
+                        .record_operator_required(
+                            &key,
+                            &ironworks_domain::NonEmptyReason::parse(
+                                "the response holds nothing deliverable and will read the same on \
+                                 every cycle",
+                            )
+                            .expect("a reason"),
+                            &t3(),
+                        )
+                        .expect("settle for an operator");
+                    return Step::SettledForOperator;
+                }
                 if at == At::SendRefused {
                     // Nothing was accepted, and the transport can prove it — so this is
                     // `KnownUnsent`, not `Uncertain`. The verdict is then read back off disk
                     // rather than asserted here, because after a restart there is no here.
                     self.turns
-                        .record_delivery_attempt(&key, AttemptOutcome::Rejected, "t3")
+                        .record_delivery_attempt(&key, AttemptOutcome::Rejected, &t3())
                         .expect("record the refusal");
                     let after = self.turns.turn(&key).expect("read").expect("a turn");
                     return match ironworks_journal::recover(&after) {
@@ -280,7 +348,7 @@ impl<'w> Process<'w> {
                     return Step::Crashed;
                 }
                 self.turns
-                    .record_delivery_attempt(&key, AttemptOutcome::Complete, "t3")
+                    .record_delivery_attempt(&key, AttemptOutcome::Complete, &t3())
                     .expect("record delivery");
                 if at == At::AfterDelivered {
                     // Dead. Delivery is durable, the channel has not been told.
@@ -351,18 +419,22 @@ fn scope() -> ThreadScope {
         "s",
     )
     .unwrap();
-    ServiceInstance::new(
-        Slug::parse("acme").unwrap(),
+    ServiceInstance::new(ironworks_domain::InstanceParts {
+        slug: Slug::parse("acme").unwrap(),
         definition,
         guidance,
-        RuntimeIdentity::parse("m").unwrap(),
-        CredentialRef::new(CredentialPurpose::RuntimeMember, "env:A"),
-        ContextBinding::new(CredentialRef::new(CredentialPurpose::RecordScope, "env:B")).unwrap(),
-        ModelSelection::from_pin(&ModelPin::parse("M # c").unwrap()),
-        CapabilityProfile::READ_ONLY_RECORDS,
-        None,
-        &parts,
-    )
+        runtime_identity: RuntimeIdentity::parse("m").unwrap(),
+        runtime_credential: CredentialRef::new(CredentialPurpose::RuntimeMember, "env:A"),
+        context_binding: ContextBinding::new(CredentialRef::new(
+            CredentialPurpose::RecordScope,
+            "env:B",
+        ))
+        .unwrap(),
+        model: ModelSelection::from_pin(&ModelPin::parse("M # c").unwrap()),
+        requested_capabilities: CapabilityProfile::READ_ONLY_RECORDS,
+        claimed_org: None,
+        parts: &parts,
+    })
     .unwrap()
     .verify(&Store)
     .unwrap()
@@ -427,7 +499,11 @@ fn b5_the_residual_window_yields_an_identical_duplicate_never_a_new_answer() {
 /// delivered state agree — because one is computed from the other.
 #[test]
 fn b6_delivered_and_the_offset_cannot_disagree() {
-    let outcomes = ["not_submitted", "submitted_unknown", "accepted", "completed"];
+    // `operator_required` is the only outcome that settles on the *turn* axis — every other one
+    // delegates entirely to the delivery axis. Leaving it out under-covered the single row where
+    // the two axes can disagree, which is precisely what this boundary is about.
+    let outcomes =
+        ["not_submitted", "submitted_unknown", "accepted", "completed", "operator_required"];
     let deliveries = [
         DeliveryState::Pending,
         DeliveryState::KnownUnsent,
@@ -442,18 +518,23 @@ fn b6_delivered_and_the_offset_cannot_disagree() {
             let p = Process::boot(&world, &dir);
             let id = UpdateId::new(1);
             let key = mint_key(id);
-            p.channel.note_batch(&[(id, ChannelRef::new("g1"))], "t0").expect("batch");
-            p.channel.disposition(id, &Disposition::Turn(key.clone()), "t1").expect("disposition");
+            p.channel.note_batch(&[(id, ChannelRef::new("g1"))], &t0()).expect("batch");
+            p.channel.disposition(id, &Disposition::Turn(key.clone()), &t1()).expect("disposition");
 
             let scope = scope();
             p.turns
-                .begin(&scope, &key, "2026-08-27T00:00:00Z", &digest(), &Decision::default(), "t1")
+                .begin(&scope, &key, "2026-08-27T00:00:00Z", &digest(), &Decision::default(), &t1())
                 .expect("begin");
             match outcome {
-                "submitted_unknown" => p.turns.record_unknown(&key, "t2").expect("unknown"),
+                "submitted_unknown" => p.turns.record_unknown(&key, &t2()).expect("unknown"),
                 "accepted" => p
                     .turns
-                    .record_accepted(&key, &ResponseId::parse("resp_001").unwrap(), "t2")
+                    .record_accepted(
+                        &key,
+                        &ResponseId::parse("resp_001").unwrap(),
+                        &reported(),
+                        &t2(),
+                    )
                     .expect("accepted"),
                 "completed" => p
                     .turns
@@ -463,9 +544,28 @@ fn b6_delivered_and_the_offset_cannot_disagree() {
                         Some(&room()),
                         ALLOY,
                         None,
-                        "t2",
+                        &t2(),
                     )
                     .expect("completed"),
+                // Reached the way the serving path reaches it: a turn that was accepted, and whose
+                // response turned out to hold nothing deliverable.
+                "operator_required" => {
+                    p.turns
+                        .record_accepted(
+                            &key,
+                            &ResponseId::parse("resp_001").unwrap(),
+                            &reported(),
+                            &t2(),
+                        )
+                        .expect("accepted");
+                    p.turns
+                        .record_operator_required(
+                            &key,
+                            &ironworks_domain::NonEmptyReason::parse("undeliverable").unwrap(),
+                            &t2(),
+                        )
+                        .expect("operator required");
+                }
                 _ => {}
             }
             let attempt = match delivery {
@@ -477,7 +577,7 @@ fn b6_delivered_and_the_offset_cannot_disagree() {
                 DeliveryState::Delivered => Some(AttemptOutcome::Complete),
             };
             if let Some(attempt) = attempt {
-                p.turns.record_delivery_attempt(&key, attempt, "t3").expect("delivery");
+                p.turns.record_delivery_attempt(&key, attempt, &t3()).expect("delivery");
             }
 
             let stored = p.turns.turn(&key).expect("read").expect("a turn").delivery;
@@ -682,7 +782,7 @@ fn b11_a_route_that_vanished_mid_turn_parks_the_update_and_never_relabels_it() {
     // rather than merely declined.
     let err = p
         .channel
-        .disposition(UpdateId::new(1), &Disposition::NotAddressed, "t9")
+        .disposition(UpdateId::new(1), &Disposition::NotAddressed, &t9())
         .expect_err("an update that cost a turn was relabelled as noise");
     assert!(matches!(err, ChannelError::AlreadyDispositioned { existing: "turn", .. }), "{err:?}");
 
@@ -697,4 +797,72 @@ fn b11_a_route_that_vanished_mid_turn_parks_the_update_and_never_relabels_it() {
     assert_eq!(steps, vec![Step::Reconcile(Repair::ResendSafe)]);
     assert_eq!(world.runs(), 1, "the parked turn was re-run");
     assert!(world.sends().is_empty(), "a parked turn was delivered without an operator");
+}
+
+/// **A turn that answered nothing must not deafen the bridge**, and it must stay answered-nothing
+/// across a restart.
+///
+/// The turn ran, the response is durable, and it holds nothing a client may be shown. The only
+/// automatic move left is to fetch the same response again, which returns the same bytes forever —
+/// so leaving the row open buys nothing and costs the shared cursor, which is the *lowest open
+/// update across every tenant*. `docs/experiments/0033-the-loop-ran-and-a-chained-turn-could-not-recover.md`
+/// measured that shape: cycles 3 and 4 re-polled the same offset, refused, and backed off politely
+/// while nobody was being served.
+///
+/// Three claims, and the third is why this needs a restart rather than a unit test: a settled turn
+/// is settled from *durable evidence*, so a second process re-reads it and declines to act too —
+/// no re-run, no send.
+#[test]
+fn a_turn_whose_answer_is_undeliverable_settles_and_stays_settled_across_a_restart() {
+    let dir = Dir::new();
+    let world = World::default();
+
+    // ── the control, first: the identical batch with a deliverable answer ────────────────────
+    // Without it, "the cursor advanced" could pass on a harness that advances it unconditionally,
+    // and "nothing was sent" could pass on one that never sends (§K-8 — a harness that invents a
+    // difference has the defect of one that invents a match).
+    {
+        let clean = Dir::new();
+        let w = World::default();
+        let p = Process::boot(&w, &clean);
+        assert_eq!(p.poll(&[(1, "g1")], At::Never, usize::MAX), vec![Step::Handled]);
+        assert_eq!(w.sends().len(), 1, "the control did not deliver, so it controls nothing");
+        assert_eq!(p.cursor(), Some(UpdateId::new(2)));
+    }
+
+    // ── the turn answers, and the answer cannot be shown ─────────────────────────────────────
+    let first = {
+        let p = Process::boot(&world, &dir);
+        let steps = p.poll(&[(1, "g1")], At::AnswerUndeliverable, usize::MAX);
+        assert_eq!(steps, vec![Step::SettledForOperator]);
+
+        // Settled, so the cursor is released. This is the assertion the whole state exists for.
+        assert_eq!(
+            p.cursor(),
+            Some(UpdateId::new(2)),
+            "one undeliverable answer is holding the offset for every tenant in the process"
+        );
+        // Settled is not delivered: the delivery axis never moved, because nothing was attempted.
+        assert_eq!(p.delivery(UpdateId::new(1)), DeliveryState::Pending);
+        // And the alarm outlives the release — E-9 keeps it, E-18 releases the cursor, and they
+        // are different obligations.
+        let unresolved = p.turns.unresolved().expect("unresolved");
+        assert_eq!(unresolved.len(), 1, "settling silenced the alarm it was supposed to keep");
+        p.turns.turn(&mint_key(UpdateId::new(1))).expect("read").expect("a turn").outcome
+    };
+    assert!(
+        matches!(first, TurnOutcome::OperatorRequired { response: Some(_), .. }),
+        "the response id is half the evidence and must survive the settle: {first:?}"
+    );
+    assert_eq!(world.runs(), 1);
+    assert!(world.sends().is_empty(), "an undeliverable answer reached the client");
+
+    // ── a new process reads the same evidence and does not act on it either ──────────────────
+    // The channel still offers update 1 until it is told an offset past it, so this is the real
+    // question: does a restart re-run or re-send a turn a person is meant to look at?
+    let again = Process::boot(&world, &dir);
+    assert_eq!(again.poll(&[(1u64, "g1")], At::Never, usize::MAX), vec![Step::SettledForOperator]);
+    assert_eq!(world.runs(), 1, "a settled turn was re-run — that is a second billed turn");
+    assert!(world.sends().is_empty(), "a settled turn was delivered without an operator");
+    assert_eq!(again.cursor(), Some(UpdateId::new(2)));
 }

@@ -46,7 +46,7 @@ byte-identically — the records or the question have moved since it was recorde
 ```
 
 **The records had not moved and the question had not changed.** The message is a guess about a
-cause, and it is the wrong one. `crates/cli/src/main.rs:2411`:
+cause, and it is the wrong one. `crates/cli/src/lib.rs::drive`:
 
 ```rust
 let previous = match (&plan, conversation) {

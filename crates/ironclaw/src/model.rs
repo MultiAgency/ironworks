@@ -4,8 +4,8 @@
 //! parse would take every tenant down over an addition. That is the opposite of the rule for
 //! compiled-in configuration, where an unknown key is a typo and must fail loudly.
 
-use ironworks_domain::ModelTurn;
 pub use ironworks_domain::{IdempotencyKey, InvalidKey, ResponseId};
+use ironworks_domain::{ModelTurn, ReportedModel};
 use serde::{Deserialize, Serialize};
 
 /// The request body, exactly as it goes out.
@@ -49,6 +49,10 @@ pub struct Accepted {
     /// Persist this **before** doing anything else with it.
     pub id: ResponseId,
     pub outcome: Outcome,
+    /// What the runtime said produced this turn, **on create**, where it is still a model name
+    /// rather than the placeholder a later fetch returns (§G-2). Carried here because this is the
+    /// only moment the answer exists: re-reading the same turn by id cannot recover it.
+    pub reported_model: ReportedModel,
 }
 
 /// One call the model made which the runtime handed back rather than executing.
@@ -168,6 +172,9 @@ pub(crate) struct ResponseObject {
     pub error: Option<WireError>,
     #[serde(default)]
     pub usage: Option<WireUsage>,
+    /// What the runtime says produced this turn. Read [`ReportedModel`] before trusting it.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -264,11 +271,6 @@ impl From<WireUsage> for Usage {
     }
 }
 
-/// Flatten output items into the answer text.
-///
-/// Content arrives as an array of `{type, text}` parts. Anything without a `text` is skipped
-/// rather than rendered — a tool call is not an answer, and stringifying it would put JSON in
-/// front of a person.
 /// A completed turn whose text is not an answer.
 ///
 /// One signal is used and deliberately only one: a model's own control tokens (`<|im_start|>`,
@@ -287,7 +289,18 @@ pub fn malformed_answer(text: &str) -> Option<&'static str> {
     let mut from = 0;
     while let Some(i) = text[from..].find("<|") {
         let open = from + i + 2;
-        let window = &text[open..text.len().min(open + SPAN)];
+        // `open` is a boundary because `<|` is ASCII, but `open + SPAN` is an arbitrary byte
+        // offset — and slicing a `str` across a character panics. This runs on every delivered
+        // answer, after the turn is billed, so the panic used to cost the model call and the
+        // delivery both. Walking characters bounds the window by content rather than by an offset
+        // that may not exist.
+        let window: String = text[open..]
+            .chars()
+            .scan(0usize, |used, c| {
+                *used += c.len_utf8();
+                (*used <= SPAN).then_some(c)
+            })
+            .collect();
         if window.contains("|>") {
             return Some("a model control token");
         }
@@ -326,6 +339,11 @@ pub(crate) fn outstanding_calls(items: &[OutputItem]) -> Vec<ToolCall> {
         .collect()
 }
 
+/// Flatten output items into the answer text.
+///
+/// Content arrives as an array of `{type, text}` parts. Anything without a `text` is skipped
+/// rather than rendered — a tool call is not an answer, and stringifying it would put JSON in
+/// front of a person.
 pub(crate) fn output_text(items: &[OutputItem]) -> String {
     let mut parts = Vec::new();
     for item in items {
@@ -373,6 +391,40 @@ pub(crate) fn to_outcome(doc: ResponseObject) -> Outcome {
 mod tests {
     use super::*;
 
+    /// Measured 2026-09-08, fetching a failed turn by id on a probe at the pin. This is the
+    /// ordinary retrieval shape, not an error path: the model field is the runtime's placeholder.
+    const MEASURED_RETRIEVED: &str = r#"{"id":"resp_c6dd61ee91054129859905c0b89fb4ed",
+        "object":"response","created_at":1788811920,"status":"failed","model":"reborn",
+        "output":[],"error":{"code":"internal_error","message":"An internal error occurred."}}"#;
+
+    #[test]
+    fn a_named_model_is_a_measurement_and_the_placeholder_is_not() {
+        // Create echoes the requested model...
+        let created: ResponseObject = serde_json::from_str(MEASURED_PARKED).unwrap();
+        let created = ReportedModel::read(created.model.as_deref());
+        assert!(matches!(created, ReportedModel::Named(_)));
+        assert!(created.is_measurement());
+        assert_eq!(created.named(), Some("qwen/qwen3.5-397b-a17b"));
+
+        // ...and retrieval of the same shape does not. Storing this verbatim would record
+        // "reborn" as the model that served a tenant, which is the §G-2 trap.
+        let fetched: ResponseObject = serde_json::from_str(MEASURED_RETRIEVED).unwrap();
+        let fetched = ReportedModel::read(fetched.model.as_deref());
+        assert_eq!(fetched, ReportedModel::Placeholder);
+        assert!(!fetched.is_measurement());
+        assert_eq!(fetched.named(), None);
+    }
+
+    #[test]
+    fn an_absent_field_is_not_the_placeholder() {
+        // Nothing claimed, versus something unusable claimed. Collapsing them would lose the
+        // difference between a runtime that said nothing and one that said "reborn".
+        let none: ResponseObject = serde_json::from_str(r#"{"id":"r","output":[]}"#).unwrap();
+        assert_eq!(ReportedModel::read(none.model.as_deref()), ReportedModel::Absent);
+        assert_eq!(ReportedModel::read(Some("   ")), ReportedModel::Absent);
+        assert!(!ReportedModel::Absent.is_measurement());
+    }
+
     /// A real `ModelTurn`, built the only way one can be: through a verified service
     /// instance melting its own composition. Heavier than a literal, and deliberately so — this
     /// asserts on what the domain actually produces, not on a shape invented here.
@@ -418,18 +470,22 @@ mod tests {
             "s",
         )
         .unwrap();
-        let instance = ServiceInstance::new(
-            Slug::parse("acme").unwrap(),
+        let instance = ServiceInstance::new(InstanceParts {
+            slug: Slug::parse("acme").unwrap(),
             definition,
             guidance,
-            RuntimeIdentity::parse("m").unwrap(),
-            CredentialRef::new(CredentialPurpose::RuntimeMember, "a"),
-            ContextBinding::new(CredentialRef::new(CredentialPurpose::RecordScope, "b")).unwrap(),
-            ModelSelection::from_pin(&ModelPin::parse("M # c").unwrap()),
-            CapabilityProfile::READ_ONLY_RECORDS,
-            None,
-            &parts,
-        )
+            runtime_identity: RuntimeIdentity::parse("m").unwrap(),
+            runtime_credential: CredentialRef::new(CredentialPurpose::RuntimeMember, "a"),
+            context_binding: ContextBinding::new(CredentialRef::new(
+                CredentialPurpose::RecordScope,
+                "b",
+            ))
+            .unwrap(),
+            model: ModelSelection::from_pin(&ModelPin::parse("M # c").unwrap()),
+            requested_capabilities: CapabilityProfile::READ_ONLY_RECORDS,
+            claimed_org: None,
+            parts: &parts,
+        })
         .unwrap()
         .verify(&S)
         .unwrap();
@@ -529,6 +585,33 @@ mod tests {
         // a good answer — the direction this gate must not fail in.
         let far = format!("a <| b {} c |> d", "x".repeat(200));
         assert_eq!(malformed_answer(&far), None);
+    }
+
+    /// A multi-byte character inside the 32-byte window must not take the relay down.
+    ///
+    /// The window end is `open + SPAN`, an arbitrary byte offset, and `str` refuses a cut that
+    /// lands inside a character. `malformed_answer` runs on EVERY delivered answer, after the turn
+    /// has been billed — so the panic costs the model call and the delivery both.
+    #[test]
+    fn a_window_ending_inside_a_character_does_not_panic() {
+        for pad in 0..40 {
+            // Walk the boundary across the whole window rather than guessing where it lands.
+            let text = format!("<|{}€ tail", "a".repeat(pad));
+            let _ = malformed_answer(&text);
+        }
+        // Multi-byte characters of every width, immediately after the marker.
+        for ch in ['é', '€', '😀', '中'] {
+            let _ = malformed_answer(&format!("<|{}", ch.to_string().repeat(30)));
+        }
+
+        // Positive control: the gate still fires, and still does not pair across the answer.
+        assert_eq!(
+            malformed_answer("café <|endoftext|>"),
+            Some("a model control token"),
+            "the gate stopped detecting a real token"
+        );
+        let far = format!("a <| b {} c |> d", "€".repeat(200));
+        assert_eq!(malformed_answer(&far), None, "a distant pair became a token");
     }
 
     #[test]
@@ -661,7 +744,12 @@ mod tests {
     fn an_unknown_field_does_not_break_a_wire_type() {
         // The rule that is the exact inverse of the one for compiled-in configuration.
         let raw = r#"{"id":"r","status":"completed","output":[],"brand_new_field":42}"#;
-        assert!(serde_json::from_str::<ResponseObject>(raw).is_ok());
+        // As above: the claim is that the known fields survive the unknown one, so they are
+        // what is asserted. `is_ok()` would pass for a parser that returned an empty shell.
+        let parsed: ResponseObject =
+            serde_json::from_str(raw).expect("an unknown field is ignored");
+        assert_eq!(parsed.id.as_deref(), Some("r"));
+        assert!(parsed.status.is_some(), "the status must survive the unknown field beside it");
     }
 
     #[test]
@@ -689,7 +777,10 @@ mod key_tests {
     /// and a 400. The colon case is the one that actually bit: an ISO timestamp in a key.
     #[test]
     fn upstream_rules_are_enforced_locally() {
-        assert!(IdempotencyKey::parse("multi-1f4-18c9d2e").is_ok());
+        assert_eq!(
+            IdempotencyKey::parse("multi-1f4-18c9d2e").unwrap().as_str(),
+            "multi-1f4-18c9d2e"
+        );
         for (bad, why) in [
             ("", "empty"),
             (" k", "leading space"),

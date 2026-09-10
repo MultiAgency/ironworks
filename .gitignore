@@ -3,7 +3,6 @@ target/
 
 # Tenant configuration and guidance never live in the repo. Only synthetic fixtures do.
 *.env
-!fixtures/tenants/*.env.template
 
 # The rule above was stated and not enforced: a tenant's own guidance sat untracked at the root,
 # one `git add -A` from a commit, and it is the file that carries their business material to the
@@ -11,9 +10,6 @@ target/
 # stay tracked.
 /GUIDANCE.md
 .agency/
-
-# Python bytecode from the dev/ scripts
-__pycache__/
 
 # Local tool state, none of it this repo's business.
 .wrangler/

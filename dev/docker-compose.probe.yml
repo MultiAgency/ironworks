@@ -74,7 +74,14 @@ services:
       NEARAI_API_KEY: ${NEARAI_API_KEY:-placeholder-no-completions}
       NEARAI_BASE_URL: https://cloud-api.near.ai
       IRONCLAW_REBORN_SERVE_HOST: "0.0.0.0"
-      IRONCLAW_REBORN_LOG: info
+      # `info` is what the served profile runs, so it stays the default and a probe measuring
+      # behaviour measures it at the served verbosity. It is overridable because at `info` the
+      # runtime says nothing at all about a turn that fails: a sandboxed turn refused with
+      # `internal_error` left thirteen log lines, all of them startup, and the API's own error
+      # body is the sanitized "An internal error occurred." Raising this is the only way to ask
+      # the runtime why, and needing to edit a tracked file to do it is how that stops happening.
+      #   PROBE_LOG=debug dev/probe-up.sh --sandboxed
+      IRONCLAW_REBORN_LOG: ${PROBE_LOG:-info}
       IRONCLAW_REBORN_POSTGRES_RESOURCE_GOVERNOR_SINGLETON: "true"
     ports: ["127.0.0.1:${PROBE_PORT:-3997}:3000"]
     volumes: [ic-data:/data]

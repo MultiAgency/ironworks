@@ -45,8 +45,8 @@ the lowest open update" is simply the correct cursor rule, which happens to gene
 - The intended strongest claim is structural rather than argued: *your records are handled by a
   process that has never held anyone else's credential.* The deployment contract now extends that
   structure to worker authority: each control plane has a client-owned rootless Docker daemon and
-  no shared `docker` group (`deploy/user/rustworks-docker.service`;
-  `deploy/rustworks-ironclaw@.service`). This remains a design claim until the two-client live proof
+  no shared `docker` group (`deploy/user/ironworks-docker.service`;
+  `deploy/ironworks-ironclaw@.service`). This remains a design claim until the two-client live proof
   passes on the deployment host.
 - The middle option — shared runtime, member per tenant — is rejected because it **shares the
   expensive-to-secure thing to save the cheap thing.** The runtime is where the model executes.
@@ -59,7 +59,7 @@ the lowest open update" is simply the correct cursor rule, which happens to gene
   execution, per-user cost caps), where the runtime does the isolation and the seam follows. A
   rebuild to do when the scale exists, not a shape to adopt in advance of it.
 - Each client is configured with a distinct IronClaw identity, home, workspace root and rootless
-  daemon (`deploy/ironclaw-client.config.toml.example`; `deploy/rustworks-ironclaw@.service`).
+  daemon (`deploy/ironclaw-client.config.toml.example`; `deploy/ironworks-ironclaw@.service`).
   Threads for that client are intended to converge on the same `/workspace`. The preflight rejects
   default/mismatched identity and shared Docker-group membership before IronClaw starts.
 
@@ -69,9 +69,9 @@ PRD §13 records two independent boundaries that narrow the original “isolatio
 every layer” reading:
 
 - The per-client deployment contract now requires its own rootless Docker daemon and socket, run by
-  the same dedicated OS identity's user manager (`deploy/user/rustworks-docker.service`). The
+  the same dedicated OS identity's user manager (`deploy/user/ironworks-docker.service`). The
   root-owned client environment names that account's runtime socket, the IronClaw unit grants no shared
-  `docker` group, and startup rejects a mismatched endpoint (`deploy/rustworks-ironclaw@.service`;
+  `docker` group, and startup rejects a mismatched endpoint (`deploy/ironworks-ironclaw@.service`;
   `deploy/check-ironclaw-instance.sh`). Distinct paths alone would not narrow daemon authority; the
   separate unprivileged daemon does.
 - IronClaw derives its workspace key and container, proxy and network names from `(tenant_id,

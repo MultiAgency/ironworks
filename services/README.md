@@ -37,15 +37,9 @@ not filled in: `cli` requires `--service`, `crates/domain`'s registry already re
 and a guidance marker that omits `service:` is now an error rather than an assertion that the file
 meant whichever service was default. The value that fills a silence is the value nobody chose.
 
-Two tests in `crates/services/src/service.rs` hold this, and they are a pair for the same reason the
-old ones were:
-
-- `naming_no_service_is_refused_rather_than_defaulted` — the empty name is not a wildcard; it is
-  unknown like any other.
-- `no_shipped_composition_is_organization_neutral` — its control. The refusal above is only
-  *necessary* while every shipped composition is addressed to someone. If an organization-neutral
-  composition is ever added, this fails, and whether it should fill the silence gets asked again by
-  a person rather than answered by an accident of the corpus.
+`crates/services/src/service.rs::naming_no_service_is_refused_rather_than_defaulted` holds the
+boundary: the empty name is not a wildcard; it is unknown like any other. Whether a future service
+is organization-specific or neutral does not weaken that rule — neither makes silence a choice.
 
 ## Why account coordination keeps the `relationship-intelligence` id
 
@@ -54,6 +48,27 @@ id remains `relationship-intelligence` because it is already bound into guidance
 instance configuration. Renaming that authority-bearing identifier would create migration work
 without changing the dogfooded capability. A later rename needs an explicit migration decision;
 it is not part of proving the behavior.
+
+## Why this is a service and not a skill
+
+The runtime ships the same capability. `skills/` in the pinned tree carries `commitment-digest`,
+`commitment-triage`, `delegation-tracker` and `decision-capture` as first-party skills, and the
+first of those composes summaries of open commitments, deadlines and pending signals — account
+coordination, described in upstream's own words. Anyone can install them.
+
+**A skill is prompt text the runtime selects; a service definition is the thing the seam refuses
+around.** A skill has an activation block, a token budget and a trust level, and none of those is
+an authority boundary — an installed skill is excluded from model-selected activation and is
+otherwise the same instructions with the same tool access as the person who placed it. What a
+service definition carries and a skill cannot is on the other side of that line: the org binding
+the registry refuses without, the capability profile, the fixed composition whose digest a turn
+records, and the confinement floor written as the member before any of it runs. The two are not
+competing formats. One is what the model reads; the other is what decides whether a model reads
+anything at all.
+
+The consequence is a positioning rule rather than a design one, and it is written where a claim
+gets made: `docs/PRD.md` §13 and §19.2. **The capability is not the differentiator** — the boundary
+it runs inside is, and it is the half that is measured.
 
 ## Why `relationship-intelligence` names MultiAgency
 
@@ -69,10 +84,9 @@ nothing, because that lands somebody else on a persona addressed to us — and s
 longer anything to reach it *by* default, that is now a refusal rather than a slot policy.
 
 This has been mistaken for a defect more than once — read cold, six hardcoded organization names
-in a shared corpus look exactly like tenant identity that escaped. The distinction was recorded
-upstream as a `service.audience` field; that field is deliberately absent here, and the guarantee
-it fed is a test rather than a comment — `no_shipped_composition_is_organization_neutral`, in
-`crates/services/src/service.rs`.
+in a shared corpus look exactly like tenant identity that escaped. They are reviewed content, not
+runtime authority. The tenant registry's `org` binding is the separate machine control that stops
+a records credential for another organization from being served.
 
 ## The fields
 
@@ -99,8 +113,10 @@ pin is the only source of a model), no `title`/`summary` pair (one `responsibili
 word implies a boundary where "summary" invites marketing copy), and no `audience`.
 
 `audience` is the one worth knowing about: upstream it fed an assertion that the default service
-was the external one. With no default there is no split left to assert, and what survives of that
-guarantee is `no_shipped_composition_is_organization_neutral`.
+was the external one. With no default there is no split left to assert. There is also no local
+`addresses` metadata: duplicating an organization name from the prose would only prove that the two
+strings agree, not that either one matches the server-resolved records authority. The registry's
+`org` binding is the control for that question.
 
 ## Binding a service to an instance
 

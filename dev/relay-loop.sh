@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# COST: real model turns for as long as it runs. This is the production serving loop.
 # Answer messages continuously, by running `ironworks relay` over and over.
 #
 #   dev/relay-loop.sh --registry <path> --journal <path> --channel <url>

@@ -138,7 +138,8 @@ fn a_measurement_can_only_come_from_running_one_assessment() {
     // an open catalogue produces drift naming the tool that is open.
     let policy = ConfinementPolicy::read_only_analyst();
     let open = catalogue(&[("builtin.http", "always_allow"), ("builtin.time", "disabled")]);
-    let m = Measurement::from_assessment(&policy, &bound(), &open, &unlocked(), false, &at());
+    let m = Measurement::from_assessment(&policy, &bound(), &open, &unlocked(), false, &at())
+        .expect("complete catalogue");
     assert_eq!(m.catalogued(), 2);
     assert_eq!(m.reachable(), &BTreeSet::from(["builtin.http".to_owned()]));
     assert!(!m.is_clean());
@@ -157,10 +158,28 @@ fn a_confined_catalogue_measures_clean() {
     // produced drift would satisfy every assertion there.
     let policy = ConfinementPolicy::read_only_analyst();
     let shut = catalogue(&[("builtin.http", "disabled"), ("builtin.time", "disabled")]);
-    let m = Measurement::from_assessment(&policy, &bound(), &shut, &unlocked(), false, &at());
+    let m = Measurement::from_assessment(&policy, &bound(), &shut, &unlocked(), false, &at())
+        .expect("complete catalogue");
     assert!(m.is_clean(), "{:?}", m.drift());
     assert_eq!(m.catalogued(), 2);
     assert!(m.reachable().is_empty());
+}
+
+#[test]
+fn a_measurement_cannot_be_constructed_from_a_catalogue_missing_the_denial_witness() {
+    let policy = ConfinementPolicy::read_only_analyst();
+    let incomplete = catalogue(&[("builtin.time", "disabled")]);
+    let out =
+        Measurement::from_assessment(&policy, &bound(), &incomplete, &unlocked(), false, &at());
+
+    assert!(
+        matches!(
+            out,
+            Err(BlockedReason::Malformed { ref detail })
+                if detail == "settings catalogue omitted required confinement witness builtin.http"
+        ),
+        "an incomplete catalogue constructed durable measured facts: {out:?}"
+    );
 }
 
 #[test]
@@ -203,7 +222,8 @@ fn the_fact_view_is_derived_and_never_a_second_stored_copy() {
         &unlocked(),
         false,
         &at(),
-    );
+    )
+    .expect("complete catalogue");
     let attempt = ConfinementAttempt::measured(bound(), binding(), at(), m);
     let facts = attempt.facts().expect("a measured attempt has facts");
     // Each of these comes from the one place that owns it: the attempt's expected member, the
@@ -226,7 +246,8 @@ fn historical_readings_are_derived_from_the_facts() {
         &unlocked(),
         false,
         &at(),
-    );
+    )
+    .expect("complete catalogue");
     let dirty = Measurement::from_assessment(
         &policy,
         &bound(),
@@ -234,7 +255,8 @@ fn historical_readings_are_derived_from_the_facts() {
         &unlocked(),
         false,
         &at(),
-    );
+    )
+    .expect("complete catalogue");
 
     let clean_attempt = ConfinementAttempt::measured(bound(), binding(), at(), clean);
     assert!(matches!(clean_attempt.historical(), Historical::CleanAt { .. }));
@@ -279,7 +301,8 @@ fn a_clean_measurement_under_another_policy_is_not_a_baseline() {
         &unlocked(),
         false,
         &at(),
-    );
+    )
+    .expect("complete catalogue");
     let attempt = ConfinementAttempt::measured(bound(), binding(), at(), clean);
     let historical = attempt.historical();
 
@@ -302,7 +325,8 @@ fn only_a_clean_measurement_is_ever_a_baseline() {
         &unlocked(),
         false,
         &at(),
-    );
+    )
+    .expect("complete catalogue");
     let drifted = ConfinementAttempt::measured(bound(), binding(), at(), dirty).historical();
     assert!(!drifted.is_baseline_for(&binding()));
 

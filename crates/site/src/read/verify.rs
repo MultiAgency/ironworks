@@ -97,6 +97,7 @@ pub fn verify(
         return Err(format!("{name} was recorded against {path}, not {rel}"));
     }
     let now = ironworks_evidence::fingerprint::book(book_dir)
+        .map_err(|e| format!("cannot read the book at {}: {e}", book_dir.display()))?
         .ok_or_else(|| format!("no book at {}", book_dir.display()))?;
     if now.fingerprint != fingerprint {
         return Err(format!(
@@ -142,7 +143,7 @@ mod tests {
     use super::*;
 
     fn book_dir() -> std::path::PathBuf {
-        ironworks_evidence::root().join("fixtures/account-coordination/book")
+        crate::test_root().join("fixtures/account-coordination/book")
     }
 
     fn rows(records: usize, state: &str) -> Vec<serde_json::Value> {
@@ -154,13 +155,12 @@ mod tests {
         // Both shapes are in the archive. Re-encoding a string value would keep its quotes, and a
         // transcript agreeing with its book would read as contradicting itself.
         let book = super::super::book::load(&book_dir()).unwrap();
-        let fp = ironworks_evidence::fingerprint::book(book_dir()).unwrap().fingerprint;
+        let fp = ironworks_evidence::fingerprint::book(book_dir()).unwrap().unwrap().fingerprint;
         let doc = serde_json::json!({"book": {"fingerprint": fp}});
         let as_string =
             vec![serde_json::json!({"composition": {"records": "10", "state": "complete"}})];
         assert!(
-            verify(&doc, &as_string, &book, &book_dir(), &ironworks_evidence::root(), "x.json")
-                .is_ok(),
+            verify(&doc, &as_string, &book, &book_dir(), &crate::test_root(), "x.json").is_ok(),
             "a string count must bind exactly as a numeric one does"
         );
     }
@@ -170,15 +170,9 @@ mod tests {
         // And no fingerprint may be invented for it after the fact.
         let book = super::super::book::load(&book_dir()).unwrap();
         let doc = serde_json::json!({"cases": []});
-        let err = verify(
-            &doc,
-            &rows(10, "complete"),
-            &book,
-            &book_dir(),
-            &ironworks_evidence::root(),
-            "x.json",
-        )
-        .unwrap_err();
+        let err =
+            verify(&doc, &rows(10, "complete"), &book, &book_dir(), &crate::test_root(), "x.json")
+                .unwrap_err();
         assert!(err.contains("records no book fingerprint"), "{err}");
         assert!(
             err.contains("diagnostic and not a binding"),
@@ -190,67 +184,43 @@ mod tests {
     fn a_fingerprint_from_another_book_refuses() {
         let book = super::super::book::load(&book_dir()).unwrap();
         let doc = serde_json::json!({"book": {"fingerprint": "deadbeefdeadbeef"}});
-        let err = verify(
-            &doc,
-            &rows(10, "complete"),
-            &book,
-            &book_dir(),
-            &ironworks_evidence::root(),
-            "x.json",
-        )
-        .unwrap_err();
+        let err =
+            verify(&doc, &rows(10, "complete"), &book, &book_dir(), &crate::test_root(), "x.json")
+                .unwrap_err();
         assert!(err.contains("is not the book"), "{err}");
     }
 
     #[test]
     fn a_bound_book_whose_telemetry_disagrees_is_a_self_contradiction() {
         let book = super::super::book::load(&book_dir()).unwrap();
-        let fp = ironworks_evidence::fingerprint::book(book_dir()).unwrap().fingerprint;
+        let fp = ironworks_evidence::fingerprint::book(book_dir()).unwrap().unwrap().fingerprint;
         let doc = serde_json::json!({"book": {"fingerprint": fp}});
         // Right fingerprint, wrong count.
-        let err = verify(
-            &doc,
-            &rows(6, "complete"),
-            &book,
-            &book_dir(),
-            &ironworks_evidence::root(),
-            "x.json",
-        )
-        .unwrap_err();
+        let err =
+            verify(&doc, &rows(6, "complete"), &book, &book_dir(), &crate::test_root(), "x.json")
+                .unwrap_err();
         assert!(err.contains("contradicts itself"), "{err}");
     }
 
     #[test]
     fn a_degraded_supply_cannot_be_read_against() {
         let book = super::super::book::load(&book_dir()).unwrap();
-        let fp = ironworks_evidence::fingerprint::book(book_dir()).unwrap().fingerprint;
+        let fp = ironworks_evidence::fingerprint::book(book_dir()).unwrap().unwrap().fingerprint;
         let doc = serde_json::json!({"book": {"fingerprint": fp}});
-        let err = verify(
-            &doc,
-            &rows(10, "partial"),
-            &book,
-            &book_dir(),
-            &ironworks_evidence::root(),
-            "x.json",
-        )
-        .unwrap_err();
+        let err =
+            verify(&doc, &rows(10, "partial"), &book, &book_dir(), &crate::test_root(), "x.json")
+                .unwrap_err();
         assert!(err.contains("only a complete book"), "{err}");
     }
 
     #[test]
     fn a_bound_and_consistent_transcript_verifies() {
         let book = super::super::book::load(&book_dir()).unwrap();
-        let fp = ironworks_evidence::fingerprint::book(book_dir()).unwrap().fingerprint;
+        let fp = ironworks_evidence::fingerprint::book(book_dir()).unwrap().unwrap().fingerprint;
         let doc = serde_json::json!({"book": {"fingerprint": fp.clone()}});
-        let got = verify(
-            &doc,
-            &rows(10, "complete"),
-            &book,
-            &book_dir(),
-            &ironworks_evidence::root(),
-            "x.json",
-        )
-        .expect("binds");
+        let got =
+            verify(&doc, &rows(10, "complete"), &book, &book_dir(), &crate::test_root(), "x.json")
+                .expect("binds");
         assert!(got.terminal.contains(&fp));
     }
 }

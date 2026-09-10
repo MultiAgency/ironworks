@@ -39,6 +39,44 @@ pub struct Ledger {
 /// Load and validate `regrades.json` from an experiments directory.
 ///
 /// A missing ledger is empty and sound — not every repository state has one.
+impl Regrade {
+    /// One entry, or the names of the fields it does not carry.
+    ///
+    /// # Why this is not five `unwrap`s after a presence check
+    ///
+    /// `load` read each field **twice** — once to build a `missing` list, then again with
+    /// `.unwrap()` to build the value — so five unwraps were correct only because of a check ten
+    /// lines above them. That coupling is exactly what a fallible constructor removes: the fields
+    /// are read once, and a missing one is a value rather than a proof obligation.
+    fn read(entry: &serde_json::Value) -> Result<Self, Vec<&'static str>> {
+        let field = |k: &str| {
+            entry.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_owned)
+        };
+        let (transcript, case, was, verdict, why) =
+            (field("transcript"), field("case"), field("was"), field("verdict"), field("why"));
+        let missing: Vec<&'static str> = [
+            ("transcript", transcript.is_none()),
+            ("case", case.is_none()),
+            ("was", was.is_none()),
+            ("verdict", verdict.is_none()),
+            ("why", why.is_none()),
+        ]
+        .into_iter()
+        .filter_map(|(name, absent)| absent.then_some(name))
+        .collect();
+        if !missing.is_empty() {
+            return Err(missing);
+        }
+        Ok(Self {
+            transcript: transcript.expect("checked above"),
+            case: case.expect("checked above"),
+            was: was.expect("checked above"),
+            verdict: verdict.expect("checked above"),
+            why: why.expect("checked above"),
+        })
+    }
+}
+
 pub fn load(dir: &Path) -> Ledger {
     let path = dir.join("regrades.json");
     if !path.is_file() {
@@ -62,21 +100,12 @@ pub fn load(dir: &Path) -> Ledger {
     let rows = doc.get("regrades").and_then(|r| r.as_array()).cloned().unwrap_or_default();
 
     for (n, entry) in rows.iter().enumerate() {
-        let field = |k: &str| {
-            entry.get(k).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_owned)
-        };
-        let required = ["transcript", "case", "was", "verdict", "why"];
-        let missing: Vec<&str> = required.iter().copied().filter(|k| field(k).is_none()).collect();
-        if !missing.is_empty() {
-            ledger.problems.push(format!("entry {n} is missing {}", missing.join(", ")));
-            continue;
-        }
-        let regrade = Regrade {
-            transcript: field("transcript").unwrap(),
-            case: field("case").unwrap(),
-            was: field("was").unwrap(),
-            verdict: field("verdict").unwrap(),
-            why: field("why").unwrap(),
+        let regrade = match Regrade::read(entry) {
+            Ok(regrade) => regrade,
+            Err(missing) => {
+                ledger.problems.push(format!("entry {n} is missing {}", missing.join(", ")));
+                continue;
+            }
         };
         let key = (regrade.transcript.clone(), regrade.case.clone());
         if ledger.entries.contains_key(&key) {
@@ -130,11 +159,7 @@ pub fn load(dir: &Path) -> Ledger {
 fn verdicts_by_case(path: &Path) -> Option<BTreeMap<String, BTreeSet<String>>> {
     let text = std::fs::read_to_string(path).ok()?;
     let doc: serde_json::Value = serde_json::from_str(&text).ok()?;
-    let rows = match &doc {
-        serde_json::Value::Array(rows) => rows.clone(),
-        serde_json::Value::Object(map) => map.get("cases")?.as_array()?.clone(),
-        _ => return None,
-    };
+    let rows = crate::transcript::cases(&doc).ok()?;
     let mut out: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for row in rows {
         let (Some(case), Some(verdict)) =
@@ -277,7 +302,7 @@ mod tests {
     #[test]
     fn the_repositorys_own_ledger_validates() {
         // The ledger in the tree must be sound, or nothing may publish from it.
-        let l = load(&crate::root().join("docs/experiments"));
+        let l = load(&crate::test_root().join("docs/experiments"));
         assert!(
             l.problems.is_empty(),
             "the regrade ledger has problems:\n  {}",

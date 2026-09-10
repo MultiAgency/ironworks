@@ -43,7 +43,7 @@ One answer is a real leniency defect, and it is on the rule the persona is most 
 > `**UNKNOWN**` — the record does not assign ownership of getting the extension documented.
 
 That is the lead, answering *"Who owns getting Cedar Harbor Studio's extension documented?"*
-`scrap/personas/COORDINATOR.md:259` forbids it in the same words:
+`scrap/personas/COORDINATOR.md` forbids it in the same words:
 
 > **Ownership is never UNKNOWN.** A silent record is what the default is for, so *"the record does
 > not assign ownership"* is an observation to add after naming the owner, **never an answer that
@@ -65,7 +65,7 @@ it"*, and `0023` confirmed it against `:259`. That one **failed**. This one comm
 violation, more plainly and in the lead rather than the close, and **passes**.
 
 The mechanism is a missing gate rather than a wrong one. `contradiction` and `offboarding_unknown`
-both call `lead_is_unresolved` (`cases.rs:204,254`), which exists because *"the first non-empty line
+both call `crates/graders/src/discipline.rs::lead_is_unresolved`, which exists because *"the first non-empty line
 must state the verdict, not bury uncertainty later."* `ownership_default` has no lead gate at all —
 so it permits the inverse: bury the verdict and lead with uncertainty. On the one case where the
 persona says uncertainty is never the answer.

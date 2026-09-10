@@ -1,6 +1,14 @@
 use super::*;
 use ironworks_domain::ChannelRef;
 
+/// The instant these tests record at, as the type the store takes.
+///
+/// `now: &str` accepted anything; `ironworks_domain::Utc` is the one parser for the form every
+/// timestamp column in this workspace holds.
+fn now() -> ironworks_domain::Utc {
+    ironworks_domain::Utc::parse(AT).expect("the fixture instant is the canonical UTC form")
+}
+
 struct Store {
     _dir: std::path::PathBuf,
     store: ProposalStore,
@@ -44,6 +52,17 @@ fn store() -> Store {
     let dir = scratch("live");
     let store = ProposalStore::open(dir.join("proposals.db")).expect("store opens");
     Store { _dir: dir, store }
+}
+
+#[test]
+fn an_online_snapshot_is_readable_and_never_overwrites() {
+    let source = store();
+    let dir = scratch("snapshot");
+    let copy = dir.join("proposals.db");
+    source.snapshot_to(&copy).unwrap();
+    assert!(ProposalStore::open(&copy).is_ok());
+    assert!(matches!(source.snapshot_to(&copy), Err(ProposalError::Snapshot { .. })));
+    let _ = std::fs::remove_dir_all(dir);
 }
 
 fn actor(id: &str) -> ActorRef {
@@ -112,7 +131,7 @@ impl Scope {
 /// Show a proposal the way the relay does: durable intent, send, durable outcome.
 fn echo(s: &ProposalStore, update: u64, outcome: AttemptOutcome) -> Echo {
     s.begin_echo(update).expect("intent");
-    s.record_echo(update, outcome, AT).expect("outcome")
+    s.record_echo(update, outcome, &now()).expect("outcome")
 }
 
 #[test]
@@ -121,7 +140,7 @@ fn a_proposal_keeps_the_bytes_that_were_typed() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    let stored = s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("stored");
+    let stored = s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("stored");
     assert_eq!(stored.body, NOTE, "the note is the point; nothing may reshape it");
     assert_eq!(stored.contributor.as_str(), "alice");
     assert_eq!(stored.account.as_str(), "ACME-001");
@@ -137,9 +156,12 @@ fn a_redelivered_update_finds_its_own_proposal_rather_than_making_a_second() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    let first = s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("first");
+    let first = s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("first");
     let again = s
-        .propose(sc.proposal(41, &alice, &as_alice), "2026-09-01T09:20:00+00:00")
+        .propose(
+            sc.proposal(41, &alice, &as_alice),
+            &ironworks_domain::Utc::parse("2026-09-01T09:20:00+00:00").unwrap(),
+        )
         .expect("redelivery is not an error");
     assert_eq!(first, again);
     assert_eq!(
@@ -156,7 +178,7 @@ fn the_same_update_carrying_different_content_is_a_conflict_and_changes_nothing(
     let bob = actor("713300284");
     let as_alice = contributor("alice");
     let as_bob = contributor("bob");
-    let original = s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("first");
+    let original = s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("first");
 
     let other_account = AccountId::parse("GLOBEX-002").unwrap();
     let other_channel = ChannelRef::new("713300284");
@@ -174,7 +196,7 @@ fn the_same_update_carrying_different_content_is_a_conflict_and_changes_nothing(
         ),
     ];
     for (field, differing) in cases {
-        let err = s.propose(differing, AT).expect_err(field);
+        let err = s.propose(differing, &now()).expect_err(field);
         assert!(matches!(err, ProposalError::Conflict { update: 41, .. }), "{field}: {err}");
         assert_eq!(
             s.proposal(41).unwrap().unwrap(),
@@ -192,7 +214,7 @@ fn only_a_delivered_proposal_is_confirmable() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("stored");
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("stored");
     assert!(
         s.confirmable(sc.authority(&alice, &as_alice)).unwrap().is_none(),
         "pending is not confirmable"
@@ -205,7 +227,7 @@ fn only_a_delivered_proposal_is_confirmable() {
     );
 
     // A fresh proposal, because the uncertain one stays uncertain for an operator.
-    s.propose(sc.proposal(42, &alice, &as_alice), AT).expect("stored");
+    s.propose(sc.proposal(42, &alice, &as_alice), &now()).expect("stored");
     echo(&s, 42, AttemptOutcome::Complete);
     let ready =
         s.confirmable(sc.authority(&alice, &as_alice)).unwrap().expect("delivered is confirmable");
@@ -222,7 +244,7 @@ fn one_actor_can_never_reach_another_actors_proposal() {
     let alice = actor("184223311");
     let bob = actor("713300284");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("stored");
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("stored");
     echo(&s, 41, AttemptOutcome::Complete);
 
     assert!(s.confirmable(sc.authority(&alice, &as_alice)).unwrap().is_some());
@@ -243,12 +265,12 @@ fn a_newer_proposal_blocks_an_older_delivered_one() {
     let alice = actor("184223311");
     let as_alice = contributor("alice");
 
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("first");
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("first");
     echo(&s, 41, AttemptOutcome::Complete);
     assert!(s.confirmable(sc.authority(&alice, &as_alice)).unwrap().is_some());
 
     // A newer one that has not been shown. The older delivered proposal must go out of reach.
-    s.propose(sc.proposal(42, &alice, &as_alice), AT).expect("second");
+    s.propose(sc.proposal(42, &alice, &as_alice), &now()).expect("second");
     assert!(
         s.confirmable(sc.authority(&alice, &as_alice)).unwrap().is_none(),
         "a pending proposal must hide the delivered one it replaced"
@@ -260,7 +282,7 @@ fn a_newer_proposal_blocks_an_older_delivered_one() {
     assert!(s.confirmable(sc.authority(&alice, &as_alice)).unwrap().is_none());
 
     // Only when the newest itself is delivered is anything confirmable, and it is the newest.
-    s.propose(sc.proposal(43, &alice, &as_alice), AT).expect("third");
+    s.propose(sc.proposal(43, &alice, &as_alice), &now()).expect("third");
     echo(&s, 43, AttemptOutcome::Complete);
     let ready = s.confirmable(sc.authority(&alice, &as_alice)).unwrap().expect("newest");
     assert_eq!(ready.proposal().update, 43);
@@ -275,7 +297,7 @@ fn authority_that_has_moved_since_makes_a_proposal_unreachable() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("stored");
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("stored");
     echo(&s, 41, AttemptOutcome::Complete);
     assert!(s.confirmable(sc.authority(&alice, &as_alice)).unwrap().is_some());
 
@@ -305,7 +327,7 @@ fn a_send_the_channel_proved_never_left_stays_pending_so_a_retry_is_safe() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("stored");
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("stored");
     assert_eq!(echo(&s, 41, AttemptOutcome::Rejected), Echo::Pending);
     assert_eq!(s.proposal(41).unwrap().unwrap().echo, Echo::Pending);
     // And the retry is allowed, unlike a second attempt after any other outcome.
@@ -319,13 +341,13 @@ fn a_delivered_proposal_refuses_a_second_echo_rather_than_sending_another_copy()
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("stored");
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("stored");
     echo(&s, 41, AttemptOutcome::Complete);
     let err = s.begin_echo(41).unwrap_err();
     assert!(matches!(err, ProposalError::AlreadyEchoed { update: 41 }), "{err}");
     // And a bare outcome with no intent behind it is refused too: a send without a durable
     // intent is exactly the window `begin_echo` exists to close.
-    let err = s.record_echo(41, AttemptOutcome::Complete, AT).unwrap_err();
+    let err = s.record_echo(41, AttemptOutcome::Complete, &now()).unwrap_err();
     assert!(matches!(err, ProposalError::AlreadyEchoed { update: 41 }), "{err}");
 }
 
@@ -335,7 +357,7 @@ fn an_uncertain_echo_is_preserved_for_an_operator_and_never_resent_here() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("stored");
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("stored");
     let outcome = echo(&s, 41, AttemptOutcome::Ambiguous { acknowledged_chunks: 1 });
     assert_eq!(outcome, Echo::Uncertain { acknowledged_chunks: 1 });
     assert!(outcome.needs_operator());
@@ -357,7 +379,7 @@ fn a_proposal_survives_reopening_the_store() {
     let as_alice = contributor("alice");
     {
         let s = ProposalStore::open(&path).unwrap();
-        s.propose(sc.proposal(41, &alice, &as_alice), AT).unwrap();
+        s.propose(sc.proposal(41, &alice, &as_alice), &now()).unwrap();
         echo(&s, 41, AttemptOutcome::Complete);
     }
     {
@@ -388,7 +410,7 @@ fn the_store_is_owner_only() {
 #[test]
 fn an_echo_recorded_against_no_proposal_is_refused() {
     let s = store();
-    let err = s.record_echo(999, AttemptOutcome::Complete, AT).unwrap_err();
+    let err = s.record_echo(999, AttemptOutcome::Complete, &now()).unwrap_err();
     assert!(matches!(err, ProposalError::NoSuchProposal { update: 999 }), "{err}");
     let err = s.begin_echo(999).unwrap_err();
     assert!(matches!(err, ProposalError::NoSuchProposal { update: 999 }), "{err}");
@@ -424,7 +446,7 @@ fn a_crash_after_the_send_intent_but_before_the_send_never_sends_again() {
     let as_alice = contributor("alice");
     {
         let s = reopened(&path);
-        s.propose(sc.proposal(41, &alice, &as_alice), AT).unwrap();
+        s.propose(sc.proposal(41, &alice, &as_alice), &now()).unwrap();
         s.begin_echo(41).unwrap();
         // ── crash ──
     }
@@ -449,7 +471,7 @@ fn a_crash_after_the_send_but_before_the_outcome_never_sends_again() {
     let as_alice = contributor("alice");
     {
         let s = reopened(&path);
-        s.propose(sc.proposal(41, &alice, &as_alice), AT).unwrap();
+        s.propose(sc.proposal(41, &alice, &as_alice), &now()).unwrap();
         s.begin_echo(41).unwrap();
         // the send happens here, and Telegram accepts it
         // ── crash before record_echo ──
@@ -474,7 +496,7 @@ fn a_crash_after_a_delivered_outcome_but_before_the_disposition_never_sends_agai
     let as_alice = contributor("alice");
     {
         let s = reopened(&path);
-        s.propose(sc.proposal(41, &alice, &as_alice), AT).unwrap();
+        s.propose(sc.proposal(41, &alice, &as_alice), &now()).unwrap();
         echo(&s, 41, AttemptOutcome::Complete);
         // ── crash before the channel journal settles the update ──
     }
@@ -499,7 +521,7 @@ fn a_positively_rejected_send_may_safely_be_retried_after_a_crash() {
     let as_alice = contributor("alice");
     {
         let s = reopened(&path);
-        s.propose(sc.proposal(41, &alice, &as_alice), AT).unwrap();
+        s.propose(sc.proposal(41, &alice, &as_alice), &now()).unwrap();
         assert_eq!(echo(&s, 41, AttemptOutcome::Rejected), Echo::Pending);
         // ── crash ──
     }
@@ -533,7 +555,7 @@ fn a_confirmation_begins_only_from_unconfirmed_and_records_what_it_will_send() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).unwrap();
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).unwrap();
     echo(&s, 41, AttemptOutcome::Complete);
     assert_eq!(s.proposal(41).unwrap().unwrap().confirm, Confirmation::Unconfirmed);
 
@@ -563,7 +585,7 @@ fn a_committed_confirmation_records_the_organization_the_store_answered_with() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).unwrap();
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).unwrap();
     echo(&s, 41, AttemptOutcome::Complete);
     append_ok(&s, 41, "share-abc", &org());
 
@@ -588,7 +610,7 @@ fn a_contested_append_is_permanent_and_names_what_differed() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).unwrap();
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).unwrap();
     echo(&s, 41, AttemptOutcome::Complete);
     s.begin_append(41, "share-abc", "2026-09-01", 42).unwrap();
     s.record_contest(41, "share-abc", "body").unwrap();
@@ -615,7 +637,7 @@ fn an_outcome_naming_a_different_activity_than_the_intent_is_refused() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).unwrap();
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).unwrap();
     echo(&s, 41, AttemptOutcome::Complete);
     s.begin_append(41, "share-abc", "2026-09-01", 42).unwrap();
     let err = s.record_commit(41, "share-somethingelse", &org()).unwrap_err();
@@ -634,7 +656,7 @@ fn a_crash_between_the_append_and_its_outcome_leaves_a_replayable_intent() {
     let as_alice = contributor("alice");
     {
         let s = reopened(&path);
-        s.propose(sc.proposal(41, &alice, &as_alice), AT).unwrap();
+        s.propose(sc.proposal(41, &alice, &as_alice), &now()).unwrap();
         echo(&s, 41, AttemptOutcome::Complete);
         s.begin_append(41, "share-abc", "2026-09-01", 42).unwrap();
         // ── crash after the POST, before its outcome ──
@@ -660,7 +682,7 @@ fn the_success_reply_has_the_same_duplicate_protection_as_the_proposal_echo() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).unwrap();
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).unwrap();
     echo(&s, 41, AttemptOutcome::Complete);
     append_ok(&s, 41, "share-abc", &org());
 
@@ -681,7 +703,7 @@ fn a_reply_the_channel_proved_never_left_may_be_sent_again() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).unwrap();
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).unwrap();
     echo(&s, 41, AttemptOutcome::Complete);
     append_ok(&s, 41, "share-abc", &org());
     s.begin_reply(41).unwrap();
@@ -727,7 +749,7 @@ fn a_version_2_store_migrates_and_keeps_every_proposal_it_held() {
     let as_alice = contributor("alice");
     {
         let s = ProposalStore::open(&path).expect("a fresh store");
-        s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("propose");
+        s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("propose");
         echo(&s, 41, AttemptOutcome::Complete);
     }
     {
@@ -758,6 +780,54 @@ fn a_version_2_store_migrates_and_keeps_every_proposal_it_held() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The state a crash between the migration and its version write used to leave: the column added,
+/// version 2 still recorded, and every later open refused with `duplicate column name` — someone's
+/// unconfirmed words stranded behind exactly the operator ticket the migration exists to avoid.
+/// The trigger stands in for the crash: it fails the version write and nothing else.
+#[test]
+fn a_version_2_migration_interrupted_before_its_version_write_reopens_and_migrates() {
+    let dir = scratch("v2-interrupted");
+    let path = dir.join("proposals.db");
+    drop(ProposalStore::open(&path).expect("a fresh store"));
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        conn.execute_batch(
+            "ALTER TABLE proposals DROP COLUMN refused_code;
+             UPDATE proposal_meta SET value='2' WHERE key='schema_version';
+             CREATE TRIGGER crash_before_the_version BEFORE UPDATE ON proposal_meta
+             BEGIN SELECT RAISE(ABORT, 'crashed before the version write'); END;",
+        )
+        .expect("wind back to version 2, with the version write rigged to fail");
+    }
+    let has_column = |conn: &rusqlite::Connection| {
+        conn.prepare("SELECT 1 FROM pragma_table_info('proposals') WHERE name='refused_code'")
+            .unwrap()
+            .exists([])
+            .unwrap()
+    };
+    let version = |conn: &rusqlite::Connection| -> String {
+        conn.query_row("SELECT value FROM proposal_meta WHERE key='schema_version'", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
+    };
+
+    assert!(ProposalStore::open(&path).is_err(), "the version write was made to fail");
+    {
+        let conn = rusqlite::Connection::open(&path).expect("open");
+        assert!(!has_column(&conn), "the ALTER must go down with the version write");
+        assert_eq!(version(&conn), "2");
+        conn.execute_batch("DROP TRIGGER crash_before_the_version").expect("disarm");
+    }
+
+    drop(ProposalStore::open(&path).expect("the interrupted migration re-runs cleanly"));
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    // The positive control for the absence above: the same probe sees the column once it is there.
+    assert!(has_column(&conn));
+    assert_eq!(version(&conn), SCHEMA_VERSION.to_string());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_recovering_append_reads_its_request_from_the_row_not_from_a_derivation() {
     // The persisted intent is the SOURCE of a replay, not a receipt for one. Both fields are
@@ -770,7 +840,7 @@ fn a_recovering_append_reads_its_request_from_the_row_not_from_a_derivation() {
     let as_alice = contributor("alice");
     {
         let s = reopened(&path);
-        s.propose(sc.proposal(41, &alice, &as_alice), AT).unwrap();
+        s.propose(sc.proposal(41, &alice, &as_alice), &now()).unwrap();
         echo(&s, 41, AttemptOutcome::Complete);
         s.begin_append(41, "share-persisted", "2026-09-01", 42).unwrap();
         // ── crash ──
@@ -802,7 +872,7 @@ fn the_echo_lane_and_the_reply_lane_do_not_share_state() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).unwrap();
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).unwrap();
     echo(&s, 41, AttemptOutcome::Complete);
     append_ok(&s, 41, "share-abc", &org());
     let row = s.proposal(41).unwrap().unwrap();
@@ -821,7 +891,7 @@ fn a_refused_append_is_terminal_and_is_never_replayed() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("stored");
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("stored");
     echo(&s, 41, AttemptOutcome::Complete);
 
     s.begin_append(41, "share-abc", "2026-09-01", 42).expect("intent");
@@ -852,7 +922,7 @@ fn a_refused_append_reaches_the_operator_queue() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("stored");
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("stored");
     echo(&s, 41, AttemptOutcome::Complete);
     s.begin_append(41, "share-abc", "2026-09-01", 42).expect("intent");
     s.record_refusal(41, "share-abc", "unauthorized").expect("refused");
@@ -871,7 +941,7 @@ fn a_committed_proposal_is_not_dragged_into_the_operator_queue_by_the_new_state(
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("stored");
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("stored");
     echo(&s, 41, AttemptOutcome::Complete);
     s.begin_append(41, "share-abc", "2026-09-01", 42).expect("intent");
     s.record_commit(41, "share-abc", &org()).expect("committed");
@@ -938,7 +1008,7 @@ fn a_row_this_build_cannot_read_is_refused_rather_than_coerced() {
     let sc = scope();
     let alice = actor("184223311");
     let as_alice = contributor("alice");
-    s.propose(sc.proposal(41, &alice, &as_alice), AT).expect("stored");
+    s.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("stored");
     {
         let conn = rusqlite::Connection::open(s._dir.join("proposals.db")).expect("open");
         conn.execute("UPDATE proposals SET confirm='from-the-future' WHERE update_id=41", [])
@@ -949,4 +1019,64 @@ fn a_row_this_build_cannot_read_is_refused_rather_than_coerced() {
         matches!(err, ProposalError::Unusable { update: 41, what: "confirmation state" }),
         "{err}"
     );
+}
+
+/// Two relay processes at the same redelivery must not both acquire the intent.
+///
+/// `begin_echo` reads the row, judges it in Rust, then writes an `UPDATE` with no state predicate.
+/// The `Mutex<Connection>` serialises that pair within one process and says nothing about two —
+/// and `relay` is one cycle per process, with other subcommands opening the same file. Both
+/// handles below read `Pending`, both pass `may_attempt`, and both write `attempting`.
+///
+/// The consequence is the one the module doc calls "the one outcome this whole path exists to
+/// prevent": each process believes it holds the intent and sends, and the person is shown the same
+/// proposal twice.
+#[test]
+fn two_handles_cannot_both_acquire_the_echo_intent() {
+    let (dir, path) = crash_store();
+    let sc = scope();
+    let alice = actor("184223311");
+    let as_alice = contributor("alice");
+
+    let one = reopened(&path);
+    one.propose(sc.proposal(41, &alice, &as_alice), &now()).expect("stored");
+    let two = reopened(&path);
+
+    // Both observe the same pre-state. This is the window, made explicit rather than raced for.
+    assert_eq!(one.proposal(41).unwrap().unwrap().echo, Echo::Pending);
+    assert_eq!(two.proposal(41).unwrap().unwrap().echo, Echo::Pending);
+
+    one.begin_echo(41).expect("the first acquires the intent");
+    let second = two.begin_echo(41);
+    assert!(
+        matches!(second, Err(ProposalError::AlreadyEchoed { update: 41 })),
+        "both processes acquired the intent and both would send: {second:?}"
+    );
+
+    // Positive control: the refusal is the store's, not the handle's. `two` is still usable, and
+    // still sees the state the first handle committed.
+    assert_eq!(two.proposal(41).unwrap().unwrap().echo, Echo::Attempting);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A damaged `schema_version` must be refused, not read as "no version recorded". See the same
+/// test in `crates/journal/src/tests.rs` — one rule, three stores, and it was wrong in two.
+#[test]
+fn a_damaged_schema_version_is_refused_rather_than_read_as_absent() {
+    let dir = scratch("schema-version");
+    let path = dir.join("proposals.db");
+    drop(ProposalStore::open(&path).unwrap());
+
+    // The positive control: an untouched store re-opens.
+    ProposalStore::open(&path).expect("an untouched proposal store re-opens");
+
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute("UPDATE proposal_meta SET value='three' WHERE key='schema_version'", []).unwrap();
+    drop(conn);
+
+    match ProposalStore::open(&path) {
+        Err(ProposalError::UnreadableVersion { raw }) => assert_eq!(raw, "three"),
+        other => panic!("a damaged schema version must be refused, got {other:?}"),
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

@@ -1,0 +1,12 @@
+[Unit]
+Description=Five-minute confinement attestation timer for Rust IronWorks cell %i
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=5min
+AccuracySec=15s
+Persistent=false
+Unit=ironworks-attest@%i.service
+
+[Install]
+WantedBy=timers.target

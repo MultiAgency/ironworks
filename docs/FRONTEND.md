@@ -116,7 +116,8 @@ attempt, with the channel confirming the chunk. `crates/telegram` serves the sam
 fixture and nothing on the serving path changes to reach one. `dev/relay-loop.sh` supervises it: `relay` still handles one cycle and exits — that is what keeps
 every crash boundary a real process boundary — and the loop runs a fresh process per cycle, backs
 off on failure, stops on a usage error rather than retrying a misconfiguration forever, and holds
-no cursor of its own. What is left is deployment: nothing runs it anywhere. The `channel` crate is already Telegram-shaped — monotonic update
+no cursor of its own. It is deployed: `deploy/README.md` records `ironworks-telegram` and
+`ironworks-relay` enabled and active on one host, serving one tenant. The `channel` crate is already Telegram-shaped — monotonic update
 ids, offset acknowledgment, plain text with no parse mode, chunking at
 `DEFAULT_CHUNK_BYTES` — and unlike a bespoke demo page the adapter is on the product path, because
 a tenant needs it eventually.
@@ -203,7 +204,7 @@ attacker-reachable — no HTML, no live links. On the injection screen that rule
 
 ## What is published
 
-One Cloudflare Pages project, `rustworks` — consolidating `ironworks` and `ironworks-assay`,
+One Cloudflare Pages project, `ironworks` — consolidating `ironworks` and `ironworks-assay`,
 which served byte-identical copies of the same page.
 
 **One page, and a 404.** Not because the material is thin, but because the reader is one person
@@ -224,19 +225,23 @@ the argument was not false, it was **unsupported**, and no rewording reaches it.
 rather than repointed, because it was also pinned to a transcript over the superseded six-record
 book and a transcript recorded over one book cannot be rendered against another.
 
-**What survives measurement is showing the thing work.** The demo is a question picker across the
-six of the seven real questions; each shows the records that turn was given, the answer, and every
+**What survives measurement is showing the thing work.** The demo is a question picker across every
+real question in `crates/graders/src/cases.rs::CASES` but one — the cross-account brief, excluded
+for the reason below. Each shows the records that turn was given, the answer, and every
 claim underlined back to the dated activity it came from, with a key for the markings. A reader checks it by eye. No statistic is
 quoted, and none is needed — which matters, because the one the page was going to lead with turned
 out not to be computable: the grader gate that would count injection refusals fires on answers that
-quote the payload *in order to refuse it*, and the persona teaches that quoting. See the correction
-in `docs/experiments/README.md`.
+quote the payload *in order to refuse it*, and the persona teaches that quoting. **That is recorded
+here and nowhere else** — it changed no verdict, so no run measured it, and this paragraph is its
+only record.
 
 **Three things it carries that a highlight reel would not:**
 
-- **Recorded, not live**, labelled with the run and composition digest. A live turn stays impossible
-  until there is a deployment — `relay` runs one cycle, concurrency is not built, and a turn past
-  thirty seconds is refused rather than degraded.
+- **Recorded, not live**, labelled with the run and composition digest. There is now a deployment —
+  `deploy/README.md` records a message polled, routed, scope-verified, answered and delivered — so
+  what keeps the page recorded is no longer the absence of one. It is that `relay` runs one cycle,
+  concurrency is not built, and a turn past thirty seconds is refused rather than degraded: a live
+  turn behind a published page would be a page that sometimes shows a refusal.
 - **The grades, once, in prose — never stamped on an answer.** The count is computed from the
   transcript. A verdict chip beside an answer reads as *"this answer is wrong"*, and `0023`
   established most failures are phrasing rules rather than reasoning, with four known defects still
@@ -261,7 +266,7 @@ slips into a commit is a page that can disagree with the composition it claims t
 
     ironworks-site demo --html site/index.html
     ironworks-site not-found --html site/404.html
-    wrangler pages deploy site --project-name rustworks --branch main
+    wrangler pages deploy site --project-name ironworks --branch main
 
 **The operator pages are generated outside `site/`, and that is the mechanism rather than a
 convention.** The composition arc and the answer reader are for whoever is improving the service,

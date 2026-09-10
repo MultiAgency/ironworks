@@ -17,7 +17,7 @@ publish = false
 # with no side effects) without sharing its database.
 [dependencies]
 ironworks-domain = { path = "../domain" }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+rusqlite = { version = "0.40.2", features = ["backup", "bundled"] }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 

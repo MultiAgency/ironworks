@@ -58,7 +58,7 @@ pub fn digest() -> String {
         hasher.update(body.as_bytes());
         hasher.update([0u8]);
     }
-    hasher.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect()
+    ironworks_domain::composition::digest16_of(hasher)
 }
 
 #[cfg(test)]

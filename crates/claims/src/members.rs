@@ -9,9 +9,12 @@
 //!
 //! # Why a word list rather than a number
 //!
-//! Both claims spell the count out. The one digit-form `N crates` claim in the tree — `DESIGN.md`'s
-//! **88 crates in the lockfile** — counts a different set entirely: transitive dependencies, not
-//! workspace members. Reading only the token before `crates`, and only recognising it when it is a
+//! Both claims spell the count out. The one digit-form `N crates` claim in the tree —
+//! `DESIGN.md`'s **lockfile count**, under "Dependency budget" — counts a different set entirely:
+//! transitive dependencies, not workspace members. The figure itself is not repeated here, and that
+//! is the point of the example: it read `88` when this was written and reads a larger number now,
+//! so a comment quoting it would have to be re-edited every time the thing it is *not* about moves.
+//! Reading only the token before `crates`, and only recognising it when it is a
 //! spelled-out number, keeps those apart without a special case for the sentence that would
 //! otherwise be the first false alarm. **A check that misfires is worse than no check**, because
 //! the first false alarm teaches its reader to skim it.
@@ -88,9 +91,7 @@ pub fn check(root: &Path) -> Vec<Finding> {
 
     let mut claims = 0usize;
     let mut findings = Vec::new();
-    for md in doc_files(root) {
-        let Ok(text) = std::fs::read_to_string(&md) else { continue };
-        let where_ = md.strip_prefix(root).unwrap_or(&md).to_string_lossy().into_owned();
+    for (where_, text) in crate::scan_docs(root, doc_files(root)) {
         for stated in stated(&text) {
             claims += 1;
             if stated != actual {
@@ -108,11 +109,7 @@ pub fn check(root: &Path) -> Vec<Finding> {
             format!("no document states a crate count; the workspace has {actual}"),
         )];
     }
-    if findings.is_empty() {
-        findings.push(Finding::pass(
-            "workspace members",
-            format!("{claims} stated count(s) match the {actual} members in Cargo.toml"),
-        ));
-    }
-    findings
+    crate::reported("workspace members", findings, || {
+        format!("{claims} stated count(s) match the {actual} members in Cargo.toml")
+    })
 }

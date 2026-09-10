@@ -18,9 +18,10 @@ path = "src/main.rs"
 
 [dependencies]
 ironworks-domain = { path = "../domain" }
-# The page states a refusal rate. It must be computed by **the same instrument that grades**,
-# or the page is publishing a second opinion about its own answers.
-ironworks-graders = { path = "../graders" }
+# The arc page states the alloy digest and the digest of every ingredient. It computes them with
+# the same functions the binary composes with, rather than reading them out of that binary's
+# terminal output — see `crates/site/src/arc/data.rs::compose`.
+ironworks-services = { path = "../services" }
 ironworks-evidence = { path = "../evidence" }
 ironworks-page = { path = "../page" }
 serde_json = { workspace = true }

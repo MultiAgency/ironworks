@@ -27,8 +27,7 @@
 //! rather than advisory.
 
 use ironworks_domain::{
-    ActorRef, AttemptOutcome, ChannelRef, ContributorId, OrgId, Slug, record::AccountId,
-    restrict_to_owner,
+    ActorRef, AttemptOutcome, ChannelRef, ContributorId, OrgId, Slug, Utc, record::AccountId,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
@@ -54,12 +53,12 @@ use std::sync::Mutex;
 /// strand someone's unconfirmed words behind an operator ticket to buy nothing.
 ///
 /// The other direction is covered without a version check: an older binary meeting a `refused`
-/// row cannot read the tag, and [`ProposalStore::read`] refuses an unknown tag rather than
+/// row cannot read the tag, and `ProposalStore::read` refuses an unknown tag rather than
 /// coercing it. A downgrade therefore fails closed on the one row it cannot understand instead of
 /// treating a refused append as retryable.
-const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 3;
 
-const SCHEMA: &str = "
+const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS proposal_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -136,8 +135,22 @@ CREATE TABLE IF NOT EXISTS proposals (
 CREATE INDEX IF NOT EXISTS proposals_actor ON proposals(actor_key);
 ";
 
+/// What `ironworks-store` needs to know about this file: its schema, where the version is
+/// recorded, and which version this implementation writes.
+const SCHEMA: ironworks_store::Schema = ironworks_store::Schema {
+    sql: SCHEMA_SQL,
+    meta_table: "proposal_meta",
+    version: SCHEMA_VERSION,
+};
+
 #[derive(Debug, thiserror::Error)]
 pub enum ProposalError {
+    #[error("the proposal snapshot at {path} could not be created: {source}")]
+    Snapshot {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("the proposal store at {path} could not be opened: {source}")]
     Open {
         path: String,
@@ -166,6 +179,12 @@ pub enum ProposalError {
          guessing which would risk someone's unconfirmed words."
     )]
     Version { found: i64, expected: i64 },
+    #[error(
+        "the proposal store's recorded schema version is {raw:?}, which is not a number. Refusing to \
+         read it as 'no version recorded': that arm stamps this implementation's version onto a \
+         database whose shape was never established, and this file holds words someone typed and is waiting to confirm."
+    )]
+    UnreadableVersion { raw: String },
     /// The same update arriving with different content. Nothing was changed.
     ///
     /// This is not a redelivery: a redelivery of update *N* carries what update *N* carried. A
@@ -416,16 +435,53 @@ impl std::fmt::Debug for ProposalStore {
     }
 }
 
-fn opened(path: &Path, source: rusqlite::Error) -> ProposalError {
-    if matches!(&source, rusqlite::Error::SqliteFailure(e, _)
-        if e.code == rusqlite::ErrorCode::NotADatabase)
-    {
-        return ProposalError::NotADatabase { path: path.display().to_string() };
+/// An open failure, as the sentence an operator has to act on.
+///
+/// A store that cannot be read is either one that is not there and could not be made, or one whose
+/// bytes are not a database. The second needs a different sentence: that file may hold state
+/// nothing else has, so the operator instruction is to preserve it rather than clear it and retry.
+///
+/// `ironworks-store` runs the protocol and returns a cause carrying no path and no prose, because
+/// the three crates sharing it keep three different files and the wording is the part that says
+/// which one this is. This translation is the only thing about opening a proposal store that is not shared.
+fn opened(path: &Path, why: ironworks_store::OpenFailure) -> ProposalError {
+    use ironworks_store::OpenFailure as F;
+    let path = path.display().to_string();
+    match why {
+        F::Open(source) => ProposalError::Open { path, source },
+        F::NotADatabase => ProposalError::NotADatabase { path },
+        F::Exposed(source) => ProposalError::Exposed { path, source },
+        F::UnreadableVersion { raw } => ProposalError::UnreadableVersion { raw },
+        F::Version { found } => ProposalError::Version { found, expected: SCHEMA_VERSION },
+        F::Sqlite(source) => ProposalError::Sqlite(source),
     }
-    ProposalError::Open { path: path.display().to_string(), source }
 }
 
 impl ProposalStore {
+    /// The connection, whatever a previous panic left behind.
+    ///
+    /// `lock().expect("proposal store lock")` opened 11 methods, and a poisoned mutex made every one of them
+    /// abort — inside a store whose error enum exists to fail closed and whose whole subject is
+    /// words someone typed and is waiting to confirm. Poisoning means *some other* thread panicked while holding this; the
+    /// data behind it is a SQLite connection, which has its own transactional integrity and is not
+    /// left half-written by a panic in Rust code. Taking the guard is therefore the honest
+    /// recovery, and it is one documented decision rather than 11 undocumented ones.
+    fn locked(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Copy a consistent live view into a new owner-only SQLite file.
+    pub fn snapshot_to(&self, destination: impl AsRef<Path>) -> Result<(), ProposalError> {
+        let destination = destination.as_ref();
+        let source = self.locked();
+        ironworks_store::snapshot_to(&source, destination).map_err(|why| match why {
+            ironworks_store::SnapshotFailure::Reserve(source) => {
+                ProposalError::Snapshot { path: destination.display().to_string(), source }
+            }
+            ironworks_store::SnapshotFailure::Sqlite(source) => ProposalError::Sqlite(source),
+        })
+    }
+
     /// Open or create the store, owner-only.
     ///
     /// The same posture as the journals, and it fails closed for the same reason: the file holds
@@ -433,50 +489,18 @@ impl ProposalStore {
     /// must not fill.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ProposalError> {
         let path = path.as_ref();
-        let conn = Connection::open(path)
-            .map_err(|source| ProposalError::Open { path: path.display().to_string(), source })?;
-        // Before the schema, so a file that is both readable and non-empty never exists.
-        restrict_to_owner(path).map_err(|source| ProposalError::Exposed {
-            path: path.display().to_string(),
-            source,
-        })?;
-        // `open` is lazy; the first statement is where a file that is not a database says so.
-        conn.pragma_update(None, "journal_mode", "WAL").map_err(|e| opened(path, e))?;
-        // A proposal that survives a clean exit but not a power cut is one a person is told was
-        // saved and then is not.
-        conn.pragma_update(None, "synchronous", "FULL")?;
-        conn.execute_batch(SCHEMA)?;
-        let found: Option<i64> = conn
-            .query_row("SELECT value FROM proposal_meta WHERE key='schema_version'", [], |r| {
-                r.get::<_, String>(0)
-            })
-            .optional()?
-            .and_then(|v| v.parse().ok());
-        match found {
-            None => {
-                conn.execute(
-                    "INSERT INTO proposal_meta(key,value) VALUES('schema_version',?1)",
-                    params![SCHEMA_VERSION.to_string()],
-                )?;
+        let conn = ironworks_store::open_durable(path, SCHEMA, |tx, found| {
+            if found != 2 {
+                return Ok(false);
             }
-            Some(v) if v == SCHEMA_VERSION => {}
-            // Additive, in one transaction, touching no row. `CREATE TABLE IF NOT EXISTS` above
-            // no-ops on an existing file, so the column has to be added here — and SQLite DDL is
-            // transactional, so an interrupted migration rolls back with the version still 2 and
-            // the next open re-runs it.
-            Some(2) => {
-                let tx = conn.unchecked_transaction()?;
-                tx.execute_batch("ALTER TABLE proposals ADD COLUMN refused_code TEXT")?;
-                tx.execute(
-                    "UPDATE proposal_meta SET value=?1 WHERE key='schema_version'",
-                    params![SCHEMA_VERSION.to_string()],
-                )?;
-                tx.commit()?;
-            }
-            Some(found) => {
-                return Err(ProposalError::Version { found, expected: SCHEMA_VERSION });
-            }
-        }
+            // Additive and touching no row. `CREATE TABLE IF NOT EXISTS` no-ops on an existing
+            // file, so the column has to be added here — inside the transaction `open_durable`
+            // owns, the one that also writes the new version. An interrupted migration therefore
+            // rolls back with the version still 2, and the next open re-runs it.
+            tx.execute_batch("ALTER TABLE proposals ADD COLUMN refused_code TEXT")?;
+            Ok(true)
+        })
+        .map_err(|why| opened(path, why))?;
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -486,8 +510,8 @@ impl ProposalStore {
     /// that resends until acknowledged cannot mint a second proposal. A redelivery carrying
     /// *different* content is a [`ProposalError::Conflict`] and writes nothing — the key would no
     /// longer identify one request, and the stored words may already have been shown.
-    pub fn propose(&self, new: NewProposal<'_>, now: &str) -> Result<Proposal, ProposalError> {
-        let conn = self.conn.lock().expect("proposal store lock");
+    pub fn propose(&self, new: NewProposal<'_>, now: &Utc) -> Result<Proposal, ProposalError> {
+        let conn = self.locked();
         if let Some(existing) = Self::read(&conn, new.update)? {
             for (field, same) in [
                 ("actor", Self::actor_key(&conn, new.update)? == new.actor.persistence_key()),
@@ -517,7 +541,7 @@ impl ProposalStore {
                 new.org.as_str(),
                 new.account.as_str(),
                 new.body,
-                now,
+                now.as_str(),
             ],
         )?;
         Self::read(&conn, new.update)?.ok_or(ProposalError::NoSuchProposal { update: new.update })
@@ -540,17 +564,17 @@ impl ProposalStore {
     /// Refuses anything that is not [`Echo::Pending`], so the caller cannot begin a second
     /// attempt on a proposal already in flight, already delivered, or already uncertain.
     pub fn begin_echo(&self, update: u64) -> Result<(), ProposalError> {
-        let conn = self.conn.lock().expect("proposal store lock");
+        let conn = self.locked();
         let existing =
             Self::read(&conn, update)?.ok_or(ProposalError::NoSuchProposal { update })?;
         if !existing.echo.may_attempt() {
             return Err(ProposalError::AlreadyEchoed { update });
         }
-        conn.execute(
-            "UPDATE proposals SET echo='attempting' WHERE update_id=?1",
-            params![sql_update(update)?],
-        )?;
-        Ok(())
+        took(conn.execute(
+            "UPDATE proposals SET echo='attempting' WHERE update_id=?1 AND echo=?2",
+            params![sql_update(update)?, existing.echo.tag()],
+        )?)
+        .ok_or(ProposalError::AlreadyEchoed { update })
     }
 
     /// Record what the channel established about showing the proposal.
@@ -566,9 +590,9 @@ impl ProposalStore {
         &self,
         update: u64,
         outcome: AttemptOutcome,
-        now: &str,
+        now: &Utc,
     ) -> Result<Echo, ProposalError> {
-        let conn = self.conn.lock().expect("proposal store lock");
+        let conn = self.locked();
         let existing =
             Self::read(&conn, update)?.ok_or(ProposalError::NoSuchProposal { update })?;
         if existing.echo != Echo::Attempting {
@@ -587,17 +611,19 @@ impl ProposalStore {
         };
         // `echoed_at` marks when the attempt settled, and a pending row keeps `NULL`: a timestamp
         // on a proposal nobody has seen would read as evidence that they had.
-        let at = if echo == Echo::Pending { None } else { Some(now) };
-        conn.execute(
-            "UPDATE proposals SET echo=?2, echo_chunks=?3, echoed_at=?4 WHERE update_id=?1",
-            params![sql_update(update)?, echo.tag(), chunks, at],
-        )?;
+        let at = if echo == Echo::Pending { None } else { Some(now.as_str()) };
+        took(conn.execute(
+            "UPDATE proposals SET echo=?2, echo_chunks=?3, echoed_at=?4
+              WHERE update_id=?1 AND echo=?5",
+            params![sql_update(update)?, echo.tag(), chunks, at, existing.echo.tag()],
+        )?)
+        .ok_or(ProposalError::AlreadyEchoed { update })?;
         Ok(echo)
     }
 
     /// The proposal this update made, whatever state it is in. For operators and for redelivery.
     pub fn proposal(&self, update: u64) -> Result<Option<Proposal>, ProposalError> {
-        let conn = self.conn.lock().expect("proposal store lock");
+        let conn = self.locked();
         Self::read(&conn, update)
     }
 
@@ -618,25 +644,26 @@ impl ProposalStore {
         occurred_at: &str,
         confirm_update: u64,
     ) -> Result<(), ProposalError> {
-        let conn = self.conn.lock().expect("proposal store lock");
+        let conn = self.locked();
         let existing =
             Self::read(&conn, update)?.ok_or(ProposalError::NoSuchProposal { update })?;
         if !existing.confirm.may_begin() {
             return Err(ProposalError::AlreadyConfirmed { update });
         }
-        conn.execute(
+        took(conn.execute(
             "UPDATE proposals
                 SET confirm=?5, activity_id=?2, occurred_at=?3, confirm_update=?4
-              WHERE update_id=?1",
+              WHERE update_id=?1 AND confirm=?6",
             params![
                 sql_update(update)?,
                 activity_id,
                 occurred_at,
                 sql_update(confirm_update)?,
                 APPENDING,
+                existing.confirm.tag(),
             ],
-        )?;
-        Ok(())
+        )?)
+        .ok_or(ProposalError::AlreadyConfirmed { update })
     }
 
     /// The store holds it. Persisted **before** the success reply is sent.
@@ -685,7 +712,7 @@ impl ProposalStore {
         differing: Option<&str>,
         refused: Option<&str>,
     ) -> Result<(), ProposalError> {
-        let conn = self.conn.lock().expect("proposal store lock");
+        let conn = self.locked();
         let existing =
             Self::read(&conn, update)?.ok_or(ProposalError::NoSuchProposal { update })?;
         // Only an attempt that was begun may settle. Reaching here from any other state means an
@@ -698,27 +725,27 @@ impl ProposalStore {
             // upstream and writing either would record a fiction.
             return Err(ProposalError::Unusable { update, what: "settled activity id" });
         }
-        conn.execute(
+        took(conn.execute(
             "UPDATE proposals SET confirm=?2, committed_org=?3, contested_field=?4, refused_code=?5
-              WHERE update_id=?1",
-            params![sql_update(update)?, state, org, differing, refused],
-        )?;
-        Ok(())
+              WHERE update_id=?1 AND confirm=?6",
+            params![sql_update(update)?, state, org, differing, refused, existing.confirm.tag()],
+        )?)
+        .ok_or(ProposalError::AlreadyConfirmed { update })
     }
 
     /// Durable intent for the success reply, before it is sent. Mirrors [`Self::begin_echo`].
     pub fn begin_reply(&self, update: u64) -> Result<(), ProposalError> {
-        let conn = self.conn.lock().expect("proposal store lock");
+        let conn = self.locked();
         let existing =
             Self::read(&conn, update)?.ok_or(ProposalError::NoSuchProposal { update })?;
         if !existing.reply.may_attempt() {
             return Err(ProposalError::AlreadyEchoed { update });
         }
-        conn.execute(
-            "UPDATE proposals SET reply_echo='attempting' WHERE update_id=?1",
-            params![sql_update(update)?],
-        )?;
-        Ok(())
+        took(conn.execute(
+            "UPDATE proposals SET reply_echo='attempting' WHERE update_id=?1 AND reply_echo=?2",
+            params![sql_update(update)?, existing.reply.tag()],
+        )?)
+        .ok_or(ProposalError::AlreadyEchoed { update })
     }
 
     /// What the channel established about the success reply. Mirrors [`Self::record_echo`].
@@ -727,7 +754,7 @@ impl ProposalStore {
         update: u64,
         outcome: AttemptOutcome,
     ) -> Result<Echo, ProposalError> {
-        let conn = self.conn.lock().expect("proposal store lock");
+        let conn = self.locked();
         let existing =
             Self::read(&conn, update)?.ok_or(ProposalError::NoSuchProposal { update })?;
         if existing.reply != Echo::Attempting {
@@ -744,10 +771,12 @@ impl ProposalStore {
             Echo::Uncertain { acknowledged_chunks } => Some(acknowledged_chunks),
             _ => None,
         };
-        conn.execute(
-            "UPDATE proposals SET reply_echo=?2, reply_chunks=?3 WHERE update_id=?1",
-            params![sql_update(update)?, echo.tag(), chunks],
-        )?;
+        took(conn.execute(
+            "UPDATE proposals SET reply_echo=?2, reply_chunks=?3
+              WHERE update_id=?1 AND reply_echo=?4",
+            params![sql_update(update)?, echo.tag(), chunks, existing.reply.tag()],
+        )?)
+        .ok_or(ProposalError::AlreadyEchoed { update })?;
         Ok(echo)
     }
 
@@ -775,7 +804,7 @@ impl ProposalStore {
         &self,
         authority: ConfirmAuthority<'_>,
     ) -> Result<Option<Confirmable>, ProposalError> {
-        let conn = self.conn.lock().expect("proposal store lock");
+        let conn = self.locked();
         let newest: Option<i64> = conn
             .query_row(
                 "SELECT update_id FROM proposals
@@ -809,7 +838,7 @@ impl ProposalStore {
     /// because it may already be shared evidence; and a contested append is permanent. Leaving
     /// any of them out would hide exactly the cases the durable intents were added to surface.
     pub fn awaiting_operator(&self) -> Result<Vec<Proposal>, ProposalError> {
-        let conn = self.conn.lock().expect("proposal store lock");
+        let conn = self.locked();
         let mut stmt = conn.prepare(
             "SELECT update_id FROM proposals
               WHERE echo IN ('attempting','uncertain')
@@ -981,6 +1010,27 @@ impl ProposalStore {
 /// SQLite has no unsigned integer. An update id past `i64::MAX` is not one any channel issued.
 fn sql_update(update: u64) -> Result<i64, ProposalError> {
     i64::try_from(update).map_err(|_| ProposalError::Unusable { update, what: "update id" })
+}
+
+/// `Some(())` when a compare-and-swap actually moved the row, `None` when it matched nothing.
+///
+/// # Why every transition carries its observed state in the `WHERE`
+///
+/// Each one reads the row, judges it in Rust, and then writes. The `Mutex<Connection>` orders that
+/// pair within one process and says nothing about two — and `relay` is documented as one cycle per
+/// process, with other subcommands opening the same file. Without the guard both processes read
+/// `pending`, both pass the judgement, and both write `attempting`; each then believes it holds the
+/// durable intent and sends, which is "the one outcome this whole path exists to prevent".
+///
+/// **Measured, not reasoned about.** Two handles on one file, released from a barrier, both
+/// acquired the echo intent on the first round of a two-hundred-round probe. This is not a narrow
+/// window.
+///
+/// The guard is the state that was *observed*, passed back as a parameter — never a predicate
+/// rebuilt in SQL. Re-deriving `may_attempt` or `may_begin` in a `WHERE` clause would be a second
+/// copy of the state machine, and the tags are already spelled in enough places.
+fn took(rows: usize) -> Option<()> {
+    (rows > 0).then_some(())
 }
 
 #[cfg(test)]

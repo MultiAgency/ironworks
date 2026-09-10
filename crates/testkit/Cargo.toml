@@ -1,0 +1,20 @@
+[package]
+name = "ironworks-testkit"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# Fixtures shared by this workspace's tests, and **only** by its tests.
+#
+# Every crate that depends on this does so under `[dev-dependencies]`, so it reaches no runtime
+# dependency graph and appears in no shipped binary. That is the whole reason a shared crate is
+# acceptable here at all: `crates/channel`'s narrow dependency set, and the layering `DESIGN.md`
+# describes, are statements about `[dependencies]`.
+#
+# Dependencies: none. A test fixture that grew one would be a thing under test.
+[dependencies]
+
+[lints]
+workspace = true

@@ -1,0 +1,29 @@
+[Unit]
+Description=Refresh confinement attestation for Rust IronWorks cell %i
+After=network-online.target ironworks-ironclaw@%i.service
+Wants=network-online.target ironworks-ironclaw@%i.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/ironworks
+EnvironmentFile=/etc/ironworks/relay-%i.env
+ExecStart=/opt/ironworks/deploy/refresh-attestation.sh %i
+User=root
+Group=root
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# The runtime directory is where the attestation lands; the second path is where it is read from.
+# `ProtectSystem=strict` makes everything else read-only, and SQLite cannot open a database at all
+# without write access beside it — it needs to create the `-wal` and `-shm` companions. Measured on
+# 2026-09-07: without this line the unit failed every run with "unable to open database file",
+# which reads as a missing store rather than a sandbox refusing one.
+ReadWritePaths=/run/ironworks-attest/%i /var/lib/ironworks
+RuntimeDirectory=ironworks-attest/%i
+RuntimeDirectoryMode=0755
+# Without this systemd removes the runtime directory when this `oneshot` exits, taking the
+# attestation with it — the unit succeeds, and the relay then finds no `current.json` for any new
+# turn. Measured on 2026-09-07: the service reported `Finished` while its own output no longer
+# existed, which is the least visible failure available.
+RuntimeDirectoryPreserve=yes

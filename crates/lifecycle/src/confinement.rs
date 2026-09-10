@@ -110,7 +110,7 @@ impl ToolState {
 /// # This list is the expectation, not the source of truth
 ///
 /// The catalogue reports `locked` per row, and [`plan`] and [`assess`] take that measured set
-/// rather than this constant — see [`undisableable`]. The two agreed exactly when measured
+/// rather than this constant — see `undisableable`. The two agreed exactly when measured
 /// (`docs/experiments/0037-what-the-seam-never-asked-for.md` check 2), and they agree by
 /// construction at this revision: `locked` is computed upstream as `default_permission == Deny ||
 /// effects ∩ {Financial, ModifyApproval, ModifyBudget} ≠ ∅`, and both rows below declare
@@ -118,7 +118,7 @@ impl ToolState {
 ///
 /// They are kept apart because a capability that *later* gains a hard-floor effect would join the
 /// runtime's locked set without joining this list, and the plan would then queue a write the
-/// runtime answers `400` — which stops the whole plan, because [`Applied`] stops at the first
+/// runtime answers `400` — which stops the whole plan, because `reconcile`'s `Applied` stops at the first
 /// failure by design. Reading the measured set makes that bump a no-op; keeping this constant
 /// beside it means a disagreement is still visible rather than absorbed.
 pub const UNDISABLEABLE: &[&str] =
@@ -158,6 +158,16 @@ pub const AUTHORITY_CHANGING: &[&str] = &[
     "builtin.trace_commons.profile_token",
     "builtin.trace_commons.account_login_link",
 ];
+
+/// A minimal positive witness that a settings-catalogue read included the host egress lane this
+/// confinement claim exists to deny.
+///
+/// `builtin.http` is a first-party host capability in IronClaw 1.4.0, separate from the sandbox's
+/// managed-egress proxy. A syntactically valid but truncated all-disabled catalogue that omits it
+/// is not evidence of confinement. This deliberately does **not** mirror the pin's whole catalogue:
+/// one witness prevents the known vacuous verdict while §L-7's executable-surface completeness
+/// remains BLOCKED.
+const REQUIRED_CATALOGUE_WITNESSES: &[&str] = &["builtin.http"];
 
 /// What the model is permitted to invoke.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,13 +258,43 @@ impl ConfinementPolicy {
     /// [`PolicyFingerprint`], so a stored fingerprint can only ever have come from a policy.
     pub fn fingerprint(&self) -> PolicyFingerprint {
         let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+
+        // The domain and length prefixes make each component unambiguous. The witness sequence is
+        // part of policy semantics: adding or changing a required denial witness must make every
+        // older baseline stale, because that baseline could not have measured the new condition.
+        sha2::Digest::update(&mut hasher, b"ironworks/confinement-policy/v2\0");
+        sha2::Digest::update(&mut hasher, (self.allowed.len() as u64).to_be_bytes());
         for tool in &self.allowed {
+            sha2::Digest::update(&mut hasher, (tool.len() as u64).to_be_bytes());
             sha2::Digest::update(&mut hasher, tool.as_bytes());
-            sha2::Digest::update(&mut hasher, b"\n");
         }
-        sha2::Digest::update(&mut hasher, if self.auto_approve { b"auto:1" } else { b"auto:0" });
-        let out = sha2::Digest::finalize(hasher);
-        PolicyFingerprint(out.iter().take(8).map(|b| format!("{b:02x}")).collect())
+        sha2::Digest::update(
+            &mut hasher,
+            (REQUIRED_CATALOGUE_WITNESSES.len() as u64).to_be_bytes(),
+        );
+        for tool in REQUIRED_CATALOGUE_WITNESSES {
+            sha2::Digest::update(&mut hasher, (tool.len() as u64).to_be_bytes());
+            sha2::Digest::update(&mut hasher, tool.as_bytes());
+        }
+        sha2::Digest::update(&mut hasher, [u8::from(self.auto_approve)]);
+        PolicyFingerprint(ironworks_domain::composition::digest16_of(hasher))
+    }
+
+    /// Full SHA-256 identity used in short-lived serving attestations.
+    pub fn sha256(&self) -> ironworks_domain::Sha256Digest {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&(self.allowed.len() as u64).to_be_bytes());
+        for tool in &self.allowed {
+            bytes.extend_from_slice(&(tool.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(tool.as_bytes());
+        }
+        bytes.extend_from_slice(&(REQUIRED_CATALOGUE_WITNESSES.len() as u64).to_be_bytes());
+        for tool in REQUIRED_CATALOGUE_WITNESSES {
+            bytes.extend_from_slice(&(tool.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(tool.as_bytes());
+        }
+        bytes.push(u8::from(self.auto_approve));
+        ironworks_domain::Sha256Digest::digest(b"ironworks/confinement-policy/v2\0", &bytes)
     }
 }
 
@@ -561,21 +601,18 @@ pub fn assess(
     auto_approve: bool,
     observed_at: &str,
 ) -> Confinement {
-    let (facts, drift) = assess_parts(policy, member, observed, locked, auto_approve, observed_at);
-    if drift.is_empty() {
-        Confinement::Verified(facts)
-    } else {
-        Confinement::Drifted { facts, drift }
+    match assess_parts(policy, member, observed, locked, auto_approve, observed_at) {
+        Ok((facts, drift)) if drift.is_empty() => Confinement::Verified(facts),
+        Ok((facts, drift)) => Confinement::Drifted { facts, drift },
+        Err(reason) => Confinement::Unverifiable(reason),
     }
 }
 
-/// The same comparison, before it is folded into a two-variant conclusion.
+/// The same comparison, before it is folded into a caller-facing conclusion.
 ///
-/// [`assess`] is the caller-facing form and its behaviour is unchanged. This exists because the
-/// durable ledger stores *facts and drift*, never a conclusion — and reading them back out of a
-/// [`Confinement`] would need a match arm for `Unverifiable`, a variant this function cannot
-/// produce. A dead arm on a value that decides whether a member is confined is exactly the shape
-/// worth removing rather than commenting.
+/// [`assess`] is the caller-facing form. This exists because the durable ledger stores *facts and
+/// drift*, never a conclusion. The error is load-bearing: a syntactically valid but incomplete
+/// catalogue is not measured drift, because no denial was observed.
 pub(crate) fn assess_parts(
     policy: &ConfinementPolicy,
     member: &OpaqueId,
@@ -583,7 +620,13 @@ pub(crate) fn assess_parts(
     locked: &BTreeSet<String>,
     auto_approve: bool,
     observed_at: &str,
-) -> (ConfinementFacts, Vec<Drift>) {
+) -> Result<(ConfinementFacts, Vec<Drift>), crate::BlockedReason> {
+    if let Some(tool) = missing_catalogue_witness(policy, observed) {
+        return Err(crate::BlockedReason::Malformed {
+            detail: format!("settings catalogue omitted required confinement witness {tool}"),
+        });
+    }
+
     let mut drift = Vec::new();
     let mut reachable = BTreeSet::new();
     let authority: BTreeSet<&str> = AUTHORITY_CHANGING.iter().copied().collect();
@@ -609,7 +652,10 @@ pub(crate) fn assess_parts(
         // unioned with the two this build has a `400` on record for. `ask_each_time` is their
         // catalogue floor. Policy requires global approval off independently; accepting the locked
         // floor is not a claim that any of these capabilities is model-reachable.
-        if undisableable.contains(tool.as_str()) && state == ToolState::AskEachTime && !auto_approve
+        if undisableable.contains(tool.as_str())
+            && !REQUIRED_CATALOGUE_WITNESSES.contains(&tool.as_str())
+            && state == ToolState::AskEachTime
+            && !auto_approve
         {
             continue;
         }
@@ -640,7 +686,17 @@ pub(crate) fn assess_parts(
         auto_approve,
         observed_at: observed_at.to_owned(),
     };
-    (facts, drift)
+    Ok((facts, drift))
+}
+
+fn missing_catalogue_witness(
+    policy: &ConfinementPolicy,
+    observed: &BTreeMap<String, String>,
+) -> Option<&'static str> {
+    REQUIRED_CATALOGUE_WITNESSES
+        .iter()
+        .copied()
+        .find(|tool| !policy.allows(tool) && !observed.contains_key(*tool))
 }
 
 #[cfg(test)]
@@ -656,6 +712,20 @@ mod plan_tests {
 
     fn locked(tools: &[&str]) -> BTreeSet<String> {
         tools.iter().map(|t| (*t).to_owned()).collect()
+    }
+
+    #[test]
+    fn the_policy_fingerprint_versions_the_required_witness_semantics() {
+        // Before required witnesses were part of policy identity, the empty read-only policy
+        // hashed the bytes `auto:0` to this value. It must never remain applicable after the
+        // witness rule was introduced, because the old observation may have been vacuous.
+        const LEGACY_READ_ONLY_FINGERPRINT: &str = "f948276f77d4fb0f";
+
+        let first = ConfinementPolicy::read_only_analyst().fingerprint();
+        let second = ConfinementPolicy::read_only_analyst().fingerprint();
+        assert_ne!(first.as_str(), LEGACY_READ_ONLY_FINGERPRINT);
+        assert_eq!(first.as_str(), "51a4df89ba58f7c6", "witness semantics drifted");
+        assert_eq!(first, second, "identical policy and witness order must hash identically");
     }
 
     fn open_catalogue() -> BTreeMap<String, String> {
@@ -707,10 +777,23 @@ mod plan_tests {
         // The runtime answers 400 to disabling them. Attempting it would manufacture a failure
         // that says nothing; locked `ask_each_time` is their achievable catalogue state.
         let p = plan(&ConfinementPolicy::read_only_analyst(), &open_catalogue(), &unlocked(), true);
-        for step in p.steps() {
-            if let Step::Disable { tool } = step {
-                assert!(!UNDISABLEABLE.contains(&tool.as_str()), "attempted {tool}");
-            }
+
+        // The control, and this assertion is the whole reason the loop below means anything: an
+        // empty plan satisfies "no step disables an undisableable tool" without disabling
+        // anything at all. §K-8 — a harness that reports a match over no rows is indistinguishable
+        // from one that does nothing.
+        let disables: Vec<&str> = p
+            .steps()
+            .iter()
+            .filter_map(|s| match s {
+                Step::Disable { tool } => Some(tool.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(!disables.is_empty(), "an empty plan passes this vacuously: {p:?}");
+
+        for tool in disables {
+            assert!(!UNDISABLEABLE.contains(&tool), "attempted {tool}");
         }
     }
 
@@ -763,6 +846,163 @@ mod plan_tests {
         assert_eq!(p.steps(), [Step::Disable { tool: "builtin.http".into() }]);
     }
 
+    #[test]
+    fn a_catalogue_missing_the_host_egress_witness_is_unverifiable() {
+        let observed = BTreeMap::from([("builtin.time".to_owned(), "disabled".to_owned())]);
+        let out = assess(
+            &ConfinementPolicy::read_only_analyst(),
+            &OpaqueId::new("member"),
+            &observed,
+            &unlocked(),
+            false,
+            "2026-09-02T00:00:00+00:00",
+        );
+
+        assert!(
+            matches!(
+                out,
+                Confinement::Unverifiable(crate::BlockedReason::Malformed { ref detail })
+                    if detail == "settings catalogue omitted required confinement witness builtin.http"
+            ),
+            "a truncated all-disabled catalogue was accepted: {out:?}"
+        );
+    }
+
+    #[test]
+    fn the_required_host_egress_witness_disabled_is_a_positive_control() {
+        let observed = BTreeMap::from([("builtin.http".to_owned(), "disabled".to_owned())]);
+        let out = assess(
+            &ConfinementPolicy::read_only_analyst(),
+            &OpaqueId::new("member"),
+            &observed,
+            &unlocked(),
+            false,
+            "2026-09-02T00:00:00+00:00",
+        );
+
+        assert!(matches!(out, Confinement::Verified(_)), "{out:?}");
+    }
+
+    #[test]
+    fn the_required_host_egress_witness_reachable_is_drift() {
+        let observed = BTreeMap::from([("builtin.http".to_owned(), "always_allow".to_owned())]);
+        let out = assess(
+            &ConfinementPolicy::read_only_analyst(),
+            &OpaqueId::new("member"),
+            &observed,
+            &unlocked(),
+            false,
+            "2026-09-02T00:00:00+00:00",
+        );
+
+        assert!(
+            matches!(
+                out,
+                Confinement::Drifted { ref drift, .. }
+                    if matches!(drift.as_slice(), [Drift::Reachable { tool, .. }] if tool == "builtin.http")
+            ),
+            "a reachable host egress witness was accepted: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_witness_cannot_be_certified_through_assess_parts() {
+        let observed = BTreeMap::from([("builtin.time".to_owned(), "disabled".to_owned())]);
+        let out = assess_parts(
+            &ConfinementPolicy::read_only_analyst(),
+            &OpaqueId::new("member"),
+            &observed,
+            &unlocked(),
+            false,
+            "2026-09-02T00:00:00+00:00",
+        );
+
+        assert!(
+            matches!(
+                out,
+                Err(crate::BlockedReason::Malformed { ref detail })
+                    if detail == "settings catalogue omitted required confinement witness builtin.http"
+            ),
+            "a truncated catalogue became measured drift: {out:?}"
+        );
+    }
+
+    #[test]
+    fn an_allowed_missing_tool_remains_measured_drift_not_a_missing_denial_witness() {
+        let out = assess(
+            &ConfinementPolicy::allowing(["builtin.http".to_owned()], false),
+            &OpaqueId::new("member"),
+            &BTreeMap::new(),
+            &unlocked(),
+            false,
+            "2026-09-02T00:00:00+00:00",
+        );
+
+        assert!(
+            matches!(
+                out,
+                Confinement::Drifted { ref drift, .. }
+                    if matches!(drift.as_slice(), [Drift::AllowedToolAbsent { tool }] if tool == "builtin.http")
+            ),
+            "an absent allowed tool was misclassified as an unobserved denial: {out:?}"
+        );
+    }
+
+    #[test]
+    fn a_locked_host_egress_witness_still_has_to_be_disabled() {
+        let locked = locked(&["builtin.http"]);
+        let reachable = BTreeMap::from([("builtin.http".to_owned(), "ask_each_time".to_owned())]);
+        let out = assess(
+            &ConfinementPolicy::read_only_analyst(),
+            &OpaqueId::new("member"),
+            &reachable,
+            &locked,
+            false,
+            "2026-09-02T00:00:00+00:00",
+        );
+        assert!(
+            matches!(
+                out,
+                Confinement::Drifted { ref drift, .. }
+                    if matches!(drift.as_slice(), [Drift::Reachable { tool, state: ToolState::AskEachTime }] if tool == "builtin.http")
+            ),
+            "a locked but reachable host egress witness was accepted: {out:?}"
+        );
+
+        let denied = BTreeMap::from([("builtin.http".to_owned(), "disabled".to_owned())]);
+        let control = assess(
+            &ConfinementPolicy::read_only_analyst(),
+            &OpaqueId::new("member"),
+            &denied,
+            &locked,
+            false,
+            "2026-09-02T00:00:00+00:00",
+        );
+        assert!(matches!(control, Confinement::Verified(_)), "{control:?}");
+    }
+
+    #[test]
+    fn a_sandbox_policy_still_drifts_when_its_allowed_shell_is_absent() {
+        let observed = BTreeMap::from([("builtin.http".to_owned(), "disabled".to_owned())]);
+        let out = assess(
+            &ConfinementPolicy::sandbox_workspace(),
+            &OpaqueId::new("member"),
+            &observed,
+            &unlocked(),
+            false,
+            "2026-09-02T00:00:00+00:00",
+        );
+
+        assert!(
+            matches!(
+                out,
+                Confinement::Drifted { ref drift, .. }
+                    if matches!(drift.as_slice(), [Drift::AllowedToolAbsent { tool }] if tool == "builtin.shell")
+            ),
+            "a sandbox policy without shell was accepted: {out:?}"
+        );
+    }
+
     // ── the measured `locked` set, and the control that makes it a measurement ──────────────
     //
     // The runtime computes `locked` from a capability's declared effects, so a capability that
@@ -804,6 +1044,7 @@ mod plan_tests {
         // disable. That must hold for a locked row this build has never heard of, not only for the
         // two in `UNDISABLEABLE`.
         let mut c = BTreeMap::new();
+        c.insert("builtin.http".to_owned(), "disabled".to_owned());
         c.insert("builtin.some_future_financial_tool".to_owned(), "ask_each_time".to_owned());
         let out = assess(
             &ConfinementPolicy::read_only_analyst(),
@@ -821,6 +1062,7 @@ mod plan_tests {
         // The control for the test above: an unlocked row at `ask_each_time` is still reachable
         // and still drift, so `Verified` above is the locked set doing the work.
         let mut c = BTreeMap::new();
+        c.insert("builtin.http".to_owned(), "disabled".to_owned());
         c.insert("builtin.some_future_financial_tool".to_owned(), "ask_each_time".to_owned());
         let out = assess(
             &ConfinementPolicy::read_only_analyst(),

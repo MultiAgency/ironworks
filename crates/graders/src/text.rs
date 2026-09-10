@@ -173,28 +173,9 @@ pub fn contains_word(haystack: &str, needle: &str) -> bool {
 
 /// Byte offsets of every word-boundary occurrence of `needle`.
 pub fn word_positions(haystack: &str, needle: &str) -> Vec<usize> {
-    let hay = haystack.to_lowercase();
-    let ndl = needle.to_lowercase();
-    let mut out = Vec::new();
-    if ndl.is_empty() {
-        return out;
-    }
+    let (hay, ndl) = (haystack.to_lowercase(), needle.to_lowercase());
     let bytes = hay.as_bytes();
-    let mut from = 0;
-    while let Some(found) = hay[from..].find(&ndl) {
-        let start = from + found;
-        let end = start + ndl.len();
-        let before_ok = start == 0 || !is_word_byte(bytes[start - 1]);
-        let after_ok = end >= bytes.len() || !is_word_byte(bytes[end]);
-        if before_ok && after_ok {
-            out.push(start);
-        }
-        from = after_first_char(&hay, start);
-        if from >= hay.len() {
-            break;
-        }
-    }
-    out
+    scan(&hay, &ndl).filter(|&at| on_word_boundaries(bytes, at, ndl.len())).collect()
 }
 
 /// Byte offsets of every word-boundary occurrence of `needle`, matched **exactly**.
@@ -215,10 +196,7 @@ pub fn word_positions_cased(haystack: &str, needle: &str) -> Vec<usize> {
     }
     let bytes = haystack.as_bytes();
     for (start, _) in haystack.match_indices(needle) {
-        let end = start + needle.len();
-        let before_ok = start == 0 || !is_word_byte(bytes[start - 1]);
-        let after_ok = end >= bytes.len() || !is_word_byte(bytes[end]);
-        if before_ok && after_ok {
+        if on_word_boundaries(bytes, start, needle.len()) {
             out.push(start);
         }
     }
@@ -233,54 +211,64 @@ pub fn word_positions_cased(haystack: &str, needle: &str) -> Vec<usize> {
 /// lead saying *"procurement has not **approved** one"* read as a denial that the record proves
 /// anything. `rejected.contradiction.generic-negative-winner` is the control that caught it.
 pub fn stem_positions(haystack: &str, stem: &str) -> Vec<usize> {
-    let hay = haystack.to_lowercase();
-    let ndl = stem.to_lowercase();
-    let mut out = Vec::new();
-    if ndl.is_empty() {
-        return out;
-    }
+    let (hay, ndl) = (haystack.to_lowercase(), stem.to_lowercase());
     let bytes = hay.as_bytes();
-    let mut from = 0;
-    while let Some(found) = hay[from..].find(&ndl) {
-        let start = from + found;
-        if start == 0 || !is_word_byte(bytes[start - 1]) {
-            out.push(start);
-        }
-        from = after_first_char(&hay, start);
-        if from >= hay.len() {
-            break;
-        }
-    }
-    out
+    scan(&hay, &ndl).filter(|&at| starts_a_word(bytes, at)).collect()
 }
 
 /// Byte offset of the first word-boundary occurrence of `needle`, if any.
 pub fn word_position(haystack: &str, needle: &str) -> Option<usize> {
-    let hay = haystack.to_lowercase();
-    let ndl = needle.to_lowercase();
-    if ndl.is_empty() {
-        return None;
-    }
+    let (hay, ndl) = (haystack.to_lowercase(), needle.to_lowercase());
     let bytes = hay.as_bytes();
-    let mut from = 0;
-    while let Some(found) = hay[from..].find(&ndl) {
-        let start = from + found;
-        let end = start + ndl.len();
-        let before_ok = start == 0 || !is_word_byte(bytes[start - 1]);
-        let after_ok = end >= bytes.len() || !is_word_byte(bytes[end]);
-        if before_ok && after_ok {
-            return Some(start);
-        }
-        from = after_first_char(&hay, start);
-        if from >= hay.len() {
-            break;
-        }
-    }
-    None
+    scan(&hay, &ndl).find(|&at| on_word_boundaries(bytes, at, ndl.len()))
 }
 
 fn is_word_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Whether a match starting at `start` begins a word.
+fn starts_a_word(bytes: &[u8], start: usize) -> bool {
+    start == 0 || !is_word_byte(bytes[start - 1])
+}
+
+/// Whether a match ending at `end` ends a word.
+fn ends_a_word(bytes: &[u8], end: usize) -> bool {
+    end >= bytes.len() || !is_word_byte(bytes[end])
+}
+
+/// Whether `[start, start + len)` sits on word boundaries.
+///
+/// This pair of tests was written out three times, and [`starts_a_word`] alone twice more. It is
+/// the rule that stops `no` matching inside `nothing` and `prove` inside `approved` — the second
+/// of which made a lead saying *"procurement has not **approved** one"* read as a denial that the
+/// record proves anything, caught by `rejected.contradiction.generic-negative-winner`.
+fn on_word_boundaries(bytes: &[u8], start: usize, len: usize) -> bool {
+    starts_a_word(bytes, start) && ends_a_word(bytes, start + len)
+}
+
+/// Every occurrence of `needle` in `hay`, **overlapping**, stepping one character at a time.
+///
+/// # One scan, because there were five
+///
+/// `word_positions`, `word_position`, `stem_positions`, `separated_by_markup` and `positions` each
+/// carried this loop. They differed only in what they did at each hit, and the copies had to be
+/// fixed one at a time: [`after_first_char`]'s own doc records that `positions` was *"the last scan
+/// still advancing by a byte"* — an advance that is a character boundary only while every needle in
+/// the crate is ASCII, which is a property of the vocabulary and not of the code.
+///
+/// **Overlapping on purpose.** `scan("aaa", "aa")` yields `0` and `1`, and the fragment rules
+/// depend on it; stepping past the whole needle would silently drop the second.
+fn scan<'a>(hay: &'a str, needle: &'a str) -> impl Iterator<Item = usize> + 'a {
+    let mut from = 0usize;
+    std::iter::from_fn(move || {
+        if needle.is_empty() || from >= hay.len() {
+            return None;
+        }
+        let at = from + hay[from..].find(needle)?;
+        from = after_first_char(hay, at);
+        Some(at)
+    })
 }
 
 /// One character past `start`, for the scans that look for a later overlapping match.
@@ -315,11 +303,9 @@ pub fn separated_by_markup(haystack: &str, first: &str, second: &str, max_gap: u
         return false;
     }
     let bytes = hay.as_bytes();
-    let mut from = 0;
-    while let Some(found) = hay[from..].find(&a) {
-        let start = from + found;
+    for start in scan(&hay, &a) {
         let end = start + a.len();
-        if start == 0 || !is_word_byte(bytes[start - 1]) {
+        if starts_a_word(bytes, start) {
             for gap in 0..=max_gap {
                 let at = end + gap;
                 if at + b.len() > bytes.len() {
@@ -333,17 +319,10 @@ pub fn separated_by_markup(haystack: &str, first: &str, second: &str, max_gap: u
                 if !bytes[end..at].iter().all(|c| MARKUP.contains(c)) {
                     break;
                 }
-                let after = at + b.len();
-                if bytes[at..].starts_with(b.as_bytes())
-                    && (after >= bytes.len() || !is_word_byte(bytes[after]))
-                {
+                if bytes[at..].starts_with(b.as_bytes()) && ends_a_word(bytes, at + b.len()) {
                     return true;
                 }
             }
-        }
-        from = after_first_char(&hay, start);
-        if from >= hay.len() {
-            break;
         }
     }
     false
@@ -352,11 +331,6 @@ pub fn separated_by_markup(haystack: &str, first: &str, second: &str, max_gap: u
 /// True when any of `needles` appears on word boundaries.
 pub fn any_word(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|n| contains_word(haystack, n))
-}
-
-/// True when every one of `needles` appears on word boundaries.
-pub fn all_words(haystack: &str, needles: &[&str]) -> bool {
-    needles.iter().all(|n| contains_word(haystack, n))
 }
 
 /// Words of a string, lowercased, punctuation trimmed from each end.
@@ -378,23 +352,19 @@ pub fn words(text: &str) -> Vec<String> {
 /// `supersed`, `contradic`, `renew` — so that one entry covers the whole family a real answer
 /// might use. A word-bounded search would silently miss `superseded`, which is the form answers
 /// actually write.
+///
+/// The offsets are into the **lowercased copy**, not into `haystack`. Every caller here uses them
+/// only for arithmetic — gaps and ordering — and none slices the original with them; a caller that
+/// did would be relying on case folding preserving byte lengths, which it does not.
 pub fn positions(haystack: &str, needle: &str) -> Vec<usize> {
     let hay = haystack.to_lowercase();
     let ndl = needle.to_lowercase();
     if ndl.is_empty() {
         return Vec::new();
     }
-    let mut out = Vec::new();
-    let mut from = 0;
-    while let Some(found) = hay[from..].find(&ndl) {
-        let at = from + found;
-        out.push(at);
-        from = at + 1;
-        if from >= hay.len() {
-            break;
-        }
-    }
-    out
+    // Every hit, with no boundary test: that is the whole difference between this and
+    // [`word_positions`]. Overlap is deliberate and [`scan`] documents it.
+    scan(&hay, &ndl).collect()
 }
 
 /// True when any of `names` and any of `issues` occur within `distance` characters.
@@ -633,11 +603,33 @@ mod tests {
         // character; with any other it is the middle of one, and the next `find` slices there.
         // Nothing calls these with a multibyte needle today, which is the point — the guarantee
         // has to belong to the scan rather than to the current word lists.
+        //
+        // There were five scans and this had to be fixed in each; `positions` was the last one
+        // still stepping a byte. They are now one [`scan`], so these five assertions and the
+        // overlap control below pin one function rather than sampling five.
         assert_eq!(word_position("a — b — c", "—"), Some(2));
         assert_eq!(word_positions("a — b — c", "—").len(), 2);
         assert_eq!(stem_positions("— —", "—").len(), 2);
         // A needle whose first character is multibyte and whose first occurrence fails the
         // boundary test: the scan has to step OVER it to find the second.
         assert!(contains_word("café café", "café"));
+        // `positions` was the last scan still advancing by a byte, and it is the one reachable
+        // from outside: it is `pub`, `cases.rs` calls it directly on caller-supplied values, and
+        // `near` forwards a name straight to it. Both of these panicked before the scan stepped a
+        // character.
+        assert_eq!(positions("a — b — c", "—"), [2, 8]);
+        // First char multibyte AND the scan must step over the first match to reach the second.
+        assert_eq!(positions("café café", "é"), [3, 9]);
+    }
+
+    #[test]
+    fn positions_still_reports_overlapping_matches() {
+        // The positive control the test above needs, and the one that matters. A "fix" that
+        // advanced past the WHOLE needle instead of one character would satisfy every multibyte
+        // assertion while silently narrowing every overlapping-substring rule in `cases` — a
+        // panic fix that stops a rule firing looks exactly like a panic fix that works.
+        assert_eq!(positions("aaa", "aa"), [0, 1]);
+        // And the ordinary ASCII path is untouched: stepping one character is stepping one byte.
+        assert_eq!(positions("supersed by supersed", "supersed"), [0, 12]);
     }
 }

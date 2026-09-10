@@ -42,7 +42,17 @@ name: multiprobe
 
 services:
   dind:
-    image: docker:27-dind
+    # 29, not 27, and the version is load-bearing rather than incidental. IronClaw's managed egress
+    # creates the worker's network with `com.docker.network.bridge.gateway_mode_ipv4=isolated`
+    # (`ironclaw@4cb47cfaf3/crates/lanes/ironclaw_sandbox/src/sandbox_process/managed_egress.rs:50`)
+    # and then *verifies* the network carries it
+    # (`ironclaw@4cb47cfaf3/crates/lanes/ironclaw_sandbox/src/sandbox_process/railway.rs:136`), so a
+    # daemon that does not know the option cannot host a sandbox at all. Measured across three
+    # daemons: 27.5.1 refuses the create with `400 unknown gateway mode "isolated"` and the shell
+    # tool reports a sandbox infrastructure error with no file written; 28.5.2 and 29.8.0 accept it
+    # and report `gateway_mode=isolated`. Upstream's own sandbox reports run 29.x, which is why
+    # this tracks 29 rather than the floor.
+    image: docker:29-dind
     privileged: true
     # TLS off, because the only thing that can reach 2375 is a container on this stack's own
     # network: the port is never published to the host. Turning it on would add a certificate
@@ -60,6 +70,16 @@ services:
       # must exist at the SAME path in both containers. Mounting one volume twice is what makes
       # `/workspace-root` mean one directory rather than two empty ones.
       - ws:/workspace-root
+      # `/data` is here for exactly the same reason, and it was missing. The managed egress proxy
+      # is handed its config by bind mount, and the runtime puts that material under its own data
+      # directory rather than under the workspace root — measured, the bind it asks this daemon for
+      # is `/data/ironclaw-reborn/hosted-single-tenant-volume-sandboxed/sandbox-workspaces/\
+      # .managed-egress/<proxy>:/run/ironclaw-proxy:ro`. With `/data` mounted only into `ic`, the
+      # daemon resolved that against a filesystem that has no such path and mounted an empty
+      # directory, so `proxy.yaml` never appeared: the proxy's own healthcheck reported
+      # `sed: /run/ironclaw-proxy/proxy.yaml: No such file or directory` on a 42-check failing
+      # streak, and the shell tool returned `sandbox proxy failed readiness`.
+      - ic-data:/data
     mem_limit: 4g
 
   ic:

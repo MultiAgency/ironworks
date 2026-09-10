@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# COST: root on a deployment host, against live per-client Docker daemons.
 # Prove the two deployment conditions that must hold before a second sandbox-backed tenant:
 # explicit, distinct IronClaw identities and mutually inaccessible per-client Docker daemons.
 #
@@ -9,25 +10,14 @@
 # The proof creates one stopped, same-named sentinel in each private daemon and removes both on
 # exit. Same-name success is the positive control that the calls reached distinct object
 # namespaces; cross-socket denial measures the Unix authority boundary.
-set -uo pipefail
+# shellcheck source=dev/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 left="${1:-}"
 right="${2:-}"
 sentinel="ironworks-isolation-proof-$$"
 created_left=0
 created_right=0
-pass=0
-fail=0
-blocked=0
-
-verdict() {
-  printf '%-9s %-34s %s\n' "$2" "$1" "${3:-}"
-  case "$2" in
-    PASS) pass=$((pass + 1)) ;;
-    FAIL) fail=$((fail + 1)) ;;
-    BLOCKED) blocked=$((blocked + 1)) ;;
-  esac
-}
 
 valid_slug() {
   case "$1" in ""|*[!a-z0-9-]*|-*|*-) return 1 ;; *) return 0 ;; esac
@@ -51,36 +41,42 @@ config_value() {
     /opt/ironclaw/bin/ironclaw config get "$key"
 }
 
+# shellcheck disable=SC2329 # Invoked by the EXIT trap below.
 cleanup() {
   [ "$created_left" -eq 0 ] || as_client "$left" docker rm -f "$sentinel" >/dev/null 2>&1
   [ "$created_right" -eq 0 ] || as_client "$right" docker rm -f "$sentinel" >/dev/null 2>&1
 }
-trap cleanup EXIT
+on_exit cleanup
 
 [ "${EUID:-$(id -u)}" -eq 0 ] || {
-  verdict "authority" BLOCKED "run as root so both service identities can be exercised"
-  exit 3
+  give_up "authority" "run as root so both service identities can be exercised";
 }
 valid_slug "$left" && valid_slug "$right" && [ "$left" != "$right" ] || {
-  verdict "arguments" BLOCKED "supply two distinct lowercase client slugs"
-  exit 3
+  give_up "arguments" "supply two distinct lowercase client slugs";
 }
 if ! command -v sudo >/dev/null || ! command -v docker >/dev/null \
   || ! command -v systemctl >/dev/null; then
-  verdict "tools" BLOCKED "sudo, systemctl and the Docker CLI are required"
-  exit 3
+  give_up "tools" "sudo, systemctl and the Docker CLI are required"
 fi
 [ -x /opt/ironclaw/bin/ironclaw ] || {
-  verdict "ironclaw.binary" BLOCKED "/opt/ironclaw/bin/ironclaw is absent"
-  exit 3
+  give_up "ironclaw.binary" "/opt/ironclaw/bin/ironclaw is absent";
 }
+artifact_manifest=/opt/ironclaw/artifact-manifest.env
+[ -r "$artifact_manifest" ] || {
+  give_up "ironclaw.manifest" "$artifact_manifest is absent or unreadable";
+}
+image_rows="$(awk -F= '$1 == "IRONCLAW_REBORN_SANDBOX_IMAGE" { count++; value=substr($0, length($1) + 2) } END { if (count == 1) print value }' "$artifact_manifest")"
+[[ "$image_rows" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+  give_up "ironclaw.worker-image" "manifest has no single immutable worker image ID";
+}
+worker_image="$image_rows"
 
 for client in "$left" "$right"; do
   id "ironclaw-$client" >/dev/null 2>&1 || {
     verdict "$client.user" BLOCKED "service user does not exist"
     continue
   }
-  systemctl is-active --quiet "rustworks-ironclaw@$client.service" || {
+  systemctl is-active --quiet "ironworks-ironclaw@$client.service" || {
     verdict "$client.control-plane" BLOCKED "IronClaw service is not active"
     continue
   }
@@ -92,8 +88,8 @@ for client in "$left" "$right"; do
     verdict "$client.daemon" BLOCKED "own daemon did not answer"
     continue
   }
-  as_client "$client" docker image inspect ironclaw-worker:latest >/dev/null 2>&1 || {
-    verdict "$client.worker-image" BLOCKED "ironclaw-worker:latest is absent from its daemon"
+  as_client "$client" docker image inspect "$worker_image" >/dev/null 2>&1 || {
+    verdict "$client.worker-image" BLOCKED "$worker_image is absent from its daemon"
     continue
   }
   daemon_security="$(as_client "$client" docker info \
@@ -123,42 +119,71 @@ for client in "$left" "$right"; do
 done
 
 if [ "$blocked" -gt 0 ]; then
-  printf '\nBLOCKED — prerequisites prevented the two-daemon measurement.\n'
-  exit 3
+  summary 'prerequisites prevented the two-daemon measurement.'
 fi
 
 as_client "$left" docker create --name "$sentinel" --entrypoint /bin/true \
-  ironclaw-worker:latest >/dev/null 2>&1 || {
-  verdict "$left.sentinel" BLOCKED "could not create the positive control"
-  exit 3
+  "$worker_image" >/dev/null 2>&1 || {
+  give_up "$left.sentinel" "could not create the positive control";
 }
 created_left=1
 verdict "$left.sentinel" PASS "$sentinel exists in $left daemon"
 
 as_client "$right" docker create --name "$sentinel" --entrypoint /bin/true \
-  ironclaw-worker:latest >/dev/null 2>&1 || {
+  "$worker_image" >/dev/null 2>&1 || {
   verdict "$right.sentinel" FAIL "same name collided or create failed in $right daemon"
-  exit 2
+  # `summary` rather than `exit 2`: the sentinel below is the positive control every remaining
+  # check reads, so the run stops — but only `summary` lets an earlier BLOCKED outrank this FAIL.
+  summary 'the sentinel is the control the remaining checks read, so the run stops here.'
 }
 created_right=1
 verdict "$right.sentinel" PASS "same name exists independently in $right daemon"
 
-if sudo -u "ironclaw-$left" env \
-  DOCKER_HOST="unix:///run/user/$(id -u "ironclaw-$right")/docker.sock" \
-  docker info >/dev/null 2>&1; then
-  verdict "$left.cross-socket" FAIL "$left can control $right daemon"
-else
-  verdict "$left.cross-socket" PASS "$right socket denied"
-fi
+cross_socket() {
+  local attacker="$1" target="$2" output result detail
 
-if sudo -u "ironclaw-$right" env \
-  DOCKER_HOST="unix:///run/user/$(id -u "ironclaw-$left")/docker.sock" \
-  docker info >/dev/null 2>&1; then
-  verdict "$right.cross-socket" FAIL "$right can control $left daemon"
-else
-  verdict "$right.cross-socket" PASS "$left socket denied"
-fi
+  # The negative attempt is useful only while the attacker can reach its own control and the
+  # target's owning identity can demonstrably reach the target daemon and sentinel. Check the
+  # target immediately on both sides so that daemon disappearing mid-attempt cannot look like
+  # isolation.
+  if ! as_client "$attacker" docker container inspect "$sentinel" >/dev/null 2>&1; then
+    verdict "$attacker.cross-socket" BLOCKED \
+      "attacker's own sentinel was unavailable before the target-socket attempt"
+    return
+  fi
+  if ! as_client "$target" docker container inspect "$sentinel" >/dev/null 2>&1; then
+    verdict "$attacker.cross-socket" BLOCKED \
+      "target owner could not read its sentinel immediately before the cross-socket attempt"
+    return
+  fi
 
-printf '\n%d PASS, %d FAIL, %d BLOCKED\n' "$pass" "$fail" "$blocked"
-[ "$fail" -eq 0 ] || exit 2
-printf 'PASS — distinct identities and Docker authority boundaries were measured.\n'
+  if output="$(sudo -u "ironclaw-$attacker" env \
+    DOCKER_HOST="unix:///run/user/$(id -u "ironclaw-$target")/docker.sock" \
+    docker info 2>&1)"; then
+    result=FAIL
+    detail="$attacker can control $target daemon"
+  elif grep -qiE 'permission denied|operation not permitted|access denied|authorization denied|unauthorized|forbidden' \
+    <<<"$output"; then
+    result=PASS
+    detail="$target socket returned a permission or authorization denial"
+  else
+    result=BLOCKED
+    detail="$target socket failed without a classified permission or authorization denial"
+  fi
+
+  if ! as_client "$target" docker container inspect "$sentinel" >/dev/null 2>&1; then
+    if [ "$result" = FAIL ]; then
+      verdict "$attacker.cross-socket" FAIL "$detail; target sentinel then became unavailable"
+    else
+      verdict "$attacker.cross-socket" BLOCKED \
+        "target owner could not read its sentinel immediately after the cross-socket attempt"
+    fi
+    return
+  fi
+  verdict "$attacker.cross-socket" "$result" "$detail"
+}
+
+cross_socket "$left" "$right"
+cross_socket "$right" "$left"
+
+summary 'distinct identities and Docker authority boundaries were measured.'

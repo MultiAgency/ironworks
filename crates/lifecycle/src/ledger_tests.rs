@@ -26,6 +26,14 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 const NOW: &str = "2026-08-27T12:00:00+00:00";
+
+/// The same instant, as the type the stage tables are ordered by.
+///
+/// `LifecycleStore`'s writes take `ObservedAt` rather than `&str`, because
+/// `ORDER BY at, rowid` rests on the format and nothing but the type was checking it.
+fn now() -> ObservedAt {
+    ObservedAt::parse(NOW).expect("the fixture instant is the shape the ledger orders by")
+}
 const MEMBER: &str = "user_7f3a";
 
 struct Dir(PathBuf);
@@ -111,6 +119,7 @@ fn measurement(member: &str, entries: &[(&str, &str)], when: &str) -> Measuremen
         false,
         &at(when),
     )
+    .expect("complete catalogue")
 }
 
 fn clean_evidence(member: &str, when: &str) -> ConfinementEvidence {
@@ -127,7 +136,7 @@ fn clean_evidence(member: &str, when: &str) -> ConfinementEvidence {
 /// A declared instance walked far enough that a member exists.
 fn seeded(store: &LifecycleStore) -> Slug {
     let s = spec();
-    store.declare(&s, NOW).expect("declare");
+    store.declare(&s, &now()).expect("declare");
     for stage in Stage::ALL {
         let id = Authority::ALL.iter().copied().find(|a| a.created_at() == stage).map(|a| {
             OpaqueId::new(if a == Authority::Member {
@@ -136,12 +145,29 @@ fn seeded(store: &LifecycleStore) -> Slug {
                 format!("{}-1", a.tag())
             })
         });
-        store.reach(&s.slug, stage, false, id.as_ref(), NOW).expect("reach");
+        store
+            .reach(&s.slug, stage, IdentityProvenance::Created, id.as_ref(), &now())
+            .expect("reach");
         if stage == Stage::MemberMinted {
             break;
         }
     }
     s.slug
+}
+
+fn staged_with(store: &LifecycleStore, registry_id: &str) -> Slug {
+    let slug = seeded(store);
+    store.certify_confinement(&slug, &clean_evidence(MEMBER, NOW)).expect("confine");
+    store
+        .reach(
+            &slug,
+            Stage::Staged,
+            IdentityProvenance::Created,
+            Some(&OpaqueId::new(registry_id)),
+            &now(),
+        )
+        .expect("stage");
+    slug
 }
 
 /// The sidecars a WAL-mode open leaves. Used to establish a clean baseline before asserting that
@@ -222,10 +248,18 @@ fn a_v2_adopted_id_migrates_without_becoming_created() {
     let s = spec();
     {
         let store = LifecycleStore::open(&path).expect("open");
-        store.declare(&s, NOW).expect("declare");
-        store.reach(&s.slug, Stage::PreflightPassed, false, None, NOW).expect("preflight");
+        store.declare(&s, &now()).expect("declare");
         store
-            .reach(&s.slug, Stage::OrgRegistered, true, Some(&OpaqueId::new("existing-org")), NOW)
+            .reach(&s.slug, Stage::PreflightPassed, IdentityProvenance::Created, None, &now())
+            .expect("preflight");
+        store
+            .reach(
+                &s.slug,
+                Stage::OrgRegistered,
+                IdentityProvenance::Adopted,
+                Some(&OpaqueId::new("existing-org")),
+                &now(),
+            )
             .expect("adopt old-shape identity");
         let conn = store.conn.lock().expect("lock");
         conn.execute_batch(
@@ -449,6 +483,124 @@ fn certification_appends_the_clean_measurement_and_advances_the_stage_atomically
 }
 
 #[test]
+fn registry_binding_migration_preserves_stage_history_and_is_idempotent() {
+    let dir = Dir::new();
+    let store = LifecycleStore::open(dir.path().join("lifecycle.db")).expect("open");
+    let slug = staged_with(&store, "legacy-digest");
+    let before = store.history(&slug).unwrap();
+
+    assert!(
+        store
+            .migrate_registry_binding(
+                &slug,
+                &OpaqueId::new("legacy-digest"),
+                &OpaqueId::new("current-digest"),
+                &ObservedAt::parse("2026-08-27T12:01:00+00:00").unwrap(),
+            )
+            .unwrap()
+    );
+    assert_eq!(
+        store.recorded(&slug).unwrap().accounted_id(Authority::RegistryEntry).unwrap().as_str(),
+        "current-digest"
+    );
+    let after = store.history(&slug).unwrap();
+    assert_eq!(after, before, "a binding migration must not claim staged was reached twice");
+    let historical_id: String = store
+        .conn
+        .lock()
+        .unwrap()
+        .query_row(
+            "SELECT created_id FROM stage_history WHERE slug=?1 AND stage=?2",
+            params![slug.as_str(), Stage::Staged.tag()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(historical_id, "legacy-digest");
+
+    assert!(
+        !store
+            .migrate_registry_binding(
+                &slug,
+                &OpaqueId::new("legacy-digest"),
+                &OpaqueId::new("current-digest"),
+                &ObservedAt::parse("2026-08-27T12:02:00+00:00").unwrap(),
+            )
+            .unwrap()
+    );
+    assert_eq!(store.history(&slug).unwrap(), after, "idempotence appended duplicate history");
+}
+
+#[test]
+fn registry_binding_migration_rolls_back_if_the_transaction_cannot_finish() {
+    let dir = Dir::new();
+    let store = LifecycleStore::open(dir.path().join("lifecycle.db")).expect("open");
+    let slug = staged_with(&store, "legacy-digest");
+    store
+        .conn
+        .lock()
+        .unwrap()
+        .execute_batch(
+            "CREATE TRIGGER refuse_registry_migration BEFORE UPDATE ON instances
+             BEGIN SELECT RAISE(ABORT, 'fixture refusal'); END;",
+        )
+        .unwrap();
+
+    assert!(
+        store
+            .migrate_registry_binding(
+                &slug,
+                &OpaqueId::new("legacy-digest"),
+                &OpaqueId::new("current-digest"),
+                &now(),
+            )
+            .is_err()
+    );
+    assert_eq!(
+        store.recorded(&slug).unwrap().accounted_id(Authority::RegistryEntry).unwrap().as_str(),
+        "legacy-digest",
+        "the earlier conditional identity update escaped the failed transaction"
+    );
+}
+
+#[test]
+fn registry_binding_migration_refuses_unstaged_or_unexpected_authority() {
+    let dir = Dir::new();
+    let store = LifecycleStore::open(dir.path().join("lifecycle.db")).expect("open");
+    let unstaged = seeded(&store);
+    assert!(matches!(
+        store.migrate_registry_binding(
+            &unstaged,
+            &OpaqueId::new("legacy-digest"),
+            &OpaqueId::new("current-digest"),
+            &now(),
+        ),
+        Err(LifecycleError::RegistryBindingNotStaged { .. })
+    ));
+
+    store.certify_confinement(&unstaged, &clean_evidence(MEMBER, NOW)).unwrap();
+    store
+        .reach(
+            &unstaged,
+            Stage::Staged,
+            IdentityProvenance::Created,
+            Some(&OpaqueId::new("somebody-else")),
+            &now(),
+        )
+        .unwrap();
+    let history = store.history(&unstaged).unwrap();
+    assert!(matches!(
+        store.migrate_registry_binding(
+            &unstaged,
+            &OpaqueId::new("legacy-digest"),
+            &OpaqueId::new("current-digest"),
+            &now(),
+        ),
+        Err(LifecycleError::RegistryBindingMismatch { .. })
+    ));
+    assert_eq!(store.history(&unstaged).unwrap(), history);
+}
+
+#[test]
 fn certification_can_be_observed_again_but_the_stage_is_reached_only_once() {
     let dir = Dir::new();
     let store = LifecycleStore::open(dir.path().join("lifecycle.db")).expect("open");
@@ -543,7 +695,8 @@ fn every_drift_kind_round_trips_through_sql() {
         &unlocked(),
         true,
         &at(NOW),
-    );
+    )
+    .expect("complete catalogue");
     let kinds: std::collections::BTreeSet<&str> = m.drift().iter().map(Drift::kind_tag).collect();
     assert_eq!(kinds.len(), 5, "the fixture must exercise every drift kind: {kinds:?}");
 

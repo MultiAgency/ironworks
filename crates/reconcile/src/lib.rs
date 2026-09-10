@@ -10,16 +10,22 @@
 //! Account Service knows about org credentials; it has never heard of a sealed runtime member.
 //! An adapter that reported `Absent` for one would be manufacturing a fact.
 //!
-//! # What it must never do
+//! # What reconciliation must never do
 //!
 //! Create, change, adopt, or provision anything. Every call here is a read, and the lifecycle
 //! store is not touched at all — reconcilers hand back an inventory and the caller decides.
+//!
+//! [`ModelPolicyControl`] is deliberately not a reconciler. It is the separately named,
+//! operator-invoked control for one upstream setting, and its write is available only through an
+//! explicit method that writes the policy and then reads it back exactly.
 
 pub mod ironclaw;
+mod model_policy;
 pub use ironclaw::{
     Admin, Applied, Binding, BoundMember, FleetInventory, IronclawMember, MemberConfinement,
     Reading, unaccounted_members,
 };
+pub use model_policy::{ModelPolicyComparison, ModelPolicyControl, ModelPolicyError};
 
 use ironworks_domain::{CredentialRef, ScopeFailure, ScopeResolver};
 use ironworks_lifecycle::{
@@ -27,6 +33,30 @@ use ironworks_lifecycle::{
     Reconcile,
 };
 use ironworks_records::{Book, CredentialSource};
+
+/// The one agent both operator clients in this crate use.
+///
+/// It was written out twice, identically, in `ironclaw::Admin::new` and
+/// `model_policy::ModelPolicyControl::new` — and `crates/records/src/lib.rs::agent` already
+/// states the rule this follows: *"One builder rather than one per client, so the read and the
+/// append cannot drift into disagreeing about how long a store is allowed to take."* The same
+/// argument holds here, where both clients talk to the same IronClaw instance.
+///
+/// `http_status_as_error(false)`: a 404 is the answer to "does this member exist", not a transport
+/// failure. Reading it as one would turn an authoritative absence into an unverifiable — which
+/// fails closed, but hides the one negative answer this can give.
+pub(crate) fn operator_agent() -> ureq::Agent {
+    let config = ureq::Agent::config_builder()
+        .timeout_global(None)
+        .timeout_resolve(Some(std::time::Duration::from_secs(5)))
+        .timeout_connect(Some(std::time::Duration::from_secs(5)))
+        .timeout_send_request(Some(std::time::Duration::from_secs(10)))
+        .timeout_recv_response(Some(std::time::Duration::from_secs(30)))
+        .timeout_recv_body(Some(std::time::Duration::from_secs(30)))
+        .http_status_as_error(false)
+        .build();
+    ureq::Agent::new_with_config(config)
+}
 
 /// What the Account Service can be asked about an instance.
 ///
@@ -121,11 +151,16 @@ impl OperatorToken {
     /// silently accepted an unknown shape would return nothing and look like an unreachable
     /// instance.
     pub fn from_env(reference: &CredentialRef) -> Option<Self> {
+        if reference.purpose() != ironworks_domain::CredentialPurpose::OperatorConfiguration {
+            return None;
+        }
         let name = reference.handle().strip_prefix("env:")?;
         std::env::var(name).ok().filter(|v| !v.is_empty()).map(Self)
     }
 
-    pub fn new(value: impl Into<String>) -> Self {
+    /// Fixture injection only. Production resolves a purpose-checked [`CredentialRef`].
+    #[cfg(test)]
+    pub(crate) fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
@@ -145,3 +180,6 @@ mod tests;
 
 #[cfg(test)]
 mod ironclaw_tests;
+
+#[cfg(test)]
+mod model_policy_tests;

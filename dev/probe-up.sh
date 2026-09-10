@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# COST: one model turn per bring-up — a warm-up, discarded deliberately, because a
+# stack's first turn is not a measurement. `--down` destroys the volumes and every thread on the
+# instance with them. Needs a model key.
 # Bring up a disposable IronClaw at the pinned revision, or tear one down.
 #
 #   dev/probe-up.sh              bring it up and print how to reach it
@@ -11,7 +14,7 @@
 # secret per run, and never reads operator state.
 #
 # `--sandboxed` swaps `production` for `hosted-single-tenant-volume-sandboxed` — the profile
-# `deploy/rustworks-ironclaw@.service` sets and the one §L-10 and `dev/prove-workspace.sh` need. It
+# `deploy/ironworks-ironclaw@.service` sets and the one §L-10 and `dev/prove-workspace.sh` need. It
 # costs a private Docker daemon, a worker image build, and outbound network for the egress proxy;
 # `dev/docker-compose.probe-sandboxed.yml` explains each. **The two are not interchangeable**: a
 # contract measured on one has not been measured on the other, which is the whole reason the flag
@@ -108,7 +111,8 @@ warm_runtime() {
 }
 
 # ── the pin is the only source of the image tag ──────────────────────────────────────────
-# Same rule as the Rust reader in crates/pins: first line, everything before the first '#'.
+# Same rule as the Rust reader in crates/domain/src/pins.rs::parse: first line, then
+# everything before the first '#', trimmed.
 [ -f "$ROOT/IRONCLAW_PIN" ] || die "no IRONCLAW_PIN at $ROOT — cannot choose an image"
 REV="$(head -n1 "$ROOT/IRONCLAW_PIN" | cut -d'#' -f1 | tr -d '[:space:]')"
 [ -n "$REV" ] || die "IRONCLAW_PIN names nothing on its first line"
@@ -149,13 +153,29 @@ start_store() {
       --identity "$COORD_TOKEN=$COORD_ORG" ) >/dev/null 2>&1 </dev/null &
   echo $! > "$STORE_PID"
   disown 2>/dev/null || true
-  for _ in $(seq 1 30); do
+  # 60s, and the reason is contention rather than the store. Measured 2026-09-07: loading both
+  # fixture books and answering /health takes ~0.12s on an idle machine, and 0.16s of that is
+  # `load_book` for either book — the store's own work is not the variable. What it competes with
+  # is: this runs the instant the runtime reports healthy, while IronClaw is still assembling and
+  # the private daemon is still settling, and the same start measured 11s, 23s and over 30s under
+  # that load. A 6s window failed there every time and blamed the store.
+  #
+  # Waiting longer must not become the way a dead store is missed, so the two are distinguished
+  # by the process rather than by the clock: an exit is fatal immediately, and only a live process
+  # is given the full window.
+  for _ in $(seq 1 300); do
     if curl -fsS --max-time 1 "http://127.0.0.1:$STORE_PORT/health" >/dev/null 2>&1; then
       return 0
     fi
+    if ! kill -0 "$(cat "$STORE_PID" 2>/dev/null)" 2>/dev/null; then
+      die "the record store exited during startup. Run it in the foreground to see why:
+    ./target/debug/ironworks-devstore --port $STORE_PORT --book $STORE_ORG=fixtures/book \\
+      --book $COORD_ORG=fixtures/account-coordination/book \\
+      --identity $STORE_TOKEN=$STORE_ORG --identity $COORD_TOKEN=$COORD_ORG"
+    fi
     sleep 0.2
   done
-  die "the record store did not become healthy"
+  die "the record store is still running but did not answer /health within 60s"
 }
 
 # ── refuse to collide with anything ──────────────────────────────────────────────────────
@@ -170,9 +190,15 @@ command -v openssl >/dev/null || die "openssl is required to mint disposable sec
 # ── disposable identities, minted per run ────────────────────────────────────────────────
 export PROBE_IMAGE="$TAG"
 export PROBE_PORT="$PORT"
-export PROBE_PGPW="$(openssl rand -hex 16)"
-export PROBE_MASTER_KEY="$(openssl rand -hex 32)"
-export PROBE_WEBUI_TOKEN="$(openssl rand -hex 32)"
+# Assigned before export, and that is not style. `export X="$(cmd)"` reports *export's* status, not
+# the command's, so an `openssl` that failed left the variable empty and the stack came up with a
+# blank master key and a blank web-UI token — a probe that looks healthy and is not secured.
+PROBE_PGPW="$(openssl rand -hex 16)" || die "openssl could not mint a database password"
+PROBE_MASTER_KEY="$(openssl rand -hex 32)" || die "openssl could not mint a master key"
+PROBE_WEBUI_TOKEN="$(openssl rand -hex 32)" || die "openssl could not mint a web-UI token"
+[ -n "$PROBE_PGPW" ] && [ -n "$PROBE_MASTER_KEY" ] && [ -n "$PROBE_WEBUI_TOKEN" ] \
+  || die "openssl returned an empty secret"
+export PROBE_PGPW PROBE_MASTER_KEY PROBE_WEBUI_TOKEN
 
 # ── the model key ────────────────────────────────────────────────────────────────────────
 # An explicit export always wins. Otherwise read the one file this repo owns, which lives
@@ -188,8 +214,10 @@ if [ -z "${NEARAI_API_KEY:-}" ] && [ -f "$PROBE_ENV" ]; then
     *) printf 'probe: %s is mode %s — it holds a model provider key and should be 0600.\n' \
          "$PROBE_ENV" "$mode" >&2 ;;
   esac
-  # shellcheck disable=SC1090
-  set -a; . "$PROBE_ENV"; set +a
+  set -a
+  # shellcheck source=/dev/null
+  . "$PROBE_ENV"
+  set +a
   if [ -n "${NEARAI_API_KEY:-}" ]; then
     printf 'probe: model key loaded from %s\n' "$PROBE_ENV"
   fi

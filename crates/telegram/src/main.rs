@@ -9,6 +9,8 @@
 //!                       -> { "accepted": true | false }   or a body carrying no `accepted`
 //! ```
 //!
+//! Both carry `Authorization: Bearer <CHANNEL_ADAPTER_TOKEN>`; only `/health` does not.
+//!
 //! `actor` and `chat_kind` are **evidence, and absent when there is none.** `actor` is Telegram's
 //! `from.id` verbatim; `chat_kind` is `private` or `non_private`, and is omitted entirely for an
 //! update carrying no chat or a chat type this adapter does not recognise. The seam reads an
@@ -20,8 +22,28 @@
 //! cannot tell them apart, so nothing on the serving path changes to reach a real channel.
 //!
 //! ```text
-//! TELEGRAM_BOT_TOKEN=... ironworks-telegram --port 3994
+//! TELEGRAM_BOT_TOKEN=... CHANNEL_ADAPTER_TOKEN=... ironworks-telegram --port 3994
 //! ```
+//!
+//! # Why everything but `/health` needs a token
+//!
+//! **`/poll` is a destructive write.** The offset *is* the acknowledgement, so
+//! `GET /poll?offset=999999999` tells Telegram to discard every pending update — before the seam
+//! has journalled one of them. There is no row afterwards to recover from, nothing reports an
+//! error, and both processes stay healthy while every message sent in that window is gone.
+//! Loopback is not a boundary here: this host also runs a second fleet and one runtime process
+//! per client, each under its own account, and any of them can open `127.0.0.1:3994`.
+//!
+//! So `CHANNEL_ADAPTER_TOKEN` is required at startup rather than defaulted or optional. An
+//! adapter that *can* start without authentication is one that eventually does, on the host where
+//! it matters, and the resulting deployment looks correct from every angle. `/health` stays open
+//! because it is the one route with no backlog behind it: it reads nothing and acknowledges
+//! nothing.
+//!
+//! # Why a refusal is shaped the way it is
+//!
+//! This is the only reply here that is **evidence about Telegram without having contacted it**,
+//! and the two readers of it want opposite things from the same body — see [`REFUSED`].
 //!
 //! # Why the offset passes straight through
 //!
@@ -62,8 +84,12 @@
 //! wants. A group is negative, a direct message positive.
 //!
 //! ```text
-//! curl -s "http://127.0.0.1:3994/poll?offset=0"
+//! curl -s -H "authorization: Bearer $CHANNEL_ADAPTER_TOKEN" \
+//!   "http://127.0.0.1:3994/poll?offset=0"
 //! ```
+//!
+//! That request acknowledges everything below offset 0, which is nothing. Any *other* offset in
+//! that command discards a real backlog, which is why the token is not a formality.
 //!
 //! **In a group, a bot sees nothing by default.** BotFather ships privacy mode on, which hides
 //! every message not addressed to the bot, so `/poll` returns an empty list and everything looks
@@ -82,6 +108,75 @@ use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
 const API: &str = "https://api.telegram.org";
+const ADAPTER_IO_TIMEOUT: Duration = Duration::from_secs(2);
+const MAX_REQUEST_LINE_BYTES: usize = 8 * 1024;
+const MAX_HEADER_BYTES: usize = 32 * 1024;
+const MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
+const MAX_BODY_BYTES: usize = 64 * 1024;
+
+// ── the adapter's own credential ─────────────────────────────────────────────────────────
+
+/// The token a caller must present to reach anything but `/health`.
+///
+/// Held only to be compared against: no `Display`, a redacting `Debug`, and no accessor — so
+/// getting it into a log takes a deliberate change rather than a stray `{:?}`. That is the shape
+/// `ironworks_records::Secret` already has, written again here rather than imported, because this
+/// adapter depends on **no** IronWorks crate. Reaching for one would put an adapter-to-adapter
+/// edge in the graph that answers "who can talk to what", to save six lines.
+struct AdapterToken(String);
+
+impl AdapterToken {
+    /// Whitespace is trimmed here, and again on the header, so a value that picked up a trailing
+    /// space in an environment file is not a channel that stops for a reason nothing reports.
+    fn new(value: &str) -> Self {
+        Self(value.trim().to_owned())
+    }
+
+    /// Whether this request presented it. An absent header, one this code cannot read, and a
+    /// wrong value are one answer, and it is *no*.
+    fn presented(&self, authorization: Option<&str>) -> bool {
+        let Some((scheme, offered)) = authorization.and_then(|v| v.trim().split_once(' ')) else {
+            return false;
+        };
+        // The scheme is case-insensitive (RFC 7235). The credential after it is not.
+        scheme.eq_ignore_ascii_case("bearer") && secret_eq(offered.trim().as_bytes(), &self.0)
+    }
+}
+
+impl std::fmt::Debug for AdapterToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AdapterToken(redacted)")
+    }
+}
+
+/// Compare every byte of equal-length candidates instead of exposing a prefix oracle.
+///
+/// Length remains visible and Rust does not promise constant-time machine code; this is a narrow
+/// defence for a same-host listener, not a cryptographic constant-time API.
+fn secret_eq(offered: &[u8], expected: &str) -> bool {
+    let expected = expected.as_bytes();
+    let mut differing = offered.len() ^ expected.len();
+    for (a, b) in offered.iter().zip(expected.iter()) {
+        differing |= usize::from(a ^ b);
+    }
+    differing == 0
+}
+
+/// The refusal this adapter generates **before Telegram is contacted**, and the reason one body
+/// serves both routes: each reads exactly what it should from it.
+///
+/// - `Channel::send` reads `accepted` three-valued, and `false` is a positive claim that *nothing
+///   was delivered*. Here that claim is true by construction, because nothing was attempted — so
+///   this is the one outcome that licenses a free retry, and saying it is honest rather than
+///   optimistic. A refusal *after* contact must carry no `accepted` field at all, which is what
+///   [`Acceptance::Unknown`] already does.
+/// - `Channel::poll` reads the `updates` array and treats its absence as malformed, which leaves
+///   the cursor where it is. An empty list would read as "nothing is waiting" and acknowledge
+///   through the offset that was asked for — the exact damage the refusal exists to prevent.
+///
+/// Anything else that reaches this arm — an unknown path, a route added later — inherits
+/// provable-absence semantics, which is the safe direction to inherit.
+const REFUSED: &str = "{\"accepted\":false}";
 
 /// What a send attempt established about delivery. The whole of this adapter's judgement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +288,25 @@ struct Bot {
     base: String,
 }
 
+// ── the HTTP budget ─────────────────────────────────────────────────────────────────────────
+//
+// Named rather than chained inline, because this exact ladder is written in four other crates and
+// `crates/ironclaw/src/client.rs::Ironclaw::new` deliberately runs a longer one. That intentional
+// difference was invisible against five silent copies of the same eight-call chain; against named
+// constants it is a diff on a number. The crates cannot share the values without an edge none of
+// them should have, so each states its own and says which system it is stating them about.
+
+/// DNS for the Telegram Bot API.
+const RESOLVE: Duration = Duration::from_secs(5);
+/// TCP connect to the Telegram Bot API.
+const CONNECT: Duration = Duration::from_secs(5);
+/// Writing the request to the Telegram Bot API.
+const SEND: Duration = Duration::from_secs(10);
+/// Waiting for the Telegram Bot API to begin answering.
+const RECV_RESPONSE: Duration = Duration::from_secs(30);
+/// Reading the Telegram Bot API's answer.
+const RECV_BODY: Duration = Duration::from_secs(30);
+
 impl Bot {
     /// The token is read from the environment and never from a flag: a flag lands in shell
     /// history and in every `ps` on the box. It is held only to build a URL, and no code path
@@ -205,11 +319,11 @@ impl Bot {
         // the only retry-safe outcome unreachable.
         let config = ureq::Agent::config_builder()
             .timeout_global(None)
-            .timeout_resolve(Some(Duration::from_secs(5)))
-            .timeout_connect(Some(Duration::from_secs(5)))
-            .timeout_send_request(Some(Duration::from_secs(10)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .timeout_recv_body(Some(Duration::from_secs(30)))
+            .timeout_resolve(Some(RESOLVE))
+            .timeout_connect(Some(CONNECT))
+            .timeout_send_request(Some(SEND))
+            .timeout_recv_response(Some(RECV_RESPONSE))
+            .timeout_recv_body(Some(RECV_BODY))
             .http_status_as_error(false)
             .build();
         Self {
@@ -294,14 +408,33 @@ fn main() {
     if token.trim().is_empty() {
         die("TELEGRAM_BOT_TOKEN is empty");
     }
+    // Not optional, and deliberately not defaulted. `/poll` acknowledges a backlog at Telegram,
+    // so a build that can serve it unauthenticated is a build that will — and the deployment that
+    // does looks healthy from every angle. Refusing to start is the only signal that arrives
+    // before the damage rather than after it.
+    let adapter = std::env::var("CHANNEL_ADAPTER_TOKEN").unwrap_or_else(|_| {
+        die("CHANNEL_ADAPTER_TOKEN is not set (the relay must be given the same value)")
+    });
+    if adapter.trim().is_empty() {
+        die("CHANNEL_ADAPTER_TOKEN is empty");
+    }
+    let adapter = AdapterToken::new(&adapter);
 
     let bot = Bot::new(&token, &api);
-    let listener = TcpListener::bind(("127.0.0.1", port)).expect("bind");
+    // `die`, not `expect`. Every other startup failure in this file goes through it with a
+    // sentence an operator can act on, and a port already in use is the most routine of them.
+    let listener = match TcpListener::bind(("127.0.0.1", port)) {
+        Ok(listener) => listener,
+        Err(why) => die(&format!("cannot bind 127.0.0.1:{port}: {why}")),
+    };
     eprintln!("ironworks-telegram: serving the channel contract on 127.0.0.1:{port}");
     eprintln!("ironworks-telegram: relay with --channel http://127.0.0.1:{port}");
+    eprintln!(
+        "ironworks-telegram: /poll and /send require CHANNEL_ADAPTER_TOKEN; /health does not"
+    );
     for stream in listener.incoming() {
         match stream {
-            Ok(s) => handle(s, &bot),
+            Ok(s) => handle(s, &bot, &adapter),
             Err(_) => continue,
         }
     }
@@ -312,38 +445,63 @@ fn die(message: &str) -> ! {
     std::process::exit(64);
 }
 
-fn handle(mut stream: TcpStream, bot: &Bot) {
+fn handle(mut stream: TcpStream, bot: &Bot, token: &AdapterToken) {
+    let _ = stream.set_read_timeout(Some(ADAPTER_IO_TIMEOUT));
+    let _ = stream.set_write_timeout(Some(ADAPTER_IO_TIMEOUT));
     let Ok(clone) = stream.try_clone() else { return };
     let mut reader = BufReader::new(clone);
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() {
-        return;
-    }
+    let request_line = match read_bounded_line(&mut reader, MAX_REQUEST_LINE_BYTES) {
+        Ok(Some(line)) => line,
+        Ok(None) => return,
+        Err(()) => return respond(&mut stream, 414, "{\"error\":\"request too large\"}"),
+    };
     let mut length = 0usize;
+    let mut authorization: Option<String> = None;
+    let mut header_bytes = 0usize;
     loop {
-        let mut header = String::new();
-        match reader.read_line(&mut header) {
-            Ok(0) | Err(_) => break,
-            Ok(_) if header == "\r\n" || header == "\n" => break,
-            Ok(_) => {
-                if let Some(v) = header.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = v.trim().parse().unwrap_or(0);
+        match read_bounded_line(&mut reader, MAX_HEADER_LINE_BYTES) {
+            Ok(None) | Err(()) => {
+                return respond(&mut stream, 431, "{\"error\":\"headers too large\"}");
+            }
+            Ok(Some(header)) if header == "\r\n" || header == "\n" => break,
+            Ok(Some(header)) => {
+                header_bytes = header_bytes.saturating_add(header.len());
+                if header_bytes > MAX_HEADER_BYTES {
+                    return respond(&mut stream, 431, "{\"error\":\"headers too large\"}");
+                }
+                let Some((name, value)) = header.split_once(':') else { continue };
+                match name.trim().to_ascii_lowercase().as_str() {
+                    "content-length" => {
+                        let Ok(parsed) = value.trim().parse() else {
+                            return respond(
+                                &mut stream,
+                                400,
+                                "{\"error\":\"invalid content length\"}",
+                            );
+                        };
+                        length = parsed;
+                    }
+                    // Only the *name* is folded. A header name is case-insensitive and a bearer
+                    // token is not, so lowercasing the whole line — which is how the
+                    // content-length above reads — would reject every token carrying a capital.
+                    "authorization" => authorization = Some(value.trim().to_owned()),
+                    _ => {}
                 }
             }
         }
     }
-    let mut body = vec![0u8; length];
-    if length > 0 && reader.read_exact(&mut body).is_err() {
-        return;
-    }
-
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("");
     let (path, query) = target.split_once('?').unwrap_or((target, ""));
 
     match (method, path) {
+        // The one route with no backlog behind it, and so the one served without a credential.
         ("GET", "/health") => respond(&mut stream, 200, "{\"ok\":true}"),
+        // Everything below this arm reaches Telegram, and `/poll` reaching it acknowledges a
+        // backlog irreversibly. The guard sits above the routes rather than inside each of them
+        // so that a route added later is refused by default rather than by remembering.
+        _ if !token.presented(authorization.as_deref()) => respond(&mut stream, 401, REFUSED),
         ("GET", "/poll") => {
             let offset: u64 = query
                 .split('&')
@@ -366,6 +524,13 @@ fn handle(mut stream: TcpStream, bot: &Bot) {
             }
         }
         ("POST", "/send") => {
+            if length > MAX_BODY_BYTES {
+                return respond(&mut stream, 413, "{\"error\":\"body too large\"}");
+            }
+            let mut body = vec![0u8; length];
+            if length > 0 && reader.read_exact(&mut body).is_err() {
+                return respond(&mut stream, 400, "{\"error\":\"incomplete body\"}");
+            }
             let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else {
                 return respond(&mut stream, 400, "{\"error\":\"unparseable\"}");
             };
@@ -381,6 +546,18 @@ fn handle(mut stream: TcpStream, bot: &Bot) {
     }
 }
 
+fn read_bounded_line(reader: &mut impl BufRead, maximum: usize) -> Result<Option<String>, ()> {
+    let mut line = String::new();
+    let read = reader.take((maximum + 1) as u64).read_line(&mut line).map_err(|_| ())?;
+    if read == 0 {
+        Ok(None)
+    } else if read > maximum {
+        Err(())
+    } else {
+        Ok(Some(line))
+    }
+}
+
 fn respond(stream: &mut TcpStream, code: u16, body: &str) {
     let response = format!(
         "HTTP/1.1 {code}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
@@ -393,6 +570,8 @@ fn respond(stream: &mut TcpStream, code: u16, body: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// What the seam does with a reply body: three-valued, and the absence of `accepted` is the
     /// third value rather than a parse failure. Mirrors `channel-http`'s reader, so these tests
@@ -401,6 +580,199 @@ mod tests {
         serde_json::from_str::<serde_json::Value>(body)
             .ok()
             .and_then(|v| v.get("accepted").and_then(serde_json::Value::as_bool))
+    }
+
+    /// A stand-in Bot API that **counts what actually reached it**.
+    ///
+    /// The count is the measurement, and a status-code assertion is not a substitute for it: a
+    /// build that answered 401 and called `getUpdates` anyway would have discarded the backlog
+    /// exactly as the unguarded one did, and every assertion about the reply would still pass.
+    ///
+    /// It answers `connection: close` and reads request-by-request, so a pooled connection cannot
+    /// hide a request from the counter and an idle one cannot starve the next accept.
+    fn stub_api() -> (String, Arc<AtomicUsize>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind the stub api");
+        let port = listener.local_addr().expect("the stub api's address").port();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&hits);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { continue };
+                let Ok(clone) = sock.try_clone() else { continue };
+                let mut reader = BufReader::new(clone);
+                loop {
+                    let mut request_line = String::new();
+                    if !reader.read_line(&mut request_line).is_ok_and(|n| n > 0) {
+                        break;
+                    }
+                    let mut header = String::new();
+                    while reader.read_line(&mut header).is_ok_and(|n| n > 0) {
+                        if header == "\r\n" || header == "\n" {
+                            break;
+                        }
+                        header.clear();
+                    }
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    let body = r#"{"ok":true,"result":[]}"#;
+                    let reply = format!(
+                        "HTTP/1.1 200\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(reply.as_bytes());
+                    let _ = sock.flush();
+                }
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), hits)
+    }
+
+    /// One request through the real request handler, over a real socket. Returns the status and
+    /// the body, because both are part of the contract and only one of them is the damage.
+    fn through_adapter(bot: &Bot, token: &AdapterToken, raw: &str) -> (u16, String) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind the adapter");
+        let addr = listener.local_addr().expect("the adapter's address");
+        let mut client = TcpStream::connect(addr).expect("connect to the adapter");
+        client.write_all(raw.as_bytes()).expect("write the request");
+        client.flush().expect("flush the request");
+        // Half-close, so a request whose `content-length` overruns its body fails rather than
+        // waiting forever for bytes the test is never going to send.
+        client.shutdown(std::net::Shutdown::Write).expect("half-close");
+        let (server, _) = listener.accept().expect("accept");
+        handle(server, bot, token);
+        let mut reply = String::new();
+        client.read_to_string(&mut reply).expect("read the reply");
+        let (head, body) = reply.split_once("\r\n\r\n").expect("a reply with a body");
+        let status =
+            head.split_whitespace().nth(1).and_then(|s| s.parse().ok()).expect("a status line");
+        (status, body.to_owned())
+    }
+
+    /// The load-bearing one. `/poll` is a destructive write — the offset is the acknowledgement —
+    /// so what an unauthenticated request must produce is **no upstream request at all**, not a
+    /// tidy 401. Counted against a real listener, with the authenticated call as the control.
+    #[test]
+    fn an_unauthenticated_poll_reaches_telegram_zero_times_and_an_authenticated_one_once() {
+        let (api, upstream) = stub_api();
+        let bot = Bot::new("stub-bot-token", &api);
+        let token = AdapterToken::new("adapter-secret");
+        // The offset that discards everything Telegram is holding.
+        let destructive = "/poll?offset=999999999";
+
+        let (status, body) = through_adapter(
+            &bot,
+            &token,
+            &format!("GET {destructive} HTTP/1.1\r\nhost: adapter\r\n\r\n"),
+        );
+        assert_eq!(status, 401);
+        assert_eq!(
+            upstream.load(Ordering::SeqCst),
+            0,
+            "a refused poll still acknowledged the backlog at Telegram"
+        );
+        // And the refusal must not read as an empty poll, or the seam advances its cursor through
+        // the very offset it asked from.
+        assert!(!body.contains("updates"), "a refusal that reads as `nothing is waiting`: {body}");
+
+        // The control. Without it, a handler that refused everything — or a stub nothing could
+        // reach — would satisfy every assertion above.
+        let (status, body) = through_adapter(
+            &bot,
+            &token,
+            &format!(
+                "GET {destructive} HTTP/1.1\r\nhost: adapter\r\nauthorization: Bearer adapter-secret\r\n\r\n"
+            ),
+        );
+        assert_eq!(status, 200);
+        assert!(body.contains("updates"), "{body}");
+        assert_eq!(upstream.load(Ordering::SeqCst), 1, "the authenticated poll never arrived");
+    }
+
+    #[test]
+    fn health_answers_without_a_credential_and_nothing_else_does() {
+        let (api, upstream) = stub_api();
+        let bot = Bot::new("stub-bot-token", &api);
+        let token = AdapterToken::new("adapter-secret");
+
+        let (status, body) = through_adapter(&bot, &token, "GET /health HTTP/1.1\r\n\r\n");
+        assert_eq!(status, 200);
+        assert!(body.contains("\"ok\":true"), "{body}");
+
+        // The control: the same build, the same absent header, the two routes with a backlog
+        // behind them. Without it this test passes on an adapter that authenticates nothing.
+        for raw in [
+            "GET /poll?offset=1 HTTP/1.1\r\n\r\n",
+            "POST /send HTTP/1.1\r\ncontent-length: 31\r\n\r\n{\"channel\":\"-1\",\"text\":\"hello\"}",
+        ] {
+            let (status, _) = through_adapter(&bot, &token, raw);
+            assert_eq!(status, 401, "{raw}");
+        }
+        assert_eq!(upstream.load(Ordering::SeqCst), 0, "an unauthenticated route reached Telegram");
+    }
+
+    #[test]
+    fn unauthenticated_or_oversized_requests_never_allocate_or_reach_telegram() {
+        let (api, upstream) = stub_api();
+        let bot = Bot::new("stub-bot-token", &api);
+        let token = AdapterToken::new("adapter-secret");
+
+        let (status, _) = through_adapter(
+            &bot,
+            &token,
+            "POST /send HTTP/1.1\r\ncontent-length: 999999999\r\n\r\n",
+        );
+        assert_eq!(status, 401, "authentication must precede body allocation");
+
+        let (status, _) = through_adapter(
+            &bot,
+            &token,
+            "POST /send HTTP/1.1\r\nauthorization: Bearer adapter-secret\r\ncontent-length: 999999999\r\n\r\n",
+        );
+        assert_eq!(status, 413);
+        assert_eq!(upstream.load(Ordering::SeqCst), 0);
+    }
+
+    /// Both arms of the distinction the refusal turns on. `false` is a claim, and here it is a
+    /// true one; a reply this process could not read is not a claim at all.
+    #[test]
+    fn a_refusal_before_contact_is_provable_absence_and_a_lost_reply_is_not() {
+        // Nothing was attempted, so `Channel::send` reading `Some(false)` and reporting
+        // `Rejected` — the one outcome that licenses a free retry — is honest.
+        assert_eq!(client_reads(REFUSED), Some(false));
+        // The control, and the other arm: after contact this process cannot claim absence, so it
+        // answers with no `accepted` field at all and `Ambiguous` stays reachable.
+        assert_eq!(client_reads(&Acceptance::Unknown.body()), None);
+
+        // The same body read as a poll: `Channel::poll` maps a missing `updates` array to
+        // malformed and leaves the cursor where it is.
+        let refusal: serde_json::Value =
+            serde_json::from_str(REFUSED).expect("the refusal is readable json");
+        assert!(refusal.get("updates").is_none(), "a refusal that reads as an empty poll");
+        // The control for that assertion: a real poll body does carry the key, so `is_none` is
+        // measuring the refusal rather than a typo.
+        let real: serde_json::Value = serde_json::json!({ "updates": [] });
+        assert!(real.get("updates").is_some());
+    }
+
+    #[test]
+    fn only_the_exact_credential_is_accepted_and_it_does_not_leak_through_debug() {
+        let token = AdapterToken::new("  adapter-secret  ");
+        assert!(token.presented(Some("Bearer adapter-secret")));
+        assert!(token.presented(Some("bearer adapter-secret")), "the scheme is case-insensitive");
+        assert!(token.presented(Some("Bearer   adapter-secret  ")), "and the value is trimmed");
+        for wrong in [
+            "",
+            "Bearer",
+            "Bearer ",
+            "Bearer adapter-secre",   // a prefix is not the credential
+            "Bearer adapter-secrets", // an extension of it
+            "Bearer Adapter-Secret",  // the credential itself is case-sensitive
+            "Basic adapter-secret",
+            "adapter-secret",
+        ] {
+            assert!(!token.presented(Some(wrong)), "{wrong:?}");
+        }
+        assert!(!token.presented(None));
+        assert_eq!(format!("{token:?}"), "AdapterToken(redacted)");
     }
 
     #[test]

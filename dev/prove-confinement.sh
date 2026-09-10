@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# COST: one runtime member, spent irreversibly — approval-off is one-way (§L-9).
+# Needs a probe; no model key.
 # Prove a member's tool authority can be removed, measured, and seen to break.
 #
 #   dev/probe-up.sh               # a pinned runtime; NO model key needed
@@ -48,11 +50,8 @@
 # consecutive runs on one probe both score 6/6. Tear down when you are done, not between runs.
 #
 # Verdicts follow the operator convention: PASS / FAIL / BLOCKED, exiting 0 / 2 / 3.
-set -uo pipefail
-
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
-cd "$ROOT" || exit 3
+# shellcheck source=dev/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 API="${IRONCLAW_API:-http://127.0.0.1:3997}"
 SLUG="${PROVE_CONFINE_SLUG:-confine-probe}"
@@ -90,6 +89,7 @@ REOPEN="${PROVE_CONFINE_TOOL:-builtin.time}"
 # into a sentence. `mutating` gates it so an early BLOCKED exit — before a token or the helpers
 # exist — cannot call them.
 mutating=0
+# shellcheck disable=SC2329  # invoked indirectly, through `on_exit`.
 cleanup() {
   if [ "$mutating" -eq 1 ]; then
     set_state "$REOPEN" "disabled" >/dev/null 2>&1 || true
@@ -106,19 +106,24 @@ cleanup() {
 # EXIT alone is not enough: a script killed by an uncaught SIGINT or SIGTERM is not guaranteed to
 # run its EXIT trap, and those are exactly how an operator interrupts a proof. Cleanup runs twice
 # on a signal, which is harmless because every step in it is idempotent.
-trap 'cleanup; exit 130' INT
-trap 'cleanup; exit 143' TERM
-trap cleanup EXIT
-
-pass=0; failed=0; blocked=0
-verdict() {
-  printf '%-9s %-34s %s\n' "$2" "$1" "${3:-}"
-  case "$2" in PASS) pass=$((pass+1));; FAIL) failed=$((failed+1));; BLOCKED) blocked=$((blocked+1));; esac
-}
+on_exit cleanup
 
 cargo build -q -p ironworks-cli -p ironworks-lifecycle 2>/dev/null || {
-  verdict "build" BLOCKED "cargo build failed"; exit 3; }
+  give_up "build" "cargo build failed"; }
 BIN=./target/debug/ironworks
+
+# Reachability, before the mint. This used to sit forty lines below, *after* the mint, where it
+# could not do the job its own message promises: the mint is a POST to this same `$API`, so a
+# runtime that is down fails there first and reports "could not mint a member" plus whatever HTML
+# came back, instead of "run dev/probe-up.sh".
+#
+# **It buys the message, not a member.** Measured: pointed at a dead port, the old order also spent
+# nothing, because a runtime that cannot answer cannot mint either. The gate earns its place by
+# being the check whose advice an operator can act on, not by saving anything — which is the claim
+# it would be easy to make here and is not the one this supports.
+curl -fsS --max-time 5 "$API/api/health" >/dev/null 2>&1 || \
+curl -fsS --max-time 5 "$API/health" >/dev/null 2>&1 || {
+  give_up "runtime.up" "no runtime at $API; run dev/probe-up.sh"; }
 
 # The member credential IS the runtime's own token here: confinement authenticates AS the member,
 # because POST /settings/tools resolves the caller's scope and `?user_id=` is ignored.
@@ -147,9 +152,8 @@ TOKEN="${IRONCLAW_MEMBER_TOKEN:-}"
 CALLER="a member supplied in IRONCLAW_MEMBER_TOKEN"
 if [ -z "$TOKEN" ]; then
   if [ -z "$OPERATOR" ]; then
-    verdict "runtime.credential" BLOCKED \
+    give_up "runtime.credential" \
       "no operator token to mint a member with. Run dev/probe-up.sh, or set IRONCLAW_MEMBER_TOKEN"
-    exit 3
   fi
   minted="$(curl -s --max-time 20 -X POST "$API/api/webchat/v2/admin/users" \
     -H "authorization: Bearer $OPERATOR" -H 'content-type: application/json' \
@@ -161,9 +165,8 @@ if [ -z "$TOKEN" ]; then
 try: print(json.load(sys.stdin).get("api_token") or "")
 except Exception: pass')"
   if [ -z "$TOKEN" ]; then
-    verdict "runtime.credential" BLOCKED \
+    give_up "runtime.credential" \
       "could not mint a member: $(printf '%s' "$minted" | head -c 200)"
-    exit 3
   fi
   CALLER="a member minted for this run"
 fi
@@ -173,10 +176,6 @@ printf 'prove-confinement: confining %s\n\n' "$CALLER"
 # member secret for every settings write, and the reconciler keeps three request methods apart so
 # the two cannot be confused at a call site; a script that exports one value into both undoes that.
 export IRONCLAW_API="$API" IRONCLAW_OPERATOR_TOKEN="$OPERATOR" IRONCLAW_MEMBER_TOKEN="$TOKEN"
-
-curl -fsS --max-time 5 "$API/api/health" >/dev/null 2>&1 || \
-curl -fsS --max-time 5 "$API/health" >/dev/null 2>&1 || {
-  verdict "runtime.up" BLOCKED "no runtime at $API; run dev/probe-up.sh"; exit 3; }
 
 # Seed against the member the credential ACTUALLY authenticates as, not the `seed` example's
 # default literal. `confine` binds before it reads anything: it asks `/session` who the token is
@@ -191,11 +190,19 @@ MEMBER="$(curl -s --max-time 10 "$API/api/webchat/v2/session" -H "authorization:
   | python3 -c 'import json,sys
 try: print(json.load(sys.stdin)["user_id"])
 except Exception: pass')"
-[ -n "$MEMBER" ] || { verdict "runtime.subject" BLOCKED \
-  "/session did not name a user_id; cannot seed a member the credential can bind to"; exit 3; }
+[ -n "$MEMBER" ] || { give_up "runtime.subject" \
+  "/session did not name a user_id; cannot seed a member the credential can bind to"; }
 
-cargo run -q -p ironworks-lifecycle --example seed -- "$STORE" "$SLUG" serving "$MEMBER" >/dev/null 2>&1
-[ -f "$STORE" ] || { verdict "store.seeded" BLOCKED "could not seed a lifecycle store"; exit 3; }
+# `member_minted` is what `lifecycle confine` needs and as far as a seed can honestly go: the next
+# stage IS confinement, and certifying it takes evidence of a measurement that actually happened.
+# A store seeded past this point would defeat the proof rather than set it up.
+#
+# The exit status is what is checked, not the file: `LifecycleStore::open` creates the database
+# before anything is written to it, so `[ -f "$STORE" ]` passed even when the seed died partway —
+# which it silently did, leaving this proof to spend a member measuring a store at the wrong stage.
+cargo run -q -p ironworks-lifecycle --example seed -- "$STORE" "$SLUG" member_minted "$MEMBER" \
+  >/dev/null 2>&1 \
+  || { give_up "store.seeded" "could not seed a lifecycle store"; }
 
 confine() { "$BIN" lifecycle confine "$SLUG" --store "$STORE" ${1:+--dry-run} 2>&1; }
 
@@ -308,7 +315,4 @@ esac
 set_approval false
 
 echo
-echo "$pass passed, $failed failed, $blocked blocked"
-[ "$failed" -gt 0 ] && exit 2
-[ "$blocked" -gt 0 ] && exit 3
-exit 0
+summary

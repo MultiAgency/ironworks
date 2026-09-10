@@ -15,6 +15,8 @@ path = "src/main.rs"
 # deterministic faults — and nothing else. Every feature beyond those makes the live gate less
 # trustworthy, because the thing under test would be less like a real channel and more like this.
 [dependencies]
+# The request reader and response writer this shares with `devstore`; see that crate.
+ironworks-devhttp = { path = "../devhttp" }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 

@@ -12,21 +12,21 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/rustworks
+WorkingDirectory=/opt/ironworks
 # `--book ORG=PATH` and `--identity TOKEN=ORG`, not bare paths: a book belongs to an org,
 # because a fixture where every credential resolves to a different org and then reads the
 # same records models resolution without partitioning.
-ExecStart=/opt/rustworks/target/release/ironworks-devstore --port 3996 \
+ExecStart=/opt/ironworks/target/release/ironworks-devstore --port 3996 \
     --book coordination-eval=fixtures/account-coordination/book \
     --identity dev-token-coordination=coordination-eval
 Restart=always
 RestartSec=5
-User=rustworks
+User=ironworks
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/rustworks
+ReadWritePaths=/var/lib/ironworks
 
 [Install]
 WantedBy=multi-user.target

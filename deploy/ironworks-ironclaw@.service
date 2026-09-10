@@ -1,6 +1,6 @@
 [Unit]
 # IronClaw is the trusted control plane for one client's agent workspace. The instance name is
-# the client slug: rustworks-ironclaw@acme.service reads /etc/rustworks/ironclaw-acme.env and owns
+# the client slug: ironworks-ironclaw@acme.service reads /etc/ironworks/ironclaw-acme.env and owns
 # /var/lib/ironclaw/acme.
 #
 # The persistent sandbox in IronClaw 1.4.0 is Docker-managed. Each instance talks only to the
@@ -14,12 +14,17 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=/var/lib/ironclaw/%i
-EnvironmentFile=/etc/rustworks/ironclaw-%i.env
+EnvironmentFile=/etc/ironworks/ironclaw-%i.env
+EnvironmentFile=/etc/ironworks/cell-%i.env
+# Loaded second so a per-client file cannot replace artifact identities recorded at build time.
+EnvironmentFile=/opt/ironclaw/artifact-manifest.env
 Environment=IRONCLAW_REBORN_PROFILE=hosted-single-tenant-volume-sandboxed
 Environment=IRONCLAW_REBORN_HOME=/var/lib/ironclaw/%i
 Environment=IRONCLAW_REBORN_WORKSPACE_ROOT=/var/lib/ironclaw/%i/workspace
 Environment=IRONCLAW_REBORN_LOG=info
-ExecStartPre=/opt/rustworks/deploy/check-ironclaw-instance.sh %i
+ExecStartPre=/opt/ironworks/deploy/check-ironclaw-instance.sh %i
+ExecStartPre=+/opt/ironworks/deploy/check-serving-cell.sh %i
+ExecStartPre=/opt/ironworks/deploy/check-ironclaw-artifacts.sh
 ExecStart=/opt/ironclaw/bin/ironclaw serve --host 127.0.0.1 --port ${IRONCLAW_PORT}
 Restart=always
 RestartSec=5

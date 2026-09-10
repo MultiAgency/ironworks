@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# COST: the probe — its first act is to tear the stack down. No model key.
 # Prove IronClaw boots from a fresh IronWorks volume under the HARDENED capability set.
 #
 #   dev/prove-boot.sh
@@ -39,14 +40,10 @@
 #   4. an EXISTING volume boots again (idempotence — the fix must not be a first-run trick)
 #
 # Verdicts: PASS / FAIL / BLOCKED, exiting 0 / 2 / 3.
-set -uo pipefail
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(cd "$HERE/.." && pwd)"; cd "$ROOT"
+# shellcheck source=dev/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
-pass=0; failed=0; blocked=0
-verdict() { printf '%-9s %-32s %s\n' "$2" "$1" "${3:-}"
-  case "$2" in PASS) pass=$((pass+1));; FAIL) failed=$((failed+1));; BLOCKED) blocked=$((blocked+1));; esac; }
-
-command -v docker >/dev/null || { verdict "docker" BLOCKED "not installed"; exit 3; }
+command -v docker >/dev/null || { give_up "docker" "not installed"; }
 
 caps() { docker inspect "$1" --format '{{.HostConfig.CapAdd}}|{{.HostConfig.CapDrop}}' 2>/dev/null; }
 
@@ -79,19 +76,14 @@ fi
 # all. Restarting the container alone is also the truer test — it does NOT re-run `ic-init`, so
 # this measures the runtime booting against a volume the init touched once, long ago.
 if docker restart multiprobe-ic-1 >/dev/null 2>&1; then
-  ok=0
-  for _ in $(seq 1 60); do
-    curl -fsS --max-time 2 "http://127.0.0.1:${PROBE_PORT:-3997}/api/health" >/dev/null 2>&1 && { ok=1; break; }
-    sleep 2
-  done
-  [ "$ok" = 1 ] && verdict "boot.existing_volume" PASS "restarted onto the volume it already wrote" \
-                || verdict "boot.existing_volume" FAIL "did not become healthy after restart"
+  # A container boot, not a process start: two minutes at two-second intervals.
+  if wait_for_http "http://127.0.0.1:${PROBE_PORT:-3997}/api/health" 60 2 2; then
+    verdict "boot.existing_volume" PASS "restarted onto the volume it already wrote"
+  else
+    verdict "boot.existing_volume" FAIL "did not become healthy after restart"
+  fi
 else
   verdict "boot.existing_volume" BLOCKED "compose restart failed"
 fi
 
-printf '\n%d passed, %d failed, %d blocked\n' "$pass" "$failed" "$blocked"
-printf 'the runtime never gains DAC_OVERRIDE; the init that precedes it has no capabilities.\n'
-[ "$failed" -gt 0 ] && exit 2
-[ "$blocked" -gt 0 ] && exit 3
-exit 0
+summary 'the runtime never gains DAC_OVERRIDE; the init that precedes it has no capabilities.'

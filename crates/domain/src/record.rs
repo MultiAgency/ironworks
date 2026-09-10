@@ -15,7 +15,7 @@
 //!
 //! The schema this borrows from keys every row `(org_id, <id>)` rather than filtering in a
 //! `WHERE` clause, so an id collision between two orgs creates two independent rows instead of
-//! re-homing one. In the type system the same job is done by [`ironworks_domain::RecordScope`],
+//! re-homing one. In the type system the same job is done by [`crate::RecordScope`],
 //! which carries the org and is the only way to reach a record at all — so a record fetched for
 //! one tenant cannot be looked up under another by a forgotten predicate. A second mechanism for
 //! this once existed here and was never used.
@@ -28,8 +28,6 @@ use std::fmt;
 pub enum RecordError {
     #[error("{what} may not be empty")]
     Empty { what: &'static str },
-    #[error("{what} {value:?} is not a valid identifier: lowercase letters, digits and '-' only")]
-    BadIdentifier { what: &'static str, value: String },
     #[error("date {value:?} is not ISO-8601 (YYYY-MM-DD)")]
     BadDate { value: String },
 }
@@ -265,7 +263,7 @@ pub struct Activity {
     /// most of a book, and is the honest value rather than a gap: the team wrote it and nobody
     /// individual claimed it. A promoted note carries the contributor who chose its exact bytes.
     ///
-    /// A [`ContributorId`] and not a free string, because attribution that a wire producer could
+    /// A [`crate::ContributorId`] and not a free string, because attribution that a wire producer could
     /// spell however it liked is attribution a reader cannot rely on. The store's own grammar is
     /// the same one, which is what lets the two agree without either trusting the other.
     ///
@@ -420,7 +418,11 @@ mod tests {
         // a column must not take every tenant down.
         let raw = r#"{"record_id":"A-1","account":{"name":"X","surprise":1},
                       "contacts":[],"activities":[]}"#;
-        assert!(AccountRecord::from_json(raw).is_ok());
+        // Parsing is not the claim — *carrying the known fields past the unknown one* is.
+        // `is_ok()` would have passed for a parser that dropped every field it did recognise.
+        let record = AccountRecord::from_json(raw).expect("an unknown field must not refuse");
+        assert_eq!(record.id.as_str(), "A-1");
+        assert_eq!(record.account.name, "X");
     }
 
     #[test]
@@ -435,7 +437,7 @@ mod tests {
 
     #[test]
     fn dates_validate_and_sort_chronologically() {
-        assert!(Date::parse("2026-07-09").is_ok());
+        assert_eq!(Date::parse("2026-07-09").unwrap().as_str(), "2026-07-09");
         for bad in ["2026-7-09", "09-07-2026", "2026-07-09T00:00", "", "not-a-date"] {
             assert!(Date::parse(bad).is_err(), "{bad:?} should not parse");
         }
@@ -486,7 +488,7 @@ mod tests {
     /// wire deserialized one, and the only construction site converted from the strict type.
     #[test]
     fn the_org_id_is_the_canonical_strict_one() {
-        assert!(OrgId::parse("acme-sales").is_ok());
+        assert_eq!(OrgId::parse("acme-sales").unwrap().as_str(), "acme-sales");
         for lax in ["Acme", "acme_sales", "acme sales", "acme/sales"] {
             assert!(OrgId::parse(lax).is_err(), "{lax:?} would have parsed before");
         }

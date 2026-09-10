@@ -13,6 +13,14 @@ pub struct Reading {
     pub records: usize,
     /// How the book binding was established, as the sentence the page shows.
     pub binding: String,
+    /// The same reading, as one line for an operator's terminal.
+    ///
+    /// **Returned rather than printed.** `sections` used to `println!` this itself — from a
+    /// function whose whole output is a `Result<Reading, String>`, so the line was invisible to
+    /// the tests that call it, interleaved with `main`'s own reporting, and made the library layer
+    /// unusable by anything that is not a terminal program. `binding` above already carried its
+    /// sentence this way; this is the rest of it.
+    pub terminal: String,
     pub cases: String,
     pub finding: (String, String),
 }
@@ -51,13 +59,9 @@ pub fn sections(
 
     let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let doc: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
-    let all = match &doc {
-        serde_json::Value::Array(rows) => rows.clone(),
-        serde_json::Value::Object(map) => {
-            map.get("cases").and_then(|c| c.as_array()).cloned().unwrap_or_default()
-        }
-        _ => return Err(format!("{name} is neither a list nor an object")),
-    };
+    let all = ironworks_evidence::transcript::cases(&doc)
+        .map_err(|why| format!("{name} {why}"))?
+        .to_vec();
     let rows: Vec<serde_json::Value> = match one_case {
         Some(want) => all
             .iter()
@@ -81,7 +85,7 @@ pub fn sections(
     let loaded = book::load(&book_dir)?;
     let hint = book::year_of(&loaded);
     let binding = verify::verify(&doc, &rows, &loaded, &book_dir, root, &name)?;
-    println!(
+    let terminal = format!(
         "reading {name} — {} case(s) against {} records in {book_rel}\n         bound to that \
          book by {}\n",
         rows.len(),
@@ -118,6 +122,7 @@ pub fn sections(
         book_rel: book_rel.to_owned(),
         records: loaded.len(),
         binding: binding.html,
+        terminal,
         cases,
         finding,
     })

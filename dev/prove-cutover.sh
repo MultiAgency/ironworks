@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# COST: one runtime member, spent irreversibly, plus two model turns. Needs a probe
+# and a model key.
 # Prove a registry cutover through the SERVING process, not through the loader.
 #
 #   dev/probe-up.sh              # runtime + disposable record store
@@ -53,15 +55,16 @@
 # consecutive runs mint their own, so the probe stays reusable.
 #
 # Verdicts follow the operator convention: PASS / FAIL / BLOCKED, exiting 0 / 2 / 3.
-set -uo pipefail
-
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
-cd "$ROOT" || exit 3
+# shellcheck source=dev/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 STORE_PORT="${PROBE_STORE_PORT:-3996}"
 CHAN_PORT="${PROVE_CUTOVER_PORT:-3992}"
 STORE_TOKEN="dev-token-eval"
+# The org that token resolves to in the probe store (dev/probe-up.sh). Only the hand-written prior
+# registry needs it stated; the candidate goes through `registry publish-one`, which records the
+# org it measured from the store itself.
+STORE_ORG="eval"
 SERVICE="relationship-intelligence"
 CANDIDATE="cutover-candidate"
 PRIOR="cutover-prior"
@@ -95,33 +98,18 @@ cleanup() {
     printf 'prove-cutover: nothing else uses it; dev/probe-up.sh --down discards it.\n'
   fi
 }
-trap 'cleanup; exit 130' INT
-trap 'cleanup; exit 143' TERM
-trap cleanup EXIT
-
-pass=0; failed=0; blocked=0
-verdict() {
-  printf '%-9s %-34s %s\n' "$2" "$1" "${3:-}"
-  case "$2" in PASS) pass=$((pass+1));; FAIL) failed=$((failed+1));; BLOCKED) blocked=$((blocked+1));; esac
-}
+on_exit cleanup
 
 # ── preconditions ────────────────────────────────────────────────────────────────────────
-[ -n "${IRONWORKS_BASE:-}" ] && [ -n "${IRONWORKS_TOKEN:-}" ] || {
-  echo "prove-cutover: IRONWORKS_BASE / IRONWORKS_TOKEN are unset. Run dev/probe-up.sh and" >&2
-  echo "               export the lines it prints." >&2
-  exit 3
-}
-curl -fsS --max-time 3 "$IRONWORKS_BASE/api/health" >/dev/null 2>&1 || {
-  verdict "runtime.reachable" BLOCKED "$IRONWORKS_BASE did not answer /api/health"; exit 3; }
-curl -fsS --max-time 3 "http://127.0.0.1:$STORE_PORT/health" >/dev/null 2>&1 || {
-  verdict "store.reachable" BLOCKED "no record store on :$STORE_PORT (dev/probe-up.sh)"; exit 3; }
+need_env IRONWORKS_BASE IRONWORKS_TOKEN
+need_runtime
+need_store
 if curl -fsS --max-time 2 "http://127.0.0.1:$CHAN_PORT/health" >/dev/null 2>&1; then
-  verdict "channel.port" BLOCKED \
+  give_up "channel.port" \
     "something already answers on $CHAN_PORT; set PROVE_CUTOVER_PORT to a free port"
-  exit 3
 fi
 cargo build -q -p ironworks-cli -p ironworks-devchannel 2>/dev/null || {
-  verdict "build" BLOCKED "cargo build failed"; exit 3; }
+  give_up "build" "cargo build failed"; }
 BIN=./target/debug/ironworks
 CHAN_BIN=./target/debug/ironworks-devchannel
 STORE_URL="http://127.0.0.1:$STORE_PORT"
@@ -131,15 +119,14 @@ CHAN="http://127.0.0.1:$CHAN_PORT"
 # Same service and the same book on purpose. If they differed in what they answer, a check could
 # pass on the content and never test the route; making the ROOM the only difference is what makes
 # the observation log the whole of the evidence.
-mkdir -p "$LIVE_DIR" || { verdict "workspace" BLOCKED "cannot create $LIVE_DIR"; exit 3; }
+mkdir -p "$LIVE_DIR" || { give_up "workspace" "cannot create $LIVE_DIR"; }
 CAND_GUIDANCE="$WORK/$CANDIDATE.guidance.md"
 PRIOR_GUIDANCE="$WORK/$PRIOR.guidance.md"
 sed "1s|slug: eval|slug: $CANDIDATE|" fixtures/eval.guidance.md > "$CAND_GUIDANCE"
 sed "1s|slug: eval|slug: $PRIOR|" fixtures/eval.guidance.md > "$PRIOR_GUIDANCE"
 if ! grep -q "slug: $CANDIDATE" "$CAND_GUIDANCE" \
   || ! grep -q "slug: $PRIOR" "$PRIOR_GUIDANCE"; then
-  verdict "guidance" BLOCKED "fixtures/eval.guidance.md no longer carries the expected marker"
-  exit 3
+  give_up "guidance" "fixtures/eval.guidance.md no longer carries the expected marker"
 fi
 
 # Credentials reach every process as env:NAME handles, never as argv and never in a file. The
@@ -151,7 +138,7 @@ export IRONWORKS_RECORDS="$STORE_URL"
 export IRONCLAW_API="$IRONWORKS_BASE"
 
 cat > "$LIVE" <<JSON
-{"tenants":[{"slug":"$PRIOR","channel":"$PRIOR_ROOM","service":"$SERVICE",
+{"tenants":[{"slug":"$PRIOR","channel":"$PRIOR_ROOM","org":"$STORE_ORG","service":"$SERVICE",
   "guidance":"$PRIOR_GUIDANCE",
   "records_credential":"env:CUTOVER_PRIOR_RECORDS",
   "runtime_credential":"env:CUTOVER_PRIOR_RUNTIME"}]}
@@ -165,6 +152,18 @@ chmod 600 "$LIVE"
 # that did not happen, and `dev/prove-confinement.sh` is the script that scores confinement.
 OPERATOR="${IRONCLAW_OPERATOR_TOKEN:-$IRONWORKS_TOKEN}"
 export IRONCLAW_OPERATOR_TOKEN="$OPERATOR"
+
+# `publish-one` repeats the requested-model policy comparison and refuses unless the runtime's
+# operator-visible policy is the singleton MODEL_PIN, so a fresh probe cannot be published to: it
+# comes up with `selection_enabled=false` and publication refuses, correctly, on that.
+#
+# **Before the mint, deliberately.** This used to be absent altogether, and the run reached
+# publication having already spent a member — then scored the refusal FAIL, which reads as "the
+# cutover is broken" when what happened is that the probe was never configured for one. A
+# precondition that cannot be met is BLOCKED and it must cost nothing (§F-14).
+if ! policy="$("$BIN" model-policy apply 2>&1)"; then
+  give_up "probe.model_policy" "the probe's requested-model policy could not be set: $(why "$policy")"
+fi
 minted_json="$(curl -s --max-time 20 -X POST "$IRONWORKS_BASE/api/webchat/v2/admin/users" \
   --config - -H 'content-type: application/json' \
   -d "{\"email\":\"cutover-$$@example.com\",\"display_name\":\"cutover probe $$\",\"role\":\"member\"}" <<CURL
@@ -178,8 +177,7 @@ CUTOVER_MEMBER="$(printf '%s' "$minted_json" | python3 -c 'import json,sys
 try: print(json.load(sys.stdin).get("api_token") or "")
 except Exception: pass')"
 if [ -z "$CUTOVER_MEMBER" ]; then
-  verdict "candidate.member" BLOCKED "could not mint a member: $(printf '%s' "$minted_json" | head -c 120)"
-  exit 3
+  give_up "candidate.member" "could not mint a member: $(printf '%s' "$minted_json" | head -c 120)"
 fi
 minted=1
 export CUTOVER_MEMBER IRONCLAW_MEMBER_TOKEN="$CUTOVER_MEMBER"
@@ -187,11 +185,10 @@ export CUTOVER_MEMBER IRONCLAW_MEMBER_TOKEN="$CUTOVER_MEMBER"
 if ! adopt="$("$BIN" lifecycle adopt "$CANDIDATE" --store "$STORE" --service "$SERVICE" \
   --channel "$CAND_ROOM" --records-credential env:CUTOVER_RECORDS \
   --member-credential env:CUTOVER_MEMBER 2>&1)"; then
-  verdict "candidate.adopted" BLOCKED "$(grep -v '^$' <<<"$adopt" | tail -n1 | cut -c1-84)"; exit 3
+  give_up "candidate.adopted" "$(why "$adopt")"
 fi
 if ! confine="$("$BIN" lifecycle confine "$CANDIDATE" --store "$STORE" 2>&1)"; then
-  verdict "candidate.confined" BLOCKED "$(grep -v '^$' <<<"$confine" | tail -n1 | cut -c1-84)"
-  exit 3
+  give_up "candidate.confined" "$(why "$confine")"
 fi
 printf 'prove-cutover: candidate adopted and confined; prior registry is live at %s\n' \
   "$(basename "$LIVE")"
@@ -202,7 +199,7 @@ printf 'prove-cutover: candidate adopted and confined; prior registry is live at
 # member served a turn cleanly a minute later, which is a rate limit reported as a cutover defect.
 # The window is the runtime's, so waiting it out is the only way to measure what is downstream.
 printf 'prove-cutover: waiting 60s for the runtime request window to clear after confinement\n\n'
-sleep 60
+pace_window
 
 # ── helpers ──────────────────────────────────────────────────────────────────────────────
 
@@ -215,14 +212,8 @@ channel() {
   local args=()
   local pair
   for pair in "$@"; do args+=(--update "${pair%%=*}=${pair#*=}:$ASK"); done
-  ( exec "$CHAN_BIN" --port "$CHAN_PORT" "${args[@]}" ) >/dev/null 2>&1 </dev/null &
-  CHAN_PID=$!
-  disown 2>/dev/null || true
-  for _ in $(seq 1 30); do
-    curl -fsS --max-time 1 "$CHAN/health" >/dev/null 2>&1 && return 0
-    sleep 0.2
-  done
-  CHAN_PID=""
+  CHAN_PID="$(start_fixture "$CHAN/health" "$CHAN_BIN" --port "$CHAN_PORT" "${args[@]}")"
+  [ -n "$CHAN_PID" ] && return 0
   return 1
 }
 
@@ -232,10 +223,8 @@ relay() {
   "$BIN" relay --registry "$LIVE" --journal "$JOURNAL" --call-log "$1" --channel "$CHAN" 2>&1
 }
 
-obs()      { curl -fsS --max-time 3 "$CHAN/observations" 2>/dev/null; }
 # Chunks the channel confirmed into one room. The whole verdict rests on this line.
 in_room()  { grep -c "^accepted chunk=[0-9]* channel=$2 " <<<"$1" | tr -d ' '; }
-creates()  { awk -F'\t' '$1=="create"' "$1" 2>/dev/null | wc -l | tr -d ' '; }
 # The prior registry is written compactly and the published one pretty-printed, so the space
 # after the colon is optional rather than a fact about either file.
 routes()   { grep -c "\"slug\": *\"$2\"" "$1" 2>/dev/null | tr -d ' '; }
@@ -247,19 +236,6 @@ has_credential() {
   printf '%s\n' "$STORE_TOKEN" "$CUTOVER_MEMBER" "$IRONWORKS_TOKEN" |
     grep -F -f - "$LIVE" "$ROLLBACK" >/dev/null 2>&1
 }
-no_model() { grep -q "not a valid model name\|model provider rejected" <<<"$1"; }
-# States in which the boundary was never set up, so the check measured nothing. The runtime's
-# 30-requests-per-60-seconds limit and its 30s response timeout are upstream of IronWorks;
-# scoring either as FAIL reports a cutover defect that does not exist. Identical to
-# `dev/prove-delivery.sh`'s, which carries the reasoning — including why the 429 alternative
-# excludes a hex run rather than requiring the literal `HTTP 429`, a narrowing this script's
-# sittings are what measured and a prefix this script's own digests are what defeated.
-degraded() { grep -qE "timed out (writing|reading)|rate limited|rate.?limit|(^|[^0-9a-f])429([^0-9a-f]|$)|service_unavailable|provider .* unavailable" <<<"$1"; }
-# The failing run's own last words. Continuation lines are skipped: the runtime's refusals end
-# with an indented `→ ...` instruction, so taking the last non-empty line would name the advice
-# and never the cause — and a BLOCKED verdict is only worth reading if it says what stopped it.
-why()      { grep -vE '^[[:space:]]*(→|$)' <<<"$1" | tail -n1 | cut -c1-88; }
-
 # serve <name> <room that must answer> <room that must stay silent> <call-log> <id=room> <id=room>
 #
 # Both serving checks go through here rather than through two copies, so the assertion cannot
@@ -277,8 +253,8 @@ serve() {
     verdict "$name" BLOCKED "runtime has no usable model key"
     return
   fi
-  if degraded "$out"; then
-    verdict "$name" BLOCKED "dependency unavailable: $(why "$out")"
+  if unsettled "$out"; then
+    verdict "$name" BLOCKED "$(unsettled_why "$out")"
     return
   fi
   local log good bad
@@ -304,8 +280,7 @@ out="$("$BIN" registry publish-one "$CANDIDATE" --store "$STORE" --registry "$LI
 rc=$?
 REGISTRY_ID="$(grep -oE "registry [0-9a-f]+" <<<"$out" | tail -n1 | cut -d' ' -f2)"
 if [ $rc -eq 3 ]; then
-  verdict "cutover.publication" BLOCKED "$(why "$out")"
-  exit 3
+  give_up "cutover.publication" "$(why "$out")"
 elif [ $rc -eq 0 ] \
   && [ "$(routes "$LIVE" "$CANDIDATE")" = 1 ] && [ "$(routes "$LIVE" "$PRIOR")" = 0 ] \
   && grep -q -- "$CAND_ROOM" "$LIVE" \
@@ -313,9 +288,16 @@ elif [ $rc -eq 0 ] \
   && ! has_credential; then
   verdict "cutover.publication" PASS "live is $CANDIDATE ($REGISTRY_ID); prior kept as .previous"
 else
+  # The publisher's own last words, as every BLOCKED arm in this file already does. The counts
+  # say the cutover did not happen; only the sentence says why, and without it a FAIL here costs
+  # a second member to diagnose — this one did.
   verdict "cutover.publication" FAIL \
-    "rc=$rc candidate=$(routes "$LIVE" "$CANDIDATE") prior=$(routes "$LIVE" "$PRIOR") rollback=$([ -f "$ROLLBACK" ] && echo yes || echo no)"
-  exit 2
+    "rc=$rc candidate=$(routes "$LIVE" "$CANDIDATE") prior=$(routes "$LIVE" "$PRIOR") rollback=$([ -f "$ROLLBACK" ] && echo yes || echo no) | $(why "$out")"
+  # `summary`, not `exit 2`. Every serving check below reads the registry this one was supposed to
+  # publish, so there is nothing left to measure — but a bare `exit 2` would report "measured, and
+  # it is wrong" even when an earlier check had been BLOCKED and nothing was measured at all. That
+  # inversion is what `summary` exists to prevent (`docs/experiments/0050-blocked-was-being-read-as-fail.md`).
+  summary 'the serving checks below read the registry this one publishes, so the run stops here.'
 fi
 
 # ── 2. the candidate serves ──────────────────────────────────────────────────────────────
@@ -324,7 +306,7 @@ fi
 serve "cutover.candidate_serves" "$CAND_ROOM" "$PRIOR_ROOM" "$WORK/2.log" \
   "$((UID_BASE+1))=$CAND_ROOM" "$((UID_BASE+2))=$PRIOR_ROOM"
 
-sleep 5
+pace
 
 # ── 3. rollback ──────────────────────────────────────────────────────────────────────────
 # The artifact is copied rather than consumed, so a second rollback after a second publication is
@@ -348,10 +330,7 @@ serve "cutover.prior_serves_after_restart" "$PRIOR_ROOM" "$CAND_ROOM" "$WORK/4.l
   "$((UID_BASE+11))=$PRIOR_ROOM" "$((UID_BASE+12))=$CAND_ROOM"
 
 # ── verdict ──────────────────────────────────────────────────────────────────────────────
-printf '\n%d passed, %d failed, %d blocked\n' "$pass" "$failed" "$blocked"
-printf 'the room each answer landed in comes from the channel, so serving the wrong registry\n'
-printf 'cannot pass: every serving check asserts one room answered and the other did not.\n'
-printf 'wait ~60s before another proof: the runtime allows 30 requests per 60 seconds.\n'
-[ "$failed" -gt 0 ] && exit 2
-[ "$blocked" -gt 0 ] && exit 3
-exit 0
+summary \
+  'the room each answer landed in comes from the channel, so serving the wrong registry' \
+  'cannot pass: every serving check asserts one room answered and the other did not.' \
+  'wait ~60s before another proof: the runtime allows 30 requests per 60 seconds.'

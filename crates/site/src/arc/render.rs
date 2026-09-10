@@ -38,19 +38,35 @@ fn thousands(n: u64) -> String {
     out
 }
 
-/// A tally in severity order, with a narrow no-break space before each initial.
-fn counted(verdicts: impl Iterator<Item = String>) -> String {
-    let mut counts: BTreeMap<String, usize> = BTreeMap::new();
+/// How many of each verdict, in severity order.
+///
+/// One function because there were two, and they had drifted apart on the question that matters:
+/// the tally rendered as initials emitted its verdict's first character raw, while the tally
+/// rendered in full escaped it. `crates/page/src/lib.rs::esc` is a security control over strings
+/// nobody here wrote — a verdict is read out of a transcript — so the two renderings must not get
+/// to disagree about it. They now share the count and the ordering and differ only in the closure.
+fn tally<'a>(verdicts: impl Iterator<Item = &'a str>) -> Vec<(&'a str, usize)> {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     for v in verdicts {
         *counts.entry(v).or_insert(0) += 1;
     }
-    let mut pairs: Vec<(&String, &usize)> = counts.iter().collect();
-    pairs.sort_by_key(|(v, _)| (order(v), (*v).clone()));
+    let mut pairs: Vec<(&str, usize)> = counts.into_iter().collect();
+    pairs.sort_by_key(|(v, _)| (order(v), *v));
     pairs
+}
+
+/// A tally, each verdict rendered by `show`, with a narrow no-break space before each.
+fn spread<'a>(verdicts: impl Iterator<Item = &'a str>, show: impl Fn(&str) -> String) -> String {
+    tally(verdicts)
         .iter()
-        .map(|(v, n)| format!("{n}&#8239;{}", v.chars().next().unwrap_or('?')))
+        .map(|(v, n)| format!("{n}&#8239;{}", show(v)))
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+/// A tally as initials — `2 P 1 F 1 B`. Escaped, because the initial comes from the transcript.
+fn counted<'a>(verdicts: impl Iterator<Item = &'a str>) -> String {
+    spread(verdicts, |v| esc(&v.chars().next().unwrap_or('?').to_string()))
 }
 
 /// `0009-…-poc.json run 2` → `0009 · run 2`.
@@ -75,7 +91,6 @@ pub struct Context<'a> {
     pub probes: &'a [Probe],
     pub then: Option<&'a Ingredients>,
     pub since: &'a str,
-    pub guidance_rel: &'a str,
     pub guidance_moved: bool,
     pub guidance_added: bool,
     pub head_rev: &'a str,
@@ -86,6 +101,72 @@ pub struct Context<'a> {
 /// Returned as a body rather than a document so the operator page can place the reading beneath
 /// it: the matrix and one answer are the same question at two zooms, and a reader who has just
 /// seen a cell flip should not have to navigate to find out what the answer said.
+/// What one composed part did between the two compositions the page compares.
+///
+/// **`NotComparable` is the BLOCKED shape and must never collapse into `Unchanged`.** There is no
+/// earlier composition to compare against, so nothing was measured — while `Unchanged` is a
+/// measurement that came back equal. The page paints them with the same class, which is exactly
+/// why the distinction has to live somewhere a test can reach: a reader who is told "unchanged"
+/// concludes the part is safe, and a reader told "not comparable" knows they were told nothing.
+#[derive(Debug, PartialEq, Eq)]
+enum PartState<'a> {
+    NotComparable,
+    Added,
+    Moved { from: &'a str },
+    Unchanged,
+}
+
+/// `was` is `None` when there is no earlier composition at all — not an empty one, which would
+/// mean every part is `Added`.
+fn part_state<'a>(
+    was: Option<&BTreeMap<&'a str, &'a str>>,
+    rel: &str,
+    digest: &str,
+) -> PartState<'a> {
+    let Some(was) = was else { return PartState::NotComparable };
+    match was.get(rel) {
+        None => PartState::Added,
+        Some(before) if *before != digest => PartState::Moved { from: before },
+        Some(_) => PartState::Unchanged,
+    }
+}
+
+/// Which of the three the matrix paints a run's column: `first`, `moved`, or `same`.
+///
+/// The class is computed once and read twice — the header row and the tally row both index it by
+/// position — so it must not be recomputed anywhere. `moved` and `same` are a claim about the
+/// **previous** run: a column marked `same` says the composition did not change, which is what
+/// makes a verdict that moved under it variance rather than an effect. Painting a moved column
+/// `same` would attribute a real change to noise, and it is the one mistake here that changes a
+/// reader's conclusion.
+fn column_class(runs: &[Run], i: usize) -> &'static str {
+    if i == 0 {
+        "first"
+    } else if runs[i - 1].alloy != runs[i].alloy {
+        "moved"
+    } else {
+        "same"
+    }
+}
+
+/// Every composition change between consecutive runs, as `from → to`.
+fn moved_between(runs: &[Run]) -> Vec<String> {
+    (1..runs.len())
+        .filter(|i| runs[i - 1].alloy != runs[*i].alloy)
+        .map(|i| format!("{} → {}", runs[i - 1].alloy[0], runs[i].alloy[0]))
+        .collect()
+}
+
+/// Whether any two consecutive runs graded the **same** composition and disagreed.
+///
+/// This is what licenses the legend's claim that a verdict which moved under an unchanged
+/// composition is variance or a regrade rather than the effect of a change. Answering it `true`
+/// when every composition differed would offer that excuse for a real regression.
+fn has_variance(runs: &[Run]) -> bool {
+    (1..runs.len())
+        .any(|i| runs[i - 1].alloy == runs[i].alloy && runs[i - 1].verdicts != runs[i].verdicts)
+}
+
 pub fn sections(cx: &Context<'_>) -> String {
     let matched = matching_run(cx.runs, &cx.now.alloy);
     let here: Vec<&Probe> =
@@ -144,17 +225,10 @@ pub fn sections(cx: &Context<'_>) -> String {
         }
     }
 
+    let marks: Vec<&'static str> = (0..cx.runs.len()).map(|i| column_class(cx.runs, i)).collect();
     let mut heads = String::new();
-    let mut marks = Vec::new();
     for (i, run) in cx.runs.iter().enumerate() {
-        let moved = i > 0 && cx.runs[i - 1].alloy != run.alloy;
-        let cls = if moved {
-            "moved"
-        } else if i > 0 {
-            "same"
-        } else {
-            "first"
-        };
+        let cls = marks[i];
         let alloy =
             if run.alloy.len() == 1 { run.alloy[0].clone() } else { "MOVED MID-RUN".to_owned() };
         heads.push_str(&format!(
@@ -163,7 +237,6 @@ pub fn sections(cx: &Context<'_>) -> String {
             esc(&short(&run.label)),
             esc(&alloy)
         ));
-        marks.push(cls);
     }
     heads.push_str(&format!(
         "<th class=\"run now\" title=\"the working tree\">now<span class=\"d\">{}</span></th>",
@@ -207,7 +280,7 @@ pub fn sections(cx: &Context<'_>) -> String {
         tally.push_str(&format!(
             "<td class=\"v tally {}\">{}</td>",
             marks[i],
-            counted(run.verdicts.iter().map(|(_, v)| v.clone()))
+            counted(run.verdicts.iter().map(|(_, v)| v.as_str()))
         ));
     }
     // The now column is the matched run's column, so its tally is that run's tally. Anything else
@@ -215,18 +288,13 @@ pub fn sections(cx: &Context<'_>) -> String {
     tally.push_str(&match matched {
         Some(m) => format!(
             "<td class=\"v tally now\">{}</td>",
-            counted(m.verdicts.iter().map(|(_, v)| v.clone()))
+            counted(m.verdicts.iter().map(|(_, v)| v.as_str()))
         ),
         None => "<td class=\"v tally now\">not graded</td>".to_owned(),
     });
 
-    let moved_between: Vec<String> = (1..cx.runs.len())
-        .filter(|i| cx.runs[i - 1].alloy != cx.runs[*i].alloy)
-        .map(|i| format!("{} → {}", cx.runs[i - 1].alloy[0], cx.runs[i].alloy[0]))
-        .collect();
-    let variance = (1..cx.runs.len()).any(|i| {
-        cx.runs[i - 1].alloy == cx.runs[i].alloy && cx.runs[i - 1].verdicts != cx.runs[i].verdicts
-    });
+    let moved_between = moved_between(cx.runs);
+    let variance = has_variance(cx.runs);
 
     let mut legend = String::new();
     if !moved_between.is_empty() {
@@ -253,19 +321,7 @@ pub fn sections(cx: &Context<'_>) -> String {
     } else {
         let mut prows = String::new();
         for probe in cx.probes {
-            let spread = {
-                let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
-                for v in &probe.verdicts {
-                    *counts.entry(v).or_insert(0) += 1;
-                }
-                let mut pairs: Vec<(&&str, &usize)> = counts.iter().collect();
-                pairs.sort_by_key(|(v, _)| (order(v), **v));
-                pairs
-                    .iter()
-                    .map(|(v, n)| format!("{n}&#8239;{}", esc(v)))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            };
+            let spread = spread(probe.verdicts.iter().map(String::as_str), esc);
             let mark = if probe.alloy.len() == 1 && probe.alloy[0] == cx.now.alloy {
                 " <span class=\"moved\">· this composition</span>"
             } else {
@@ -308,21 +364,22 @@ pub fn sections(cx: &Context<'_>) -> String {
         .map(|t| t.parts.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect())
         .unwrap_or_default();
     for (rel, digest) in &cx.now.parts {
-        let (state, nums) = if cx.then.is_none() {
-            ("<span class=\"unchanged\">not comparable</span>".to_owned(), esc(digest))
-        } else if !was.contains_key(rel.as_str()) {
-            ("<span class=\"added\">added</span>".to_owned(), esc(digest))
-        } else if was[rel.as_str()] != digest {
-            (
+        let (state, nums) = match part_state(cx.then.map(|_| &was), rel, digest) {
+            PartState::NotComparable => {
+                ("<span class=\"unchanged\">not comparable</span>".to_owned(), esc(digest))
+            }
+            PartState::Added => ("<span class=\"added\">added</span>".to_owned(), esc(digest)),
+            PartState::Moved { from } => (
                 "<span class=\"moved\">moved</span>".to_owned(),
                 format!(
                     "{} <span class=\"arrow\">→</span> <span class=\"to\">{}</span>",
-                    esc(was[rel.as_str()]),
+                    esc(from),
                     esc(digest)
                 ),
-            )
-        } else {
-            ("<span class=\"unchanged\">unchanged</span>".to_owned(), esc(digest))
+            ),
+            PartState::Unchanged => {
+                ("<span class=\"unchanged\">unchanged</span>".to_owned(), esc(digest))
+            }
         };
         rows.push_str(&format!(
             "<tr><td class=\"mono\">{}</td><td class=\"state\">{state}</td><td class=\"num\">{nums}</td></tr>",
@@ -338,7 +395,7 @@ pub fn sections(cx: &Context<'_>) -> String {
     };
     rows.push_str(&format!(
         "<tr><td class=\"mono\">{}</td><td class=\"state\">{gstate}</td><td class=\"num\">{gnote}</td></tr>",
-        esc(cx.guidance_rel)
+        esc(cx.suite.guidance)
     ));
 
     let body_html = format!(
@@ -426,7 +483,6 @@ pub fn sections(cx: &Context<'_>) -> String {
     <span class="mono">ironworks compose</span> at <span class="mono">{head_rev}</span>.
     Every record behind these verdicts is synthetic.
     <a href="/read/">Reading the answers →</a>
-    <a href="/read/">Reading the answers →</a>
   </footer>
 "#,
         service = esc(cx.service),
@@ -447,10 +503,184 @@ pub fn sections(cx: &Context<'_>) -> String {
 mod tests {
     use super::*;
 
+    fn run(alloy: &[&str], verdicts: &[(&str, &str)]) -> Run {
+        Run {
+            label: "0001-r".to_owned(),
+            alloy: alloy.iter().map(|a| (*a).to_owned()).collect(),
+            verdicts: verdicts.iter().map(|(c, v)| ((*c).to_owned(), (*v).to_owned())).collect(),
+            regraded: BTreeMap::new(),
+        }
+    }
+
+    /// A part that was never compared must not read as one that came back equal.
+    ///
+    /// Both are painted `unchanged` on the page, so nothing downstream can tell them apart — this
+    /// is the only place the difference exists, and §F-14's rule is the same one: an unmeasured
+    /// result is not a passing one.
+    #[test]
+    fn a_part_that_was_never_compared_is_not_a_part_that_did_not_move() {
+        let was: BTreeMap<&str, &str> = [("p.md", "aaaa")].into_iter().collect();
+
+        // No earlier composition at all: nothing was measured.
+        assert_eq!(part_state(None, "p.md", "aaaa"), PartState::NotComparable);
+        // The same digest, and this time it was actually compared.
+        assert_eq!(part_state(Some(&was), "p.md", "aaaa"), PartState::Unchanged);
+
+        assert_eq!(part_state(Some(&was), "p.md", "bbbb"), PartState::Moved { from: "aaaa" });
+        assert_eq!(part_state(Some(&was), "new.md", "cccc"), PartState::Added);
+
+        // An *empty* earlier composition is a comparison, not the absence of one: every part is
+        // new. Folding it into `NotComparable` would hide a composition that added everything.
+        let none: BTreeMap<&str, &str> = BTreeMap::new();
+        assert_eq!(part_state(Some(&none), "p.md", "aaaa"), PartState::Added);
+    }
+
+    /// The matrix's three column classes, and what each one licenses a reader to conclude.
+    ///
+    /// `same` is not decoration: the legend uses it to say a verdict that moved under it is
+    /// variance or a regrade rather than the effect of a change. Painting a column that *did*
+    /// move as `same` offers that excuse for a real regression, which is the one error here that
+    /// changes a conclusion.
+    #[test]
+    fn a_column_is_marked_same_only_when_the_composition_did_not_move() {
+        let a = run(&["aaaa"], &[("c", "PASS")]);
+        let b = run(&["bbbb"], &[("c", "PASS")]);
+
+        // The first column has no previous run to have moved from, so it is neither.
+        assert_eq!(column_class(std::slice::from_ref(&a), 0), "first");
+        assert_eq!(column_class(&[a.clone(), a.clone()], 0), "first");
+
+        assert_eq!(column_class(&[a.clone(), a.clone()], 1), "same");
+        assert_eq!(column_class(&[a.clone(), b.clone()], 1), "moved");
+
+        // A run that graded two compositions is not equal to either of them.
+        let both = run(&["aaaa", "bbbb"], &[("c", "PASS")]);
+        assert_eq!(column_class(&[a.clone(), both.clone()], 1), "moved");
+        assert_eq!(column_class(&[both.clone(), a.clone()], 1), "moved");
+    }
+
+    /// The two claims the legend makes about the evidence, each with the case that must not
+    /// produce it — a check that can only invent a match is the same defect as one that can only
+    /// invent a difference (§K-8).
+    #[test]
+    fn the_legend_claims_variance_only_where_one_composition_disagreed_with_itself() {
+        let a = run(&["aaaa"], &[("c", "PASS")]);
+        let a2 = run(&["aaaa"], &[("c", "FAIL")]);
+        let b = run(&["bbbb"], &[("c", "FAIL")]);
+
+        // Same alloy, different verdicts: variance, and this is the only shape that is.
+        assert!(has_variance(&[a.clone(), a2.clone()]));
+        // Same alloy, same verdicts: nothing moved at all.
+        assert!(!has_variance(&[a.clone(), a.clone()]));
+        // Different alloy AND different verdicts: that is the effect of a change, and calling it
+        // variance would excuse a regression the page exists to show.
+        assert!(!has_variance(&[a.clone(), b.clone()]));
+        // Nothing to compare.
+        assert!(!has_variance(std::slice::from_ref(&a)));
+        assert!(!has_variance(&[]));
+
+        // And the moves are named in order, from and to, only where there was one.
+        assert_eq!(moved_between(&[a.clone(), b.clone()]), vec!["aaaa → bbbb".to_owned()]);
+        assert!(moved_between(&[a.clone(), a.clone()]).is_empty());
+        assert_eq!(
+            moved_between(&[a.clone(), b.clone(), a.clone()]),
+            vec!["aaaa → bbbb".to_owned(), "bbbb → aaaa".to_owned()]
+        );
+    }
+
+    /// Nothing a transcript or a composition carries reaches the arc page as markup.
+    ///
+    /// # Why this renderer especially
+    ///
+    /// `sections` interpolates through `esc` at **37 separate places**, which is 37 chances to
+    /// forget one — and every value it renders comes from outside: run labels and case names are
+    /// read from transcript filenames and rows, part paths and digests from the composition, and
+    /// verdicts from recorded runs. A missed `esc` here publishes attacker-reachable bytes as
+    /// markup on the page `docs/FRONTEND.md` describes (§A-1).
+    ///
+    /// The payload goes in **every** `String` the context carries, so the test does not depend on
+    /// guessing which field a future edit will forget.
+    #[test]
+    fn no_transcript_or_composition_field_reaches_the_arc_page_as_markup() {
+        use crate::arc::data::{Composed, Ingredients, Probe, Run, Suite};
+        const PAYLOAD: &str = "<img src=x onerror=alert(1)>";
+        let poisoned = |what: &str| format!("{what}{PAYLOAD}");
+
+        let suite = Suite {
+            name: "account-coordination",
+            patterns: &["account-coordination"],
+            slug: "acme",
+            service: Some("relationship-intelligence"),
+            guidance: "fixtures/account-coordination/guidance.md",
+        };
+        let now = Composed {
+            service: poisoned("svc"),
+            alloy: poisoned("a1b2"),
+            alloy_bytes: 14_337,
+            guidance: poisoned("g1"),
+            guidance_bytes: 900,
+            parts: vec![(poisoned("personas/A.md"), poisoned("d1"))],
+        };
+        let runs = vec![Run {
+            label: poisoned("0021-run"),
+            alloy: vec![now.alloy.clone()],
+            verdicts: vec![(poisoned("attention"), poisoned("PASS"))],
+            regraded: std::collections::BTreeMap::new(),
+        }];
+        let probes = vec![Probe {
+            label: poisoned("0023-probe"),
+            case: poisoned("attention"),
+            alloy: vec![now.alloy.clone()],
+            verdicts: vec![poisoned("PASS")],
+        }];
+        let then = Ingredients {
+            parts: vec![(poisoned("personas/B.md"), poisoned("d2"))],
+            missing: vec![poisoned("personas/gone.md")],
+        };
+
+        let html = sections(&Context {
+            suite: &suite,
+            service: &poisoned("relationship-intelligence"),
+            now: &now,
+            runs: &runs,
+            probes: &probes,
+            then: Some(&then),
+            since: &poisoned("HEAD"),
+            guidance_moved: true,
+            guidance_added: true,
+            head_rev: &poisoned("4cb47cf"),
+        });
+
+        assert!(
+            !html.contains(PAYLOAD),
+            "a field reached the arc page verbatim — some interpolation is unescaped:\n{html}"
+        );
+        assert!(!html.contains("<img"), "an <img> tag reached the arc page:\n{html}");
+
+        // The positive control §K-8 requires: the payload must be present *escaped*, and the
+        // page's own markup must survive. Without these, a renderer that emitted nothing would
+        // pass every assertion above.
+        assert!(html.contains("&lt;img"), "the payload must appear, escaped:\n{html}");
+        assert!(html.contains("<table") || html.contains("<div"), "the page must render:\n{html}");
+    }
+
     #[test]
     fn a_tally_reads_in_severity_order() {
-        let verdicts = ["FAIL", "PASS", "PASS", "BLOCKED"].map(str::to_owned);
+        let verdicts = ["FAIL", "PASS", "PASS", "BLOCKED"];
         assert_eq!(counted(verdicts.into_iter()), "2&#8239;P 1&#8239;F 1&#8239;B");
+    }
+
+    #[test]
+    fn a_tally_escapes_the_verdict_it_was_given() {
+        // A verdict is read out of a transcript, so it is not ours. The initial rendering used to
+        // emit the first character raw while the full rendering escaped — one tally, two answers
+        // to the question `crates/page/src/lib.rs::esc` exists to answer. Both go through it now.
+        assert_eq!(counted(["<script>"].into_iter()), "1&#8239;&lt;");
+        assert_eq!(spread(["<b>"].into_iter(), esc), "1&#8239;&lt;b&gt;");
+
+        // The positive control: an ordinary verdict is unchanged by the escaper, so the assertion
+        // above is not passing because everything is being mangled.
+        assert_eq!(spread(["PASS"].into_iter(), esc), "1&#8239;PASS");
     }
 
     #[test]

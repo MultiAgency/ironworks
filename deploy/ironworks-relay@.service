@@ -7,38 +7,47 @@
 #
 # It names no record store. A tenant's store is a per-tenant credential and endpoint in the
 # registry this unit already passes as --registry, so naming one here asserted a fact the unit
-# cannot know. It used to name `rustworks-devstore.service`, which made every relay pull up the
+# cannot know. It used to name `ironworks-devstore.service`, which made every relay pull up the
 # synthetic store whether or not anything read it: measured 2026-09-04 on a host serving from the
 # Account Service, where `systemctl disable` did not hold because `Wants=` restarted it and
 # `systemctl mask` refused while the unit file was installed.
 Description=Rust IronWorks relay loop (one process per cycle)
-After=network-online.target rustworks-telegram.service
-Wants=rustworks-telegram.service
+After=network-online.target ironworks-telegram@%i.service ironworks-attest@%i.service
+Wants=ironworks-telegram@%i.service ironworks-attest@%i.service
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/rustworks
+WorkingDirectory=/opt/ironworks
 # relay-loop.sh defaults to target/debug when IRONWORKS_BIN is unset. The other units name
 # target/release explicitly; without this one the loop would serve from a debug build and
 # nothing would say so.
-Environment=IRONWORKS_BIN=/opt/rustworks/target/release/ironworks
-EnvironmentFile=/etc/rustworks/relay.env
-ExecStart=/opt/rustworks/dev/relay-loop.sh \
-    --registry /var/lib/rustworks/registry.json \
-    --journal /var/lib/rustworks/serve.journal \
-    --channel http://127.0.0.1:3994
+Environment=IRONWORKS_BIN=/opt/ironworks/target/release/ironworks
+EnvironmentFile=/etc/ironworks/cell-%i.env
+EnvironmentFile=/etc/ironworks/relay-%i.env
+# CHANNEL_ADAPTER_TOKEN, the same file `ironworks-telegram@.service` reads. It is not in relay.env
+# because it is not this side's secret: it belongs to the channel adapter, both ends need the same
+# bytes, and a second copy is a second thing to rotate.
+EnvironmentFile=/etc/ironworks/channel-adapter-%i.env
+ExecStartPre=+/opt/ironworks/deploy/check-serving-cell.sh %i
+ExecStart=/opt/ironworks/dev/relay-loop.sh \
+    --registry /var/lib/ironworks/%i/registry.json \
+    --journal /var/lib/ironworks/%i/serve.journal \
+    --channel http://127.0.0.1:${ADAPTER_PORT} \
+    --confinement-attestation /run/ironworks-attest/%i/current.json
 # SIGTERM stops the loop between cycles rather than inside one, so a normal restart leaves
 # nothing for the journal to recover. A cycle mid-turn is safe too; it is just noisier.
 KillSignal=SIGTERM
 TimeoutStopSec=120
 Restart=always
 RestartSec=10
-User=rustworks
+User=ironworks-%i
+Group=ironworks-%i
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/var/lib/rustworks
+ReadWritePaths=/var/lib/ironworks/%i
+ReadOnlyPaths=/run/ironworks-attest/%i
 
 [Install]
 WantedBy=multi-user.target

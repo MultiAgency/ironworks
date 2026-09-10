@@ -14,8 +14,8 @@
 use ironworks_domain::{ChannelRef, OrgId, ServiceId, Slug};
 use std::fmt;
 
-/// What an operator asked for. **No credentials, ever** — see the module docs on
-/// [`crate::store`] for why this type has nowhere to put one.
+/// What an operator asked for. **No credentials, ever** — the crate docs say why this type has
+/// nowhere to put one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceSpec {
     pub slug: Slug,
@@ -31,7 +31,7 @@ pub struct InstanceSpec {
 /// reference keeps the order in one Python list precisely because it is the contract between the
 /// provisioning script and the journal; here the contract is the type.
 ///
-/// **[`Self::Activated`] is deliberately absent.** Activation requires
+/// **A `Stage::Activated` is deliberately absent.** Activation requires
 /// [`SmokeEvidence`], so it is a variant of [`ProvisionProgress`] rather than a stage — which
 /// makes "activated without a passing smoke" unrepresentable instead of merely disallowed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

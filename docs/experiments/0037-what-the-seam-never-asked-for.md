@@ -186,7 +186,7 @@ text**, so a turn's output is observable while it runs rather than only after it
 frame's `cursor` is the resume token — `Last-Event-ID` or `?after_cursor=` — so a dropped connection
 resumes from stored state.
 
-That last point is the one that bears on `docs/adr/0002`. The ADR declined `stream: true` because "a
+That last point is the one that bears on `docs/adr/0002-create-then-poll-not-streaming.md`. The ADR declined `stream: true` because "a
 dropped stream would reopen exactly the ambiguity this design exists to close", and **that reasoning
 is correct and is not disturbed**: it is about the create call's own response body. The thread
 projection is a different object, read on a different route, after create has returned.

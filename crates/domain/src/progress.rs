@@ -1,6 +1,6 @@
 //! The narrowest possible window between a channel coordinator and a tenant's work.
 //!
-//! # Why this trait is one method returning two values
+//! # Why this trait is one method with a three-valued answer
 //!
 //! A channel cursor is **shared across tenants**: one inbound stream, one offset, and every
 //! tenant's unfinished work constrains where it may be. So the thing that computes the cursor is
@@ -12,12 +12,17 @@
 //! holding tenant business context, and no amount of care at the call sites would take that
 //! authority back.
 //!
-//! So the coordinator is given exactly one question to ask and exactly two answers to receive.
+//! So the coordinator is given exactly one question to ask and exactly three answers to receive.
 //! It cannot learn a tenant's org, its records, its persona, its question, or its answer,
 //! because there is no method that returns any of them:
 //!
 //! > **Channel-level state may coordinate ordering across tenants, but may never acquire tenant
 //! > business authority or model context.**
+//!
+//! The third answer widens the *vocabulary* without widening the *scope*, which is why it is
+//! admissible here at all. [`Openness::Unestablished`] is not a fourth thing known about the
+//! tenant's turn — it is the statement that the store did not answer, and it is exactly as silent
+//! about org, records, persona, question and answer as the other two.
 //!
 //! This is enforced twice. Here, by the shape of the trait; and in `ironworks-channel`, by a
 //! test over that crate's own `Cargo.toml` asserting it does not depend on the crates where
@@ -68,17 +73,45 @@ impl fmt::Display for NonEmptyReason {
 /// decide. Treating it as still-open would be the more cautious-looking choice and is the wrong
 /// one — the channel offset would stop advancing, and every conversation behind that one update
 /// would go unanswered while the bridge looked healthy.
+///
+/// # Why there are three values and not two
+///
+/// The two above are both *answers about a turn*, and a two-valued type forces a store that could
+/// not answer to pick one of them. Picking `Open` stalls; picking `Settled` is a control failing
+/// open — it reports a live, billed, undelivered turn as finished, and the barrier moves past it.
+///
+/// This is the shape the tree already uses wherever an answer might not have been obtained:
+/// `RouteState` (Present/Absent/Ambiguous), the `DeliveryState` lattice, and `Rebuild`
+/// (Matches/Differs/Unestablished). *A control fails closed; a data source degrades* — and the
+/// journal, here, is the control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Openness {
     /// Automatic work remains. The cursor may not advance past this.
     Open,
     /// No automatic work remains, for any reason — delivered, abandoned, or parked for a human.
     Settled,
+    /// **A read that failed has established nothing.**
+    ///
+    /// Not a third kind of progress: it is the absence of an answer, and it must not be collapsed
+    /// into either of the answers. `Settled` would say the turn is finished when nothing was read
+    /// to say so, and `Open` would claim a live turn on the same absent evidence — the first
+    /// loses an answer a client is waiting for, the second invents work that may not exist.
+    ///
+    /// It **holds the barrier**, like `Open`, because that is the recoverable direction: an
+    /// update the channel keeps redelivering costs a redelivery, and one the channel has been
+    /// told to forget costs the answer.
+    Unestablished,
 }
 
 impl Openness {
-    pub fn is_open(self) -> bool {
-        matches!(self, Self::Open)
+    /// Whether this update may hold the shared cursor where it is.
+    ///
+    /// Deliberately not `is_open`. The cursor's question is *may the offset pass this?*, which is
+    /// not the same as *is there work outstanding?* — an unread row has no known work and still
+    /// may not be passed, and a predicate named for the second question answers the first wrongly
+    /// by being read too quickly.
+    pub fn holds_barrier(self) -> bool {
+        matches!(self, Self::Open | Self::Unestablished)
     }
 }
 
@@ -90,5 +123,9 @@ pub trait TurnProgress {
     /// `Settled` for a key that was never journalled: an update whose turn does not exist has no
     /// automatic work outstanding. The alternative — treating "unknown" as `Open` — would let a
     /// typo or a compacted row stall the cursor permanently.
+    ///
+    /// [`Openness::Unestablished`] for a key the implementation could not read. *No row* and *no
+    /// answer* are different facts and this is the method that must keep them apart: the first is
+    /// a measurement, the second is the absence of one.
     fn openness(&self, key: &IdempotencyKey) -> Openness;
 }

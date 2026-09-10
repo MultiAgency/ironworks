@@ -39,8 +39,9 @@
 //! response *claims*, never which book it is served from — the credential's scope is what the
 //! client must notice diverging.
 
+use ironworks_devhttp::{respond, respond_text};
 use std::collections::BTreeMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -118,7 +119,13 @@ fn main() {
         .books
         .iter()
         .map(|(org, path)| {
-            let records = load_book(path);
+            let records = load_book(path).unwrap_or_else(|problems| {
+                eprintln!("devstore: book for org {org:?} at {path} has unusable record(s):");
+                for problem in &problems {
+                    eprintln!("  {problem}");
+                }
+                std::process::exit(64);
+            });
             assert!(!records.is_empty(), "devstore: book for org {org:?} at {path} is empty");
             (org.clone(), records)
         })
@@ -258,11 +265,13 @@ fn append_activity(
         "body": note,
         "contributor": contributor,
     });
+    // `load_book` refuses a record with no activities array at startup, so this holds for every
+    // record in every book this process is serving.
     let activities = record
         .body
         .get_mut("activities")
         .and_then(serde_json::Value::as_array_mut)
-        .expect("a record fixture carries an activities array");
+        .expect("startup refuses a record with no activities array");
     if let Some(existing) = activities
         .iter()
         .find(|a| a.get("activity_id").and_then(|v| v.as_str()) == Some(activity_id.as_str()))
@@ -394,12 +403,22 @@ struct Record {
 /// A lone file is allowed because a book is a set of records and some are a set of one. The
 /// tenant fixtures sit beside each other in `fixtures/tenants/`, so pointing an org at that
 /// directory would serve both tenants to both — the exact confusion the org key exists to stop.
-fn load_book(path: &str) -> Vec<Record> {
-    let meta =
-        std::fs::metadata(path).unwrap_or_else(|e| panic!("devstore: cannot read {path}: {e}"));
+///
+/// # Every unusable file is named, and none is skipped
+///
+/// This used to be a `filter_map` whose body was a chain of `?` over `Option`, so a record that
+/// was unreadable, unparseable, or missing a field simply was not in the book — and only a book
+/// where *every* file failed would trip the emptiness refusal below. A proof then ran against a
+/// book quietly short of records, which is the state in which a scope or isolation check passes
+/// without measuring what it names.
+///
+/// `activities` is checked here rather than at the first `POST /append_activity`, because that is
+/// what turns a mid-run panic into a startup refusal an operator can read.
+fn load_book(path: &str) -> Result<Vec<Record>, Vec<String>> {
+    let meta = std::fs::metadata(path).map_err(|e| vec![format!("cannot read {path}: {e}")])?;
     let mut paths: Vec<std::path::PathBuf> = if meta.is_dir() {
         std::fs::read_dir(path)
-            .unwrap_or_else(|e| panic!("devstore: cannot read {path}: {e}"))
+            .map_err(|e| vec![format!("cannot read {path}: {e}")])?
             .filter_map(Result::ok)
             .map(|e| e.path())
             .filter(|p| p.extension().is_some_and(|x| x == "json"))
@@ -408,18 +427,39 @@ fn load_book(path: &str) -> Vec<Record> {
         vec![std::path::PathBuf::from(path)]
     };
     paths.sort();
-    paths
-        .iter()
-        .filter_map(|p| {
-            let raw = std::fs::read_to_string(p).ok()?;
-            let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
-            let id = v.get("record_id")?.as_str()?.to_string();
-            let name = v.get("account")?.get("name")?.as_str()?.to_string();
-            // A stable synthetic version, so freshness comparisons have something to compare.
-            let updated_at = format!("2026-08-01T00:00:{:02}+00:00", id.len() % 60);
-            Some(Record { id, name, updated_at, body: v })
-        })
-        .collect()
+    let (mut records, mut problems) = (Vec::new(), Vec::new());
+    for p in &paths {
+        let where_ = p.display().to_string();
+        match record_from(p) {
+            Ok(record) => records.push(record),
+            Err(why) => problems.push(format!("{where_}: {why}")),
+        }
+    }
+    if problems.is_empty() { Ok(records) } else { Err(problems) }
+}
+
+/// One record file, or what is wrong with it.
+fn record_from(path: &std::path::Path) -> Result<Record, String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let id = v
+        .get("record_id")
+        .and_then(serde_json::Value::as_str)
+        .ok_or("no string record_id")?
+        .to_owned();
+    let name = v
+        .get("account")
+        .and_then(|a| a.get("name"))
+        .and_then(serde_json::Value::as_str)
+        .ok_or("no string account.name")?
+        .to_owned();
+    if !v.get("activities").is_some_and(serde_json::Value::is_array) {
+        // `append_activity` appends into this array and has nowhere to put a note without it.
+        return Err("no activities array".to_owned());
+    }
+    // A stable synthetic version, so freshness comparisons have something to compare.
+    let updated_at = format!("2026-08-01T00:00:{:02}+00:00", id.len() % 60);
+    Ok(Record { id, name, updated_at, body: v })
 }
 
 fn handle(
@@ -428,42 +468,20 @@ fn handle(
     books: &std::sync::Mutex<BTreeMap<String, Vec<Record>>>,
     seen: &AtomicUsize,
 ) {
+    ironworks_devhttp::set_timeouts(&stream);
     let mut reader = BufReader::new(match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
     });
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() {
-        return;
-    }
-    let mut token = String::new();
-    let mut length = 0usize;
-    loop {
-        let mut h = String::new();
-        match reader.read_line(&mut h) {
-            Ok(0) | Err(_) => break,
-            Ok(_) if h == "\r\n" || h == "\n" => break,
-            Ok(_) => {
-                let lower = h.to_ascii_lowercase();
-                if let Some(v) = lower.strip_prefix("x-service-token:") {
-                    token = v.trim().to_string();
-                }
-                if let Some(v) = lower.strip_prefix("content-length:") {
-                    length = v.trim().parse().unwrap_or(0);
-                }
-            }
-        }
-    }
-    let mut body_bytes = vec![0u8; length];
-    if length > 0 {
-        use std::io::Read as _;
-        if reader.read_exact(&mut body_bytes).is_err() {
-            return;
-        }
-    }
-    let method = request_line.split_whitespace().next().unwrap_or("").to_string();
-    let target = request_line.split_whitespace().nth(1).unwrap_or("/").to_string();
-    let (path, query) = target.split_once('?').unwrap_or((target.as_str(), ""));
+    let request = match ironworks_devhttp::read(&mut reader) {
+        Ok(request) => request,
+        Err(why) => return ironworks_devhttp::respond_refusal(&mut stream, why),
+    };
+    // The name is folded and the value is not — `Request::header` carries that rule and the
+    // incident behind it.
+    let token = request.header("x-service-token").unwrap_or("").to_owned();
+    let body_bytes = request.body;
+    let (method, path, query) = (request.method, request.path.as_str(), request.query.as_str());
 
     // Liveness is NOT counted. `--drift-after` and `--fail-after` key on the position of a
     // request in the CHAIN, and a caller that polls /health until the store is up would
@@ -556,34 +574,24 @@ fn handle(
     }
 }
 
-fn respond(stream: &mut TcpStream, status: u16, body: &str) {
-    write_response(stream, status, "application/json", body);
-}
-
-fn respond_text(stream: &mut TcpStream, status: u16, body: &str) {
-    write_response(stream, status, "text/plain; charset=utf-8", body);
-}
-
-fn write_response(stream: &mut TcpStream, status: u16, content_type: &str, body: &str) {
-    let response = format!(
-        "HTTP/1.1 {status} X\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
-         Connection: close\r\n\r\n{body}",
-        body.len()
-    );
-    let _ = stream.write_all(response.as_bytes());
-    let _ = stream.flush();
-}
-
+/// Percent-decoding, over bytes throughout.
+///
+/// The escape is a byte-level encoding, so the two hex digits are read as bytes rather than by
+/// re-slicing the `&str`. That re-slice was `&s[i + 1..i + 3]`, which panics whenever a multi-byte
+/// character follows a `%` — the offsets are arbitrary, and `str` refuses a cut inside a character.
+/// `handle` calls this on a query string from the accept loop with no unwind guard, so the panic
+/// was the whole fixture, on input a caller chooses.
 fn percent_decode(s: &str) -> String {
     let b = s.as_bytes();
     let mut out = Vec::with_capacity(b.len());
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%'
-            && i + 2 < b.len()
-            && let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16)
+        // `i + 2 < b.len()` would refuse the escape at the very end of the string; the pair needs
+        // `i + 1` and `i + 2` to exist, which is `i + 2 <= b.len() - 1`.
+        if let (b'%', Some(hi), Some(lo)) = (b[i], b.get(i + 1), b.get(i + 2))
+            && let (Some(hi), Some(lo)) = ((*hi as char).to_digit(16), (*lo as char).to_digit(16))
         {
-            out.push(v);
+            out.push((hi * 16 + lo) as u8);
             i += 3;
             continue;
         }
@@ -596,6 +604,27 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `%` followed by a multi-byte character must not take the store down.
+    ///
+    /// `handle` runs on the accept loop with no unwind guard, so a panic here is the whole fixture
+    /// dying mid-proof — and `account_id=` is a query string, which is to say caller input. The
+    /// decode used to re-slice the `&str` at `i+1..i+3`, byte offsets that land inside a character
+    /// whenever one follows the `%`.
+    #[test]
+    fn a_percent_before_a_multibyte_character_decodes_rather_than_panicking() {
+        for raw in ["%€", "ACME-001%€", "%ü%", "100%", "%", "%A", "%ZZ", "a%2Gb"] {
+            let _ = percent_decode(raw);
+        }
+        // Positive control: the escapes this exists to decode still decode, so the cases above
+        // are not passing against a function that gave up and returned its input.
+        assert_eq!(percent_decode("ACME%2D001"), "ACME-001");
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("%E2%82%AC"), "€", "a percent-encoded multi-byte character");
+        // Not an escape, so it survives untouched rather than being eaten.
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%ZZ"), "%ZZ");
+    }
 
     /// The production contract, exercised through the same function the route uses.
     ///

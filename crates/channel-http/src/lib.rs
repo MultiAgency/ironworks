@@ -16,6 +16,21 @@
 //!
 //! It speaks to `ironworks-devchannel` today. A real channel is a second implementation behind the
 //! same surface, not a second crate.
+//!
+//! # The credential
+//!
+//! A real adapter authenticates and a fixture does not, so both constructors exist and the call
+//! site says which far end it is talking to. The reason is on the `/poll` side rather than the
+//! `/send` side: **the offset is the acknowledgement**, so an unauthenticated adapter is a way for
+//! any process that can reach it to discard a channel's whole pending backlog, before a single
+//! update has been journalled and with nothing left to recover from.
+//!
+//! What that does to the reader here is worth stating, because it is the half a refusal gets
+//! wrong. An adapter's refusal *before it contacts the far system* is provable absence: it carries
+//! `"accepted": false`, [`Channel::send`] reports [`AttemptOutcome::Rejected`], and a resend
+//! cannot duplicate. The same refusal read by [`Channel::poll`] carries no `updates` array, so it
+//! is [`ChannelError::Malformed`] and the cursor stays where it is — an empty array would read as
+//! *nothing is waiting* and acknowledge through the offset that was just refused.
 
 use ironworks_domain::{ActorRef, AttemptOutcome, ChatKind};
 use std::time::Duration;
@@ -49,13 +64,77 @@ impl std::fmt::Display for ChannelError {
     }
 }
 
+/// The credential a channel adapter requires, held only so it can be presented.
+///
+/// No `Display`, a redacting `Debug`, and the only way out is an `Authorization` header — so this
+/// value reaches a log through a deliberate change rather than a stray `{:?}` on a `Channel`.
+///
+/// **Deliberately not `ironworks_records::Secret`.** That type has exactly this shape, and reusing
+/// it would mean this adapter depends on another adapter. Adapter crates are what make "who can
+/// talk to what" answerable by reading the dependency graph, and an edge between two of them ends
+/// that property to save a dozen lines. The duplication is the cheaper thing to keep in sync.
+struct AdapterToken(String);
+
+impl AdapterToken {
+    fn header(&self) -> String {
+        format!("Bearer {}", self.0)
+    }
+}
+
+impl std::fmt::Debug for AdapterToken {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("AdapterToken(redacted)")
+    }
+}
+
 pub struct Channel {
     agent: ureq::Agent,
     base: String,
+    /// Present when the adapter on the other end requires one. `None` is not a laxer mode of the
+    /// same thing: it is the shape of an adapter that authenticates nothing, which is what
+    /// `devchannel` is and what a real one must never be.
+    token: Option<AdapterToken>,
 }
 
+// ── the HTTP budget ─────────────────────────────────────────────────────────────────────────
+//
+// Named rather than chained inline, because this exact ladder is written in four other crates and
+// `crates/ironclaw/src/client.rs::Ironclaw::new` deliberately runs a longer one. That intentional
+// difference was invisible against five silent copies of the same eight-call chain; against named
+// constants it is a diff on a number. The crates cannot share the values without an edge none of
+// them should have, so each states its own and says which system it is stating them about.
+
+/// DNS for the channel adapter.
+const RESOLVE: Duration = Duration::from_secs(5);
+/// TCP connect to the channel adapter.
+const CONNECT: Duration = Duration::from_secs(5);
+/// Writing the request to the channel adapter.
+const SEND: Duration = Duration::from_secs(10);
+/// Waiting for the channel adapter to begin answering.
+const RECV_RESPONSE: Duration = Duration::from_secs(30);
+/// Reading the channel adapter's answer.
+const RECV_BODY: Duration = Duration::from_secs(30);
+
 impl Channel {
+    /// A channel that presents no credential. The proofs' `devchannel` reads none.
     pub fn new(base: impl Into<String>) -> Self {
+        Self::build(base, None)
+    }
+
+    /// A channel that presents `token` on every request.
+    ///
+    /// Beside [`Channel::new`] rather than replacing it, because the two are different facts about
+    /// the far end rather than a setting: a channel is either one that authenticates or one that
+    /// does not, and choosing at the call site keeps the answer readable there.
+    ///
+    /// **Deploy the caller before the adapter that requires it.** A relay sending a token an
+    /// adapter ignores is a working channel; an adapter requiring a token no relay sends is a
+    /// stopped one. `deploy/README.md` carries the ordering.
+    pub fn authenticated(base: impl Into<String>, token: impl Into<String>) -> Self {
+        Self::build(base, Some(AdapterToken(token.into())))
+    }
+
+    fn build(base: impl Into<String>, token: Option<AdapterToken>) -> Self {
         // `http_status_as_error(false)`, for the reason the runtime client gives and this file
         // learned the hard way: **HTTP status is not the success signal.** With the default, a
         // channel answering `409 {"accepted": false}` — an explicit, provable refusal — arrives
@@ -67,16 +146,28 @@ impl Channel {
         // say whether anything was attempted, and here that distinction *is* the evidence.
         let config = ureq::Agent::config_builder()
             .timeout_global(None)
-            .timeout_resolve(Some(Duration::from_secs(5)))
-            .timeout_connect(Some(Duration::from_secs(5)))
-            .timeout_send_request(Some(Duration::from_secs(10)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .timeout_recv_body(Some(Duration::from_secs(30)))
+            .timeout_resolve(Some(RESOLVE))
+            .timeout_connect(Some(CONNECT))
+            .timeout_send_request(Some(SEND))
+            .timeout_recv_response(Some(RECV_RESPONSE))
+            .timeout_recv_body(Some(RECV_BODY))
             .http_status_as_error(false)
             .build();
         Self {
             agent: ureq::Agent::new_with_config(config),
             base: base.into().trim_end_matches('/').to_owned(),
+            token,
+        }
+    }
+
+    /// Attach this channel's credential to a request, if it has one to present.
+    ///
+    /// The one place the header is set. Every request leaves through here, so a call site cannot
+    /// forget the dance and send an unauthenticated request that looks like every other one.
+    fn authorize<Any>(&self, request: ureq::RequestBuilder<Any>) -> ureq::RequestBuilder<Any> {
+        match &self.token {
+            Some(token) => request.header("authorization", token.header()),
+            None => request,
         }
     }
 
@@ -88,8 +179,7 @@ impl Channel {
     /// acknowledges, and why `DELIVERED` and `ACKED` cannot be one fact.
     pub fn poll(&self, offset: u64) -> Result<Vec<Inbound>, ChannelError> {
         let body = self
-            .agent
-            .get(format!("{}/poll?offset={offset}", self.base))
+            .authorize(self.agent.get(format!("{}/poll?offset={offset}", self.base)))
             .call()
             .map_err(|e| ChannelError::Unreachable(e.to_string()))?
             .body_mut()
@@ -157,12 +247,12 @@ impl Channel {
             let last = i + 1 == chunks.len();
             let payload =
                 serde_json::json!({ "channel": channel, "text": chunk, "last": last }).to_string();
-            match self
-                .agent
-                .post(format!("{}/send", self.base))
-                .header("content-type", "application/json")
-                .send(&payload)
-            {
+            let request = self.authorize(
+                self.agent
+                    .post(format!("{}/send", self.base))
+                    .header("content-type", "application/json"),
+            );
+            match request.send(&payload) {
                 Ok(mut r) => {
                     // Three-valued on purpose. `Some(false)` is the channel saying no; `None` is
                     // a reply this code could not read, which is NOT the same thing and must not
@@ -443,7 +533,7 @@ pub fn echoes_exactly(text: &str) -> bool {
 /// **The only way to produce chunks**, and that is the point. §E-15 requires stripping to happen
 /// before chunking, so that a marker is never split across two messages and the chunk count
 /// describes bytes a client can actually read. Ordering two public functions correctly is a rule
-/// a call site can forget; one function that does both is a rule it cannot. [`chunk`] is private
+/// a call site can forget; one function that does both is a rule it cannot. `chunk` is private
 /// for exactly that reason — there is no way to reach it with unstripped text.
 pub fn plain_chunks(text: &str, limit: usize) -> Vec<String> {
     chunk(&to_plain(text), limit)
@@ -500,6 +590,124 @@ fn chunk(text: &str, limit: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+
+    /// A stand-in channel adapter: one canned reply per request, and a record of the request head
+    /// it saw.
+    ///
+    /// The recording is the point. Whether a credential was *sent* is not visible in the reply, so
+    /// a test that only reads replies cannot tell an authenticated channel from one that quietly
+    /// dropped the header.
+    fn stub_channel(status: u16, body: &'static str) -> (String, Arc<Mutex<Vec<String>>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind the stub channel");
+        let port = listener.local_addr().expect("the stub channel's address").port();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let record = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            'accept: for stream in listener.incoming() {
+                let Ok(mut sock) = stream else { continue };
+                let Ok(clone) = sock.try_clone() else { continue };
+                let mut reader = BufReader::new(clone);
+                let mut head = String::new();
+                let mut length = 0usize;
+                loop {
+                    let mut line = String::new();
+                    if !reader.read_line(&mut line).is_ok_and(|n| n > 0) {
+                        continue 'accept;
+                    }
+                    if line == "\r\n" || line == "\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap_or(0);
+                    }
+                    head.push_str(&line);
+                }
+                let mut discard = vec![0u8; length];
+                if length > 0 && reader.read_exact(&mut discard).is_err() {
+                    continue;
+                }
+                record.lock().expect("the record survives its writers").push(head);
+                let reply = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\nconnection: close\r\ncontent-length: {}\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(reply.as_bytes());
+                let _ = sock.flush();
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), seen)
+    }
+
+    #[test]
+    fn an_authenticated_channel_presents_its_credential_and_a_plain_one_presents_none() {
+        let (base, seen) = stub_channel(200, r#"{"updates":[]}"#);
+        Channel::authenticated(base.as_str(), "adapter-secret").poll(7).expect("an empty poll");
+        // The control: the same stub and the same call, through the constructor that carries no
+        // credential. Without it, a stub that recorded nothing would pass the assertion below.
+        Channel::new(base.as_str()).poll(7).expect("an empty poll");
+
+        let seen = seen.lock().expect("the record survives its writers");
+        assert_eq!(seen.len(), 2, "both polls must have arrived: {seen:?}");
+        let authenticated = seen[0].to_ascii_lowercase();
+        assert!(
+            authenticated.contains("authorization: bearer adapter-secret"),
+            "the credential never left: {}",
+            seen[0]
+        );
+        assert!(!seen[1].to_ascii_lowercase().contains("authorization"), "{}", seen[1]);
+    }
+
+    #[test]
+    fn the_credential_does_not_leak_through_debug() {
+        assert_eq!(
+            format!("{:?}", AdapterToken("adapter-secret".into())),
+            "AdapterToken(redacted)"
+        );
+        // The control: the value really is in there, so the assertion above is redaction rather
+        // than an empty newtype.
+        assert_eq!(AdapterToken("adapter-secret".into()).header(), "Bearer adapter-secret");
+    }
+
+    /// The refusal an adapter generates **before** contacting the far system, read the way this
+    /// crate actually reads it. Both arms, because collapsing them is the defect.
+    #[test]
+    fn an_adapter_refusal_is_rejected_and_a_reply_this_code_cannot_read_is_not() {
+        let (base, _seen) = stub_channel(401, r#"{"accepted":false}"#);
+        assert_eq!(
+            Channel::new(base.as_str()).send("-100", &["hello".to_owned()]),
+            AttemptOutcome::Rejected,
+            "provable absence is the one outcome that licenses a free retry"
+        );
+
+        // The control, and the other arm. A refusal after contact carries no `accepted` field at
+        // all, and must not arrive as the same answer.
+        let (base, _seen) = stub_channel(502, r#"{"delivery":"unknown"}"#);
+        assert_eq!(
+            Channel::new(base.as_str()).send("-100", &["hello".to_owned()]),
+            AttemptOutcome::Ambiguous { acknowledged_chunks: 0 }
+        );
+    }
+
+    /// The same refusal on the poll side, where a *tidier* body would be the damage: an empty
+    /// `updates` array reads as "nothing is waiting" and acknowledges through the offset.
+    #[test]
+    fn a_refused_poll_is_malformed_rather_than_an_empty_one() {
+        let (base, _seen) = stub_channel(401, r#"{"accepted":false}"#);
+        // Destructured rather than `expect_err`, which would need `Inbound: Debug` — and a Debug
+        // on the struct carrying a client's own message text is not a thing to add for a test.
+        let Err(err) = Channel::new(base.as_str()).poll(41) else {
+            panic!("a refusal must not read as a poll");
+        };
+        assert!(matches!(err, ChannelError::Malformed(_)), "{err:?}");
+
+        // The control: the same code path and a body that does carry the array reads as an empty
+        // poll, so the assertion above measures the missing key rather than the status code.
+        let (base, _seen) = stub_channel(200, r#"{"updates":[]}"#);
+        assert!(Channel::new(base.as_str()).poll(41).expect("an empty poll").is_empty());
+    }
 
     #[test]
     fn the_proposal_echo_survives_this_transport_word_for_word() {

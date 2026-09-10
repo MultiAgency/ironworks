@@ -174,6 +174,7 @@ version = "0.0.0"
 dependencies = [
  "ironworks-domain",
  "ironworks-journal",
+ "ironworks-store",
  "rusqlite",
  "thiserror",
 ]
@@ -208,6 +209,9 @@ dependencies = [
  "ironworks-reconcile",
  "ironworks-records",
  "ironworks-services",
+ "ironworks-testkit",
+ "rusqlite",
+ "serde",
  "serde_json",
  "sha2",
 ]
@@ -216,14 +220,20 @@ dependencies = [
 name = "ironworks-devchannel"
 version = "0.0.0"
 dependencies = [
+ "ironworks-devhttp",
  "serde_json",
  "sha2",
 ]
 
 [[package]]
+name = "ironworks-devhttp"
+version = "0.0.0"
+
+[[package]]
 name = "ironworks-devstore"
 version = "0.0.0"
 dependencies = [
+ "ironworks-devhttp",
  "ironworks-domain",
  "serde_json",
 ]
@@ -242,8 +252,10 @@ dependencies = [
 name = "ironworks-eval"
 version = "0.0.0"
 dependencies = [
+ "ironworks-domain",
  "ironworks-evidence",
  "ironworks-graders",
+ "ironworks-services",
  "serde_json",
  "sha2",
 ]
@@ -253,8 +265,11 @@ name = "ironworks-evidence"
 version = "0.0.0"
 dependencies = [
  "ironworks-domain",
+ "ironworks-store",
+ "rusqlite",
  "serde_json",
  "sha2",
+ "thiserror",
 ]
 
 [[package]]
@@ -268,7 +283,6 @@ dependencies = [
  "ironworks-domain",
  "serde",
  "serde_json",
- "thiserror",
  "ureq",
 ]
 
@@ -277,7 +291,9 @@ name = "ironworks-journal"
 version = "0.0.0"
 dependencies = [
  "ironworks-domain",
+ "ironworks-store",
  "rusqlite",
+ "sha2",
  "thiserror",
 ]
 
@@ -300,6 +316,7 @@ name = "ironworks-proposals"
 version = "0.0.0"
 dependencies = [
  "ironworks-domain",
+ "ironworks-store",
  "rusqlite",
  "thiserror",
 ]
@@ -322,6 +339,7 @@ dependencies = [
  "ironworks-domain",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror",
  "ureq",
 ]
@@ -343,9 +361,18 @@ version = "0.0.0"
 dependencies = [
  "ironworks-domain",
  "ironworks-evidence",
- "ironworks-graders",
  "ironworks-page",
+ "ironworks-services",
  "serde_json",
+]
+
+[[package]]
+name = "ironworks-store"
+version = "0.0.0"
+dependencies = [
+ "ironworks-domain",
+ "rusqlite",
+ "thiserror",
 ]
 
 [[package]]
@@ -355,6 +382,10 @@ dependencies = [
  "serde_json",
  "ureq",
 ]
+
+[[package]]
+name = "ironworks-testkit"
+version = "0.0.0"
 
 [[package]]
 name = "itoa"

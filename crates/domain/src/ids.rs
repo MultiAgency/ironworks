@@ -212,6 +212,13 @@ pub struct CredentialRef {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CredentialPurpose {
+    /// Changes operator-owned IronClaw configuration for one instance.
+    ///
+    /// This is deliberately distinct from [`Self::RuntimeMember`]: both cross HTTP as bearer
+    /// tokens, but a member is tenant-serving authority while this can change shared runtime
+    /// policy. Treating them as one purpose would leave that distinction to an environment-variable
+    /// name at the call site.
+    OperatorConfiguration,
     /// Authenticates as the tenant's sealed runtime member.
     RuntimeMember,
     /// Resolves to exactly one org in the record store. **Reads only.**
@@ -233,6 +240,14 @@ pub enum CredentialPurpose {
     /// append handle inside it would be one refactor away from a model input. The construction
     /// refuses it in either credential slot, so the separation is checked rather than intended.
     RecordAppend,
+    /// Produces a complete scoped book export. It cannot select an organization.
+    RecordExport,
+    /// Appends a correction that supersedes historical evidence.
+    RecordCorrect,
+    /// Appends a retraction tombstone; it never deletes the target evidence.
+    RecordRetract,
+    /// Deletes every record in the credential's resolved organization during deprovisioning.
+    RecordDelete,
 }
 
 impl CredentialRef {
@@ -260,7 +275,9 @@ mod tests {
 
     #[test]
     fn slugs_reject_anything_that_is_not_a_slug() {
-        assert!(Slug::parse("acme-sales").is_ok());
+        // The positive control, asserting the *value*: `is_ok()` alone would pass for a
+        // parser that accepted this and returned something else.
+        assert_eq!(Slug::parse("acme-sales").unwrap().as_str(), "acme-sales");
         for bad in ["", "Acme", "acme_sales", "acme sales", "acme/sales"] {
             assert!(Slug::parse(bad).is_err(), "{bad:?}");
         }

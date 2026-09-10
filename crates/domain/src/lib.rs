@@ -68,20 +68,20 @@
 //!     "acme", "account-analysis",
 //! ).unwrap();
 //!
-//! let instance = ServiceInstance::new(
-//!     Slug::parse("acme").unwrap(),
+//! let instance = ServiceInstance::new(InstanceParts {
+//!     slug: Slug::parse("acme").unwrap(),
 //!     definition,
 //!     guidance,
-//!     RuntimeIdentity::parse("member-1").unwrap(),
-//!     CredentialRef::new(CredentialPurpose::RuntimeMember, "keyring:member"),
-//!     ContextBinding::new(
+//!     runtime_identity: RuntimeIdentity::parse("member-1").unwrap(),
+//!     runtime_credential: CredentialRef::new(CredentialPurpose::RuntimeMember, "keyring:member"),
+//!     context_binding: ContextBinding::new(
 //!         CredentialRef::new(CredentialPurpose::RecordScope, "keyring:records"),
 //!     ).unwrap(),
-//!     ModelSelection::from_pin(&ModelPin::parse("m # c").unwrap()),
-//!     CapabilityProfile::READ_ONLY_RECORDS,
-//!     None,
-//!     &parts,
-//! ).unwrap();
+//!     model: ModelSelection::from_pin(&ModelPin::parse("m # c").unwrap()),
+//!     requested_capabilities: CapabilityProfile::READ_ONLY_RECORDS,
+//!     claimed_org: None,
+//!     parts: &parts,
+//! }).unwrap();
 //!
 //! // Verified first, then served.
 //! let verified = instance.verify(&Store).unwrap();
@@ -188,17 +188,19 @@
 //!
 //! # Not implemented, deliberately
 //!
-//! Approvals, workflows, effect execution, and storage compatibility. [`Access`] has no `Write`
-//! variant and [`AuthorityPath::Approvals`] reports [`AuthorityPath::implemented`] as `false`: an
-//! unimplemented capability that already has a name is one somebody eventually passes.
+//! Workflows, model effect execution, and storage compatibility. [`Access`] has no `Write`
+//! variant: an unimplemented capability that already has a name is one somebody eventually
+//! passes. Human approval is narrower and exists in the deterministic propose-and-confirm path.
 
 pub mod address;
+pub mod attestation;
 pub mod capability;
 pub mod composition;
 pub mod continuation;
 pub mod custody;
 pub mod delivery;
 pub mod envelope;
+mod finding;
 pub mod ids;
 pub mod instance;
 pub mod pins;
@@ -211,7 +213,8 @@ pub mod share;
 pub mod supply;
 
 pub use address::Addressing;
-pub use capability::{Access, CapabilityProfile, Incoherence, ToolAccess};
+pub use attestation::{AttestationError, ConfinementAttestation, NotUtc, Sha256Digest, Utc};
+pub use capability::{Access, CapabilityProfile, HumanAuthorityProfile, Incoherence, ToolAccess};
 pub use composition::{
     Alloy, Composition, CompositionError, Guidance, GuidanceError, GuidanceMarker, MeltError,
     PartRef, PartSource, melt, strip_frontmatter,
@@ -219,19 +222,20 @@ pub use composition::{
 pub use continuation::{Continuation, FreshBecause, PriorThread, ThreadLimit, decide};
 pub use custody::restrict_to_owner;
 pub use delivery::{AttemptOutcome, DeliveryState, Repair};
+pub use finding::Finding;
 pub use ids::{
     ActorRef, ContributorId, CredentialPurpose, CredentialRef, GuidanceRef, IdError,
     IdempotencyKey, InvalidId, InvalidKey, OrgId, ResponseId, RuntimeIdentity, ServiceId, Slug,
 };
 pub use instance::{
-    Ask, ContextBinding, Degradation, InstanceError, InstanceState, ModelSelection, ModelTurn,
-    RecordScope, RecordsState, ScopeEvidence, ScopeFailure, ScopeResolver, ScopeSource,
-    ServiceInstance, ServingIdentity, ThreadPointer, ThreadScope, TurnError, TurnInput, Unverified,
-    Verified, VerifyError,
+    Ask, ContextBinding, Degradation, InstanceError, InstanceParts, InstanceState, ModelName,
+    ModelSelection, ModelTurn, RecordScope, RecordsState, ReportedModel, ScopeEvidence,
+    ScopeFailure, ScopeResolver, ScopeSource, ServiceInstance, ServingIdentity, ThreadPointer,
+    ThreadScope, TurnError, TurnInput, Unverified, Verified, VerifyError,
 };
 pub use pins::ModelPin;
 pub use progress::{BlankReason, NonEmptyReason, Openness, TurnProgress};
-pub use registry::{RegistryError, TenantEntry, TenantRegistry};
+pub use registry::{ExpectedOrg, RegistryError, TenantEntry, TenantRegistry};
 pub use route::{ChannelRef, ChatKind, RouteAmbiguity, RouteState, resolve};
 pub use service::{ServiceDefinition, ServiceDefinitionError};
 pub use share::{Intent, Refusal, ShareRequest, is_command, render_echo};
@@ -320,7 +324,7 @@ pub enum AuthorityPath {
     ModelSelection,
     /// **Which records an instance may read.** Granted at provisioning, enforced server-side.
     ContextBinding,
-    /// A human gate on an effect. Not implemented.
+    /// A human gate on a deterministic effect.
     Approvals,
     /// Provision, suspend, rotate, deprovision.
     Lifecycle,
@@ -339,15 +343,6 @@ impl AuthorityPath {
         Self::Lifecycle,
         Self::Delivery,
     ];
-
-    /// Whether this path exists in the implementation yet.
-    ///
-    /// `Approvals` is a **named absence**: nothing in the extracted corpus constrains an
-    /// approval, because current capabilities are frozen at no-writes. When propose-and-confirm
-    /// arrives its invariants must be written rather than extracted.
-    pub fn implemented(&self) -> bool {
-        !matches!(self, Self::Approvals)
-    }
 }
 
 #[cfg(test)]
@@ -383,15 +378,9 @@ mod tests {
     }
 
     #[test]
-    fn model_selection_and_context_binding_are_authority_paths() {
+    fn model_selection_context_binding_and_approvals_are_authority_paths() {
         assert!(AuthorityPath::ALL.contains(&AuthorityPath::ModelSelection));
         assert!(AuthorityPath::ALL.contains(&AuthorityPath::ContextBinding));
-    }
-
-    #[test]
-    fn approvals_is_the_only_unimplemented_authority_path() {
-        let unimplemented: Vec<_> =
-            AuthorityPath::ALL.iter().filter(|a| !a.implemented()).collect();
-        assert_eq!(unimplemented, vec![&AuthorityPath::Approvals]);
+        assert!(AuthorityPath::ALL.contains(&AuthorityPath::Approvals));
     }
 }

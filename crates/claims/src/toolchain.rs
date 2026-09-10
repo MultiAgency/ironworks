@@ -22,20 +22,21 @@
 //! reason `commands` lives here: this needs a subprocess, so it runs from the binary and not from
 //! the suite.
 
-use crate::{Finding, Verdict};
+use crate::Finding;
 use std::path::Path;
 use std::process::Command;
 
 /// What the status block says about the toolchain, as written.
 ///
-/// Read rather than assumed, so deleting the claim deletes the check with it — the failure mode
-/// this crate exists to prevent is prose and tree disagreeing, and a checker that verified a
-/// sentence nobody makes any more is its own kind of drift.
+/// Read rather than assumed, because the failure mode this crate exists to prevent is prose and
+/// tree disagreeing. **A claim the block stops making is BLOCKED, not retired** — [`unclaimed`]
+/// says what retiring one silently cost.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Claimed {
     pub tests_pass: bool,
     pub clippy_clean: bool,
     pub fmt_clean: bool,
+    pub docs_clean: bool,
 }
 
 pub fn claimed(design: &str) -> Claimed {
@@ -49,7 +50,33 @@ pub fn claimed(design: &str) -> Claimed {
         tests_pass: has("cargo test --workspace", "passing"),
         clippy_clean: has("cargo clippy", "clean"),
         fmt_clean: has("cargo fmt", "clean"),
+        docs_clean: has("cargo doc", "clean"),
     }
+}
+
+/// A BLOCKED finding for every status claim `DESIGN.md` does not make.
+///
+/// **One per missing claim.** The guard this replaced fired only when all four were gone, so
+/// rewording the `cargo test --workspace … passing` line alone retired the one check that
+/// establishes the tree compiles — no finding, exit 0, and the tally still saying every claim held
+/// over a smaller denominator. A claim nobody makes is not a claim that is wrong, so each is BLOCKED
+/// under the name it would have been measured under: the measurement did not happen.
+pub fn unclaimed(claimed: Claimed) -> Vec<Finding> {
+    [
+        (claimed.tests_pass, "workspace tests", "`cargo test --workspace … passing`"),
+        (claimed.clippy_clean, "clippy", "`cargo clippy … clean`"),
+        (claimed.fmt_clean, "rustfmt", "`cargo fmt … clean`"),
+        (claimed.docs_clean, "rustdoc", "`cargo doc … clean`"),
+    ]
+    .into_iter()
+    .filter(|(made, ..)| !made)
+    .map(|(_, subject, claim)| {
+        Finding::blocked(
+            subject,
+            format!("DESIGN.md's status block does not state {claim}, so nothing measured it"),
+        )
+    })
+    .collect()
 }
 
 /// Run one cargo invocation. `None` is clean; `Some(evidence)` is a failure that kept its reason.
@@ -67,9 +94,10 @@ pub fn claimed(design: &str) -> Claimed {
 /// spending exactly the attention the harness exists to save, and a red nobody can substantiate
 /// trains its reader to skim the ones that are real. So the next occurrence arrives with the last
 /// lines the child actually printed.
-fn cargo_ok(root: &Path, args: &[&str]) -> Result<Option<String>, String> {
+fn cargo_ok(root: &Path, env: &[(&str, &str)], args: &[&str]) -> Result<Option<String>, String> {
     let out = Command::new(env!("CARGO"))
         .current_dir(root)
+        .envs(env.iter().copied())
         .args(args)
         .output()
         .map_err(|e| format!("could not run cargo: {e}"))?;
@@ -130,18 +158,19 @@ pub fn check(root: &Path) -> Vec<Finding> {
     let design = match std::fs::read_to_string(root.join("DESIGN.md")) {
         Ok(t) => t,
         Err(e) => {
-            return vec![Finding {
-                verdict: Verdict::Blocked,
-                subject: "DESIGN.md".into(),
-                detail: format!("could not be read: {e}"),
-            }];
+            return vec![Finding::blocked("DESIGN.md", format!("could not be read: {e}"))];
         }
     };
     let claimed = claimed(&design);
-    let mut out = Vec::new();
+
+    // A reader that reads nothing passes everything, and here that is the worst version of it:
+    // every arm below is skipped for a claim the status block does not make, so rewording one line
+    // would silently retire the check that establishes the tree compiles at all — the gap this
+    // module's header says it came back to close. `unclaimed` reports each such claim BLOCKED.
+    let mut out = unclaimed(claimed);
 
     if claimed.tests_pass {
-        out.push(match cargo_ok(root, &["test", "--workspace", "--quiet"]) {
+        out.push(match cargo_ok(root, &[], &["test", "--workspace", "--quiet"]) {
             Ok(None) => Finding::pass("workspace tests", "`cargo test --workspace` passes"),
             Ok(Some(evidence)) => Finding::fail(
                 "workspace tests",
@@ -149,27 +178,23 @@ pub fn check(root: &Path) -> Vec<Finding> {
                     "DESIGN.md claims `passing`; `cargo test --workspace` does not — {evidence}"
                 ),
             ),
-            Err(why) => Finding {
-                verdict: Verdict::Blocked,
-                subject: "workspace tests".into(),
-                detail: why,
-            },
+            Err(why) => Finding::blocked("workspace tests", why),
         });
     }
 
     if claimed.clippy_clean {
-        out.push(match cargo_ok(root, &["clippy", "--workspace", "--all-targets", "--quiet"]) {
-            Ok(None) => Finding::pass("clippy", "`cargo clippy --all-targets` is clean"),
-            Ok(Some(evidence)) => Finding::fail(
-                "clippy",
-                format!(
-                    "DESIGN.md claims `clean`; `cargo clippy --all-targets` is not — {evidence}"
+        out.push(
+            match cargo_ok(root, &[], &["clippy", "--workspace", "--all-targets", "--quiet"]) {
+                Ok(None) => Finding::pass("clippy", "`cargo clippy --all-targets` is clean"),
+                Ok(Some(evidence)) => Finding::fail(
+                    "clippy",
+                    format!(
+                        "DESIGN.md claims `clean`; `cargo clippy --all-targets` is not — {evidence}"
+                    ),
                 ),
-            ),
-            Err(why) => {
-                Finding { verdict: Verdict::Blocked, subject: "clippy".into(), detail: why }
-            }
-        });
+                Err(why) => Finding::blocked("clippy", why),
+            },
+        );
     }
 
     // Formatting is the third binary claim and the newest. It is checkable at all only because
@@ -178,15 +203,35 @@ pub fn check(root: &Path) -> Vec<Finding> {
     // could read a regression out of. `--check` writes nothing; a non-zero exit is the whole
     // measurement.
     if claimed.fmt_clean {
-        out.push(match cargo_ok(root, &["fmt", "--check"]) {
+        out.push(match cargo_ok(root, &[], &["fmt", "--check"]) {
             Ok(None) => Finding::pass("rustfmt", "`cargo fmt --check` is clean"),
             Ok(Some(evidence)) => Finding::fail(
                 "rustfmt",
                 format!("DESIGN.md claims `clean`; `cargo fmt --check` is not — {evidence}"),
             ),
-            Err(why) => {
-                Finding { verdict: Verdict::Blocked, subject: "rustfmt".into(), detail: why }
-            }
+            Err(why) => Finding::blocked("rustfmt", why),
+        });
+    }
+
+    if claimed.docs_clean {
+        // `--no-deps`, so this is *this* workspace's doc comments and not every dependency's.
+        // rustdoc is the only thing that evaluates `rustdoc::broken_intra_doc_links`, denied in
+        // `Cargo.toml` — neither `cargo test` nor `cargo clippy` invokes it — so without this arm
+        // that denial would be inert.
+        //
+        // **And `-D warnings`, because the claim is `clean`.** Exit status alone passed this arm
+        // over twelve warnings — public docs linking private items, an unclosed HTML tag, a
+        // redundant link target — so the word had come to mean "builds". Set here rather than
+        // for every invocation: `cargo test` hands `RUSTDOCFLAGS` to each doctest as well, and a
+        // warning inside an example is not what this arm claims anything about.
+        let deny = [("RUSTDOCFLAGS", "-D warnings")];
+        out.push(match cargo_ok(root, &deny, &["doc", "--workspace", "--no-deps", "--quiet"]) {
+            Ok(None) => Finding::pass("rustdoc", "`cargo doc --workspace --no-deps` is clean"),
+            Ok(Some(evidence)) => Finding::fail(
+                "rustdoc",
+                format!("DESIGN.md claims `clean`; `cargo doc` is not — {evidence}"),
+            ),
+            Err(why) => Finding::blocked("rustdoc", why),
         });
     }
 
@@ -203,30 +248,36 @@ mod tests {
     #[test]
     fn the_status_block_is_read_the_way_it_is_written() {
         let design = "```\ncargo test --workspace       passing\n\
-             cargo clippy --all-targets   clean\ncargo fmt --check            clean\n```";
+             cargo clippy --all-targets   clean\ncargo fmt --check            clean\n\
+             cargo doc --no-deps          clean\n```";
         assert_eq!(
             claimed(design),
-            Claimed { tests_pass: true, clippy_clean: true, fmt_clean: true }
+            Claimed { tests_pass: true, clippy_clean: true, fmt_clean: true, docs_clean: true }
         );
 
         assert_eq!(
             claimed("nothing here at all"),
-            Claimed { tests_pass: false, clippy_clean: false, fmt_clean: false },
+            Claimed { tests_pass: false, clippy_clean: false, fmt_clean: false, docs_clean: false },
             "a claim nobody makes must not be checked"
         );
 
         // Each claim is read independently: a block making one must not turn the others on.
         assert_eq!(
             claimed("cargo clippy --all-targets   clean"),
-            Claimed { tests_pass: false, clippy_clean: true, fmt_clean: false },
+            Claimed { tests_pass: false, clippy_clean: true, fmt_clean: false, docs_clean: false },
             "one claim must not carry its neighbours"
+        );
+        assert_eq!(
+            claimed("cargo doc --no-deps          clean"),
+            Claimed { tests_pass: false, clippy_clean: false, fmt_clean: false, docs_clean: true },
+            "and the newest one carries no neighbours either"
         );
 
         // A count-shaped claim is deliberately NOT read as `passing`. That form was removed
         // because it churns, and silently accepting it again would bring the churn back.
         assert_eq!(
             claimed("cargo test --workspace       677 passed"),
-            Claimed { tests_pass: false, clippy_clean: false, fmt_clean: false }
+            Claimed { tests_pass: false, clippy_clean: false, fmt_clean: false, docs_clean: false }
         );
     }
 }

@@ -6,7 +6,7 @@
 //! passes every cross-org isolation check.
 
 use super::*;
-use ironworks_domain::NonEmptyReason;
+use crate::inspect::Readiness;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -18,6 +18,14 @@ fn unlocked() -> std::collections::BTreeSet<String> {
 }
 
 const NOW: &str = "2026-08-27T12:00:00+00:00";
+
+/// The same instant, as the type the stage tables are ordered by.
+///
+/// `LifecycleStore`'s writes take `ObservedAt` rather than `&str`, because
+/// `ORDER BY at, rowid` rests on the format and nothing but the type was checking it.
+fn now() -> ObservedAt {
+    ObservedAt::parse(NOW).expect("the fixture instant is the shape the ledger orders by")
+}
 
 fn spec(slug: &str) -> InstanceSpec {
     InstanceSpec {
@@ -95,10 +103,19 @@ fn store() -> (Dir, LifecycleStore) {
     (dir, store)
 }
 
+#[test]
+fn an_online_snapshot_is_readable_and_never_overwrites() {
+    let (dir, source) = store();
+    let copy = dir.path().join("lifecycle-copy.db");
+    source.snapshot_to(&copy).unwrap();
+    assert_eq!(LifecycleStore::open_readonly(&copy).unwrap().schema_version(), 3);
+    assert!(matches!(source.snapshot_to(&copy), Err(LifecycleError::Snapshot { .. })));
+}
+
 /// Declare an instance and walk it to `through`, doing the work rather than adopting it.
 fn walk_to(store: &LifecycleStore, slug: &str, through: Stage) -> Slug {
     let s = spec(slug);
-    store.declare(&s, NOW).expect("declare");
+    store.declare(&s, &now()).expect("declare");
     for stage in Stage::ALL {
         if stage > through {
             break;
@@ -106,7 +123,15 @@ fn walk_to(store: &LifecycleStore, slug: &str, through: Stage) -> Slug {
         if stage == Stage::MemberConfined {
             certify_stage(store, &s.slug, NOW);
         } else {
-            store.reach(&s.slug, stage, false, created_for(stage).as_ref(), NOW).expect("reach");
+            store
+                .reach(
+                    &s.slug,
+                    stage,
+                    IdentityProvenance::Created,
+                    created_for(stage).as_ref(),
+                    &now(),
+                )
+                .expect("reach");
         }
     }
     s.slug
@@ -146,7 +171,8 @@ fn certify_stage(store: &LifecycleStore, slug: &Slug, now: &str) {
         &std::collections::BTreeSet::new(),
         false,
         &at,
-    );
+    )
+    .expect("complete catalogue");
     let attempt = ConfinementAttempt::measured(bound, binding.clone(), at, measurement);
     let evidence = ConfinementEvidence::from_attempt(attempt, &binding).expect("clean evidence");
     store.certify_confinement(slug, &evidence).expect("certify");
@@ -206,18 +232,24 @@ fn p4_a_member_that_exists_is_adopted_not_minted_again() {
 fn an_adopted_stage_is_distinguishable_from_one_we_performed() {
     let (_d, store) = store();
     let s = spec("acme");
-    store.declare(&s, NOW).unwrap();
+    store.declare(&s, &now()).unwrap();
     store
         .reach(
             &s.slug,
             Stage::PreflightPassed,
-            false,
+            IdentityProvenance::Created,
             created_for(Stage::PreflightPassed).as_ref(),
-            NOW,
+            &now(),
         )
         .unwrap();
     store
-        .reach(&s.slug, Stage::OrgRegistered, true, created_for(Stage::OrgRegistered).as_ref(), NOW)
+        .reach(
+            &s.slug,
+            Stage::OrgRegistered,
+            IdentityProvenance::Adopted,
+            created_for(Stage::OrgRegistered).as_ref(),
+            &now(),
+        )
         .unwrap();
 
     let history = store.history(&s.slug).unwrap();
@@ -296,7 +328,13 @@ fn a_minted_member_that_is_not_confined_cannot_stage() {
     // whose failure makes an unconfined member routable.
     let (_d, store) = store();
     let slug = walk_to(&store, "acme", Stage::MemberMinted);
-    let err = store.reach(&slug, Stage::Staged, false, created_for(Stage::Staged).as_ref(), NOW);
+    let err = store.reach(
+        &slug,
+        Stage::Staged,
+        IdentityProvenance::Created,
+        created_for(Stage::Staged).as_ref(),
+        &now(),
+    );
     assert!(
         matches!(&err, Err(LifecycleError::StageSkipped { predecessor, .. })
                  if predecessor == "member_confined"),
@@ -306,7 +344,15 @@ fn a_minted_member_that_is_not_confined_cannot_stage() {
     // Positive control: confine first and staging is recorded, so the refusal above is about the
     // gap rather than about `reach` refusing everything.
     certify_stage(&store, &slug, NOW);
-    store.reach(&slug, Stage::Staged, false, created_for(Stage::Staged).as_ref(), NOW).unwrap();
+    store
+        .reach(
+            &slug,
+            Stage::Staged,
+            IdentityProvenance::Created,
+            created_for(Stage::Staged).as_ref(),
+            &now(),
+        )
+        .unwrap();
     assert!(store.progress(&slug).unwrap().has_reached(Stage::Staged));
 }
 
@@ -396,14 +442,20 @@ fn activation_refuses_before_every_stage_is_reached() {
     )
     .unwrap();
 
-    let err = store.activate(&slug, &smoke, NOW);
+    let err = store.activate(&slug, &smoke, &now());
     assert!(matches!(err, Err(LifecycleError::NotReadyToActivate { .. })), "{err:?}");
 
     // Positive control: the same call succeeds once the last stage is recorded.
     store
-        .reach(&slug, Stage::SmokePassed, false, created_for(Stage::SmokePassed).as_ref(), NOW)
+        .reach(
+            &slug,
+            Stage::SmokePassed,
+            IdentityProvenance::Created,
+            created_for(Stage::SmokePassed).as_ref(),
+            &now(),
+        )
         .unwrap();
-    store.activate(&slug, &smoke, NOW).unwrap();
+    store.activate(&slug, &smoke, &now()).unwrap();
     assert!(matches!(store.progress(&slug).unwrap(), ProvisionProgress::Activated { .. }));
 }
 
@@ -420,7 +472,7 @@ fn activated_is_not_serving_and_serving_may_stay_unknown() {
         NOW,
     )
     .unwrap();
-    store.activate(&slug, &smoke, NOW).unwrap();
+    store.activate(&slug, &smoke, &now()).unwrap();
 
     assert!(matches!(store.progress(&slug).unwrap(), ProvisionProgress::Activated { .. }));
     assert_eq!(
@@ -514,14 +566,14 @@ fn the_store_holds_no_credential_material() {
     {
         let store = LifecycleStore::open(&path).unwrap();
         let s = spec("acme");
-        store.declare(&s, NOW).unwrap();
+        store.declare(&s, &now()).unwrap();
         store
             .reach(
                 &s.slug,
                 Stage::PreflightPassed,
-                false,
+                IdentityProvenance::Created,
                 created_for(Stage::PreflightPassed).as_ref(),
-                NOW,
+                &now(),
             )
             .unwrap();
         // The only value a caller can put in that came from a foreign system is an opaque id, and
@@ -530,9 +582,9 @@ fn the_store_holds_no_credential_material() {
             .reach(
                 &s.slug,
                 Stage::OrgRegistered,
-                true,
+                IdentityProvenance::Adopted,
                 created_for(Stage::OrgRegistered).as_ref(),
-                NOW,
+                &now(),
             )
             .unwrap();
     }
@@ -553,14 +605,14 @@ fn read_only_inspection_has_no_side_effects() {
     let s = spec("acme");
     {
         let store = LifecycleStore::open(&path).unwrap();
-        store.declare(&s, NOW).unwrap();
+        store.declare(&s, &now()).unwrap();
         store
             .reach(
                 &s.slug,
                 Stage::PreflightPassed,
-                false,
+                IdentityProvenance::Created,
                 created_for(Stage::PreflightPassed).as_ref(),
-                NOW,
+                &now(),
             )
             .unwrap();
     }
@@ -570,9 +622,9 @@ fn read_only_inspection_has_no_side_effects() {
     assert_eq!(ro.progress(&s.slug).unwrap().reached(), Some(Stage::PreflightPassed));
     assert_eq!(ro.unfinished().unwrap(), vec![s.slug.clone()]);
     // Every write refuses.
-    assert!(matches!(ro.declare(&s, NOW), Err(LifecycleError::ReadOnly)));
+    assert!(matches!(ro.declare(&s, &now()), Err(LifecycleError::ReadOnly)));
     assert!(matches!(
-        ro.reach(&s.slug, Stage::OrgRegistered, false, None, NOW),
+        ro.reach(&s.slug, Stage::OrgRegistered, IdentityProvenance::Created, None, &now()),
         Err(LifecycleError::ReadOnly)
     ));
     assert!(matches!(
@@ -701,8 +753,10 @@ fn everything_accounted_for_passes() {
     );
 
     assert_eq!(report.verdict, Verdict::Pass, "{:#?}", report.findings);
-    assert!(report.verdict.promotable());
+    assert!(report.promotable());
     assert_eq!(report.verdict.exit_code(), 0);
+    assert_eq!(report.readiness(), Readiness::Ready);
+    assert_eq!(report.exit_code(), 0);
     assert!(report.holdings.iter().all(|h| h.custody == Custody::Managed));
 }
 
@@ -729,8 +783,10 @@ fn known_unmanaged_authority_blocks() {
         &ConfinementAxis::NotRequested,
     );
     assert_eq!(report.verdict, Verdict::Blocked);
-    assert!(!report.verdict.promotable());
+    assert!(!report.promotable());
     assert_eq!(report.verdict.exit_code(), 3);
+    assert_eq!(report.readiness(), Readiness::NotReady);
+    assert_eq!(report.exit_code(), 3, "evidence BLOCKED must outrank lifecycle readiness");
     assert!(
         report.findings.iter().any(|f| f.authority == Some(Authority::Member)
             && f.note.contains("no record of creating it")),
@@ -822,6 +878,64 @@ fn an_empty_inventory_does_not_pass_vacuously() {
         &ConfinementAxis::NotRequested,
     );
     assert_eq!(measured.verdict, Verdict::Pass, "{:#?}", measured.findings);
+    assert_eq!(measured.readiness(), Readiness::NotReady);
+    assert_eq!(measured.exit_code(), 4, "NOT_READY must not masquerade as PASS or BLOCKED");
+    let text = measured.render();
+    assert!(text.contains("verdict    PASS"), "{text}");
+    assert!(text.contains("readiness  NOT_READY"), "{text}");
+}
+
+/// Readiness is a lifecycle axis, not a synonym for authority evidence or serving observation.
+///
+/// The cross-product matters: testing only `Unknown` would permit an implementation that quietly
+/// derived readiness from the serving state, while testing only clean authority at `Activated`
+/// would recreate the vacuous promotion this distinction exists to prevent.
+#[test]
+fn readiness_follows_activation_across_every_serving_observation() {
+    let serving = [
+        ServingObservation::Unknown,
+        ServingObservation::NotServing { observed_at: NOW.into() },
+        ServingObservation::Serving { observed_at: NOW.into() },
+    ];
+
+    let absent = Fixture::nothing_exists();
+    for progress in [
+        ProvisionProgress::NotStarted,
+        ProvisionProgress::Provisioning { reached: Stage::PreflightPassed },
+    ] {
+        for observed in &serving {
+            let report = inspect(
+                &spec("acme"),
+                &Recorded::from_progress(progress.clone()),
+                &absent,
+                observed,
+                &ConfinementAxis::NotRequested,
+            );
+            assert_eq!(report.verdict, Verdict::Pass, "{progress:?}, {observed:?}");
+            assert_eq!(report.readiness(), Readiness::NotReady, "{progress:?}, {observed:?}");
+            assert!(!report.promotable(), "{progress:?}, {observed:?}");
+            assert_eq!(report.exit_code(), 4);
+        }
+    }
+
+    let mut present = Fixture::default();
+    for authority in Authority::ALL {
+        present = present.present(authority, &format!("{}-1", authority.tag()));
+    }
+    let world = present.observe(&spec("acme"));
+    for observed in &serving {
+        let report = inspect(
+            &spec("acme"),
+            &recorded_all(activated()),
+            &world,
+            observed,
+            &ConfinementAxis::NotRequested,
+        );
+        assert_eq!(report.verdict, Verdict::Pass, "{observed:?}");
+        assert_eq!(report.readiness(), Readiness::Ready, "{observed:?}");
+        assert!(report.promotable(), "{observed:?}");
+        assert_eq!(report.exit_code(), 0);
+    }
 }
 
 /// Our records say we created it; the world says it is not there. That is a determinate
@@ -843,6 +957,8 @@ fn recorded_but_measured_absent_is_a_failure_not_a_block() {
     );
     assert_eq!(report.verdict, Verdict::Fail, "a measured contradiction was softened to BLOCKED");
     assert_eq!(report.verdict.exit_code(), 2);
+    assert_eq!(report.readiness(), Readiness::NotReady);
+    assert_eq!(report.exit_code(), 2, "evidence FAIL must outrank lifecycle readiness");
     assert!(report.findings.iter().any(|f| f.note.contains("disagree")));
 }
 
@@ -870,30 +986,7 @@ fn activated_reports_routable_and_serving_unknown_not_serving_true() {
     assert!(text.contains("Routable is not serving"), "{text}");
     // The finding is reported but does not block: activation's guarantee is routability.
     assert_eq!(report.verdict, Verdict::Pass);
-}
-
-/// ACCEPTED_RISK cannot be produced without a written reason, and nothing in this slice produces
-/// it at all — unmanaged authority is never normalized into it.
-#[test]
-fn accepted_risk_carries_its_reason_and_is_never_reached_by_inference() {
-    let reason =
-        NonEmptyReason::parse("laptop self-test credential, tracked in ticket 41").unwrap();
-    let v = Verdict::AcceptedRisk(reason);
-    assert!(v.promotable());
-    assert_eq!(v.exit_code(), 0);
-    assert!(v.to_string().contains("ticket 41"), "the reason must survive into the report");
-    assert_ne!(v.tag(), Verdict::Pass.tag(), "never indistinguishable from a clean pass");
-
-    // No inspection produces it. Unmanaged authority blocks; it is not waived.
-    let world = Fixture::default().present(Authority::Member, "user_stray").observe(&spec("acme"));
-    let report = inspect(
-        &spec("acme"),
-        &Recorded::from_progress(ProvisionProgress::NotStarted),
-        &world,
-        &ServingObservation::Unknown,
-        &ConfinementAxis::NotRequested,
-    );
-    assert_eq!(report.verdict, Verdict::Blocked);
+    assert_eq!(report.readiness(), Readiness::Ready);
 }
 
 /// The report is identifiers and prose. Nothing it reads from can hold a credential, so this
@@ -932,14 +1025,14 @@ fn inspection_leaves_the_store_byte_identical() {
     let s = spec("acme");
     {
         let store = LifecycleStore::open(&path).unwrap();
-        store.declare(&s, NOW).unwrap();
+        store.declare(&s, &now()).unwrap();
         store
             .reach(
                 &s.slug,
                 Stage::PreflightPassed,
-                false,
+                IdentityProvenance::Created,
                 created_for(Stage::PreflightPassed).as_ref(),
-                NOW,
+                &now(),
             )
             .unwrap();
     }
@@ -1014,10 +1107,18 @@ fn created_identifiers_are_durable_and_map_back_to_their_authority() {
     let s = spec("acme");
     {
         let store = LifecycleStore::open(&path).unwrap();
-        store.declare(&s, NOW).unwrap();
-        store.reach(&s.slug, Stage::PreflightPassed, false, None, NOW).unwrap();
+        store.declare(&s, &now()).unwrap();
         store
-            .reach(&s.slug, Stage::OrgRegistered, false, Some(&OpaqueId::new("acme-sales")), NOW)
+            .reach(&s.slug, Stage::PreflightPassed, IdentityProvenance::Created, None, &now())
+            .unwrap();
+        store
+            .reach(
+                &s.slug,
+                Stage::OrgRegistered,
+                IdentityProvenance::Created,
+                Some(&OpaqueId::new("acme-sales")),
+                &now(),
+            )
             .unwrap();
     }
     let store = LifecycleStore::open(&path).unwrap();
@@ -1042,7 +1143,7 @@ fn adoption_records_measured_identities_with_provenance_in_one_instance() {
     );
     let evidence = AdoptionEvidence::observed(&scope, subject.clone());
 
-    let spec = store.adopt(&slug, &service, &channel, &evidence, NOW).unwrap();
+    let spec = store.adopt(&slug, &service, &channel, &evidence, &now()).unwrap();
     assert_eq!(spec.org.as_str(), "measured-org");
     assert_eq!(
         store.progress(&slug).unwrap(),
@@ -1086,7 +1187,7 @@ fn adoption_refuses_an_existing_slug_instead_of_upserting_it() {
             RuntimeUserId::parse("user-a").unwrap(),
         ),
     );
-    store.adopt(&s.slug, &s.service, &s.channel, &evidence, NOW).expect("first adoption");
+    store.adopt(&s.slug, &s.service, &s.channel, &evidence, &now()).expect("first adoption");
     let before = store.recorded(&s.slug).unwrap();
 
     let replacement = AdoptionEvidence::observed(
@@ -1097,10 +1198,34 @@ fn adoption_refuses_an_existing_slug_instead_of_upserting_it() {
         ),
     );
     assert!(matches!(
-        store.adopt(&s.slug, &s.service, &s.channel, &replacement, NOW),
+        store.adopt(&s.slug, &s.service, &s.channel, &replacement, &now()),
         Err(LifecycleError::AlreadyExists { .. })
     ));
     assert_eq!(store.recorded(&s.slug).unwrap(), before);
+}
+
+/// A timestamp the ledger cannot order by is refused before a transaction is opened at all.
+///
+/// # What this test used to assert, and why it was weaker
+///
+/// It read `store.adopt(…, "bad")` and asserted `is_err()`, with a comment saying *"the v3 table
+/// rejects this timestamp **after** the instance and stage rows have been attempted."* So it was
+/// a rollback test wearing a validation test's name: it passed because a CHECK constraint
+/// several layers down happened to fire, not because anything refused the value.
+///
+/// `adopt` now takes an `ObservedAt`, so `"bad"` does not compile. The refusal moved to the
+/// parser, where it can be asserted directly — and the atomicity the old test was really covering
+/// is asserted below it, against a store that never saw the write.
+#[test]
+fn a_timestamp_the_ledger_cannot_order_by_is_refused_at_the_type() {
+    // `ORDER BY at, rowid` rests on the format, so these are not merely untidy — each of them
+    // sorts wrongly against a canonical value.
+    for raw in ["bad", "2026-08-27T12:00:00Z", "2026-08-27T12:00:00", "2026-08-27T12:00:00+01:00"] {
+        assert!(ObservedAt::parse(raw).is_err(), "{raw:?} must not be usable as a ledger offset");
+    }
+    // The positive control §K-8 requires: the canonical shape is accepted, so the loop above is
+    // not passing against a parser that refuses everything.
+    assert!(ObservedAt::parse(NOW).is_ok());
 }
 
 #[test]
@@ -1116,10 +1241,12 @@ fn a_failed_adoption_transaction_leaves_no_partial_instance() {
             RuntimeUserId::parse("user-a").unwrap(),
         ),
     );
-    // The v3 table rejects this timestamp after the instance and stage rows have been attempted.
-    assert!(store.adopt(&s.slug, &s.service, &s.channel, &evidence, "bad").is_err());
-    assert_eq!(store.spec(&s.slug).unwrap(), None);
-    assert!(store.history(&s.slug).unwrap().is_empty());
+    // A second adoption of the same slug fails after the instance row is attempted, which is the
+    // rollback this test is about. Nothing partial may survive it.
+    store.adopt(&s.slug, &s.service, &s.channel, &evidence, &now()).expect("first adoption");
+    let before = store.recorded(&s.slug).unwrap();
+    assert!(store.adopt(&s.slug, &s.service, &s.channel, &evidence, &now()).is_err());
+    assert_eq!(store.recorded(&s.slug).unwrap(), before, "a refused adoption changed the store");
 }
 
 /// A stage is never walked backwards.
@@ -1134,7 +1261,13 @@ fn a_stage_is_never_walked_backwards() {
 
     // Backwards by one, and all the way back, both refused.
     for earlier in [Stage::DataInitializationSettled, Stage::PreflightPassed] {
-        let err = store.reach(&slug, earlier, false, created_for(earlier).as_ref(), NOW);
+        let err = store.reach(
+            &slug,
+            earlier,
+            IdentityProvenance::Created,
+            created_for(earlier).as_ref(),
+            &now(),
+        );
         assert!(
             matches!(&err, Err(LifecycleError::StageWouldRegress { recorded, attempted, .. })
                      if recorded == "member_minted" && attempted == earlier.tag()),
@@ -1144,12 +1277,12 @@ fn a_stage_is_never_walked_backwards() {
     // Re-recording the CURRENT stage is also a regression, not a no-op: it would append a second
     // history row claiming the work happened twice.
     assert!(matches!(
-        store.reach(&slug, Stage::MemberMinted, false, None, NOW),
+        store.reach(&slug, Stage::MemberMinted, IdentityProvenance::Created, None, &now()),
         Err(LifecycleError::StageWouldRegress { .. })
     ));
 
     assert!(matches!(
-        store.reach(&slug, Stage::MemberConfined, false, None, NOW),
+        store.reach(&slug, Stage::MemberConfined, IdentityProvenance::Created, None, &now()),
         Err(LifecycleError::ConfinementEvidenceRequired { .. })
     ));
 

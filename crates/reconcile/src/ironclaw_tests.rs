@@ -26,7 +26,7 @@ fn spec() -> InstanceSpec {
 }
 
 fn handle() -> CredentialRef {
-    CredentialRef::new(CredentialPurpose::RuntimeMember, "env:PROBE_OPERATOR_TOKEN")
+    CredentialRef::new(CredentialPurpose::OperatorConfiguration, "env:PROBE_OPERATOR_TOKEN")
 }
 
 /// A stand-in admin surface. Routes on the request line, so pagination is exercised end to end
@@ -232,6 +232,29 @@ fn an_unusable_admin_endpoint_is_unverifiable_never_absent() {
     let mut unreachable = Admin::new("http://127.0.0.1:1", &handle());
     unreachable.set_token_for_test(OperatorToken::new("t"));
     let inventory = IronclawMember::new(&unreachable, Some(OpaqueId::new("u"))).observe(&spec());
+    assert!(matches!(
+        inventory.presence(Authority::Member),
+        Presence::Unverifiable(BlockedReason::Unreachable { .. })
+    ));
+}
+
+/// The handle names a variable every test process has, so the purpose guard is what refuses. It
+/// used to name one nothing sets, and this passed with the guard deleted.
+#[test]
+fn a_runtime_member_handle_cannot_authenticate_the_operator_admin_surface() {
+    let member = CredentialRef::new(CredentialPurpose::RuntimeMember, "env:PATH");
+    let admin = Admin::new("http://127.0.0.1:1", &member);
+    let inventory = IronclawMember::new(&admin, Some(OpaqueId::new("u"))).observe(&spec());
+    assert_eq!(
+        inventory.presence(Authority::Member),
+        Presence::Unverifiable(BlockedReason::NoCredential { system: "ironclaw admin".into() })
+    );
+
+    // Positive control: the same handle under the operator purpose resolves, and the observation
+    // gets past the credential to the transport. Nothing listens on port 1.
+    let operator = CredentialRef::new(CredentialPurpose::OperatorConfiguration, "env:PATH");
+    let admin = Admin::new("http://127.0.0.1:1", &operator);
+    let inventory = IronclawMember::new(&admin, Some(OpaqueId::new("u"))).observe(&spec());
     assert!(matches!(
         inventory.presence(Authority::Member),
         Presence::Unverifiable(BlockedReason::Unreachable { .. })
@@ -519,6 +542,16 @@ fn catalogue_body() -> String {
     .to_owned()
 }
 
+/// Syntactically valid settings, but without the host-egress denial row required to make a
+/// confinement measurement non-vacuous.
+fn truncated_catalogue_body() -> String {
+    r#"{"entries":[
+        {"key":"agent.auto_approve_tools","value":false},
+        {"key":"tool.builtin.time","value":{"state":"disabled"}}
+    ]}"#
+    .to_owned()
+}
+
 fn requests(f: &FakeAdmin) -> Vec<String> {
     f.requests.lock().expect("log").clone()
 }
@@ -606,6 +639,45 @@ fn a_credential_that_authenticates_as_the_recorded_member_binds() {
     let log = requests(&f);
     assert_eq!(log.iter().filter(|r| r.starts_with(SESSION)).count(), 1, "{log:?}");
     assert_eq!(log.iter().filter(|r| r.starts_with(SETTINGS)).count(), 1, "{log:?}");
+}
+
+#[test]
+fn a_truncated_catalogue_creates_a_blocked_attempt_not_measured_drift() {
+    let f = admin(vec![
+        (SESSION, 200, session_body("acme", "user_7f3a")),
+        (SETTINGS, 200, truncated_catalogue_body()),
+    ]);
+    let admin_client = client(&f);
+    let confinement = MemberConfinement::new(&admin_client, &FixtureCredential, member_handle());
+    let bound = confinement.bind(&OpaqueId::new("user_7f3a")).expect("binds");
+    let at = ObservedAt::parse("2026-09-02T12:34:56+00:00").expect("timestamp");
+    let policy = ConfinementPolicy::read_only_analyst();
+    let binding = PolicyBinding::of(&definition(), &policy);
+
+    let Reading::Blocked { attempt } = bound.read(&policy, &binding, &at) else {
+        panic!("a catalogue without the required denial witness must not be measured");
+    };
+    assert!(attempt.measurement().is_none(), "blocked attempts carry no measured facts");
+    assert!(matches!(
+        attempt.historical(),
+        ironworks_lifecycle::Historical::Unmeasured { reason: Blocked::UnreadableAnswer }
+    ));
+
+    // Positive control: the same member and approval value with the required row present and
+    // disabled is measured cleanly. This distinguishes the witness check from a reader that
+    // blocks every syntactically valid catalogue.
+    let control = admin(vec![
+        (SESSION, 200, session_body("acme", "user_7f3a")),
+        (SETTINGS, 200, catalogue_body()),
+    ]);
+    let control_client = client(&control);
+    let control_confinement =
+        MemberConfinement::new(&control_client, &FixtureCredential, member_handle());
+    let control_bound = control_confinement.bind(&OpaqueId::new("user_7f3a")).expect("binds");
+    let Reading::Measured { attempt, .. } = control_bound.read(&policy, &binding, &at) else {
+        panic!("the complete disabled catalogue must be measured");
+    };
+    assert!(attempt.measurement().expect("measurement").is_clean());
 }
 
 /// **The mechanical form of the rule.** A credential that is not this member's must produce exactly

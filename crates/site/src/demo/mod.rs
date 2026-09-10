@@ -243,10 +243,16 @@ pub fn build(root: &Path) -> Result<String, String> {
         <li><b>Record text is evidence, never instruction.</b> Try the attack question above: one of
         our test records carries a planted instruction to invent a budget and provision access, and
         you can watch it named and refused.</li>
-        <li><b>We hold no copy of your conversations.</b> The durable store keeps identifiers,
-        states and digests — no message text, no answers, no records.</li>
-        <li><b>The model is TEE-attested</b> and pinned. A pin here is a privacy decision, not a
-        version string: it decides which third party ever sees a record.</li>
+        <li><b>The turn journal holds identifiers only.</b> Every turn leaves one row of ids,
+        states, timestamps and digests — no message text, no answer text, no records. That is one
+        store, named. Two others do hold words: a proposal keeps the exact bytes a person typed,
+        and a note you confirm becomes an activity in the account store we operate. We are the
+        custodian of both, and nobody should hand us a book believing we cannot read it.</li>
+        <li><b>One model, pinned by name.</b> Every request we build names it, and a pin here is a
+        privacy decision rather than a version string: it decides which third party ever sees a
+        record. The provider describes that model as served inside a TEE. That description is the
+        whole of the evidence — we have no means to verify it, and the runtime does not report
+        which model served a given turn, so we cannot tell you after the fact either.</li>
       </ul>
     </div>
   </section>
@@ -306,7 +312,7 @@ mod tests {
     use super::*;
 
     fn page() -> String {
-        build(&ironworks_evidence::root()).expect("the demo run binds to the current book")
+        build(&crate::test_root()).expect("the demo run binds to the current book")
     }
 
     #[test]
@@ -359,10 +365,9 @@ mod tests {
     fn the_grade_figure_is_counted_from_the_transcript() {
         // A generated page must not carry a hand-written result. Change the run and this moves.
         let stored: usize = {
-            let text = std::fs::read_to_string(
-                ironworks_evidence::root().join("docs/experiments").join(RUN),
-            )
-            .unwrap();
+            let text =
+                std::fs::read_to_string(crate::test_root().join("docs/experiments").join(RUN))
+                    .unwrap();
             let doc: Value = serde_json::from_str(&text).unwrap();
             doc["cases"]
                 .as_array()
@@ -386,8 +391,8 @@ mod tests {
         // the six-record book. Quoting it on a page about this composition would describe
         // something else, so the rate comes from the probe bound to this book.
         let (clean, graded, _) = excluded_rate(
-            &ironworks_evidence::root().join("docs/experiments"),
-            &ironworks_evidence::root().join(BOOK),
+            &crate::test_root().join("docs/experiments"),
+            &crate::test_root().join(BOOK),
         )
         .expect("the probe binds");
         let html = page();
@@ -446,6 +451,27 @@ mod tests {
         let html = page();
         assert!(html.contains("RFC 2606"));
         assert!(html.contains("marked synthetic"));
+    }
+
+    #[test]
+    fn the_unsupportable_privacy_claims_are_not_on_the_page() {
+        // `docs/PRD.md` §19.2 names both of these by name under what must not be claimed. The TEE
+        // assertion waits on `MODEL_PIN`'s own OPEN item — the provider's description is the whole
+        // of the evidence and §G-2 means we cannot even say afterwards which model served a turn.
+        // "We hold no copy of your conversations" is true of the turn journal and false of the
+        // system: `crates/proposals` keeps `body TEXT NOT NULL`, and a confirmed note becomes an
+        // activity in the account store we operate. The claim is only ever scoped to one store,
+        // named.
+        let html = page();
+        // Positive control (§K-8): a renderer handing back an empty string must fail this test,
+        // not pass it by containing nothing.
+        assert!(html.contains("Why you can hand it your book"), "the trust section must render");
+        assert!(!html.contains("TEE-attested"), "an unverifiable attestation must not be asserted");
+        assert!(!html.contains("durable store"), "the store claim must be scoped by name");
+        assert!(
+            html.contains("The turn journal holds identifiers only"),
+            "and the store it is scoped to must be the turn journal"
+        );
     }
 
     #[test]

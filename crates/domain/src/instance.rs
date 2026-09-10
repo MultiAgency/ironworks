@@ -94,6 +94,103 @@ impl ModelSelection {
     }
 }
 
+/// What the runtime said produced a turn — **and whether that is an answer at all**.
+///
+/// The counterpart to [`ModelSelection`]: that is the model a turn was *asked* to run on, this is
+/// what the runtime *reported* running it on. They are separate types because they are separate
+/// facts, and a claim about which model saw a tenant's records needs both.
+///
+/// `model` is echoed on create and becomes the literal `"reborn"` on retrieval (§G-2), so a caller
+/// that stores the field verbatim records a placeholder as though it were a measurement. Only
+/// [`Self::Named`] can be compared with the pin; the other two are the BLOCKED shape — the
+/// measurement did not happen, which is not the same as a disagreement.
+///
+/// Measured 2026-09-08: a failed turn fetched by id answered `"model": "reborn"`, so this is the
+/// ordinary shape of a retrieval rather than an error path
+/// (`docs/experiments/0059-the-sandbox-works-once-the-model-is-told-the-tools-other-name.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReportedModel {
+    /// The runtime named a model. The only case that can be compared against the pin.
+    Named(ModelName),
+    /// The runtime answered with its own placeholder. **Not a model name, and never to be recorded
+    /// as one** — which model produced the turn is not recoverable from this response.
+    Placeholder,
+    /// The response carried no `model` field. Distinct from the placeholder: nothing was claimed,
+    /// rather than something unusable being claimed.
+    Absent,
+}
+
+/// A model name as the runtime reported it: trimmed, non-empty, and not the placeholder.
+///
+/// **Built only by [`ReportedModel::read`].** `Named` used to hold a bare `String`, so a caller
+/// could build values `read` never produces and that do not survive [`ReportedModel::wire`]:
+/// `Named("reborn")` read back as the placeholder, `Named("")` as absent, and `Named(" x ")` as
+/// `Named("x")`. The private field makes those unconstructible rather than unlikely.
+///
+/// ```
+/// use ironworks_domain::{ModelName, ReportedModel};
+/// let read = ReportedModel::read(Some(" qwen "));
+/// let name: &ModelName = match &read {
+///     ReportedModel::Named(name) => name,
+///     other => panic!("a name reads as a name, got {other:?}"),
+/// };
+/// assert_eq!(name.as_str(), "qwen");
+/// ```
+///
+/// The same path, with the field spelled out — which is exactly what cannot compile:
+///
+/// ```compile_fail
+/// use ironworks_domain::{ModelName, ReportedModel};
+/// let forged = ReportedModel::Named(ModelName("reborn".to_owned()));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModelName(String);
+
+impl ModelName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// The runtime's own placeholder, returned in `model` on retrieval instead of a model name (§G-2).
+pub const RUNTIME_PLACEHOLDER_MODEL: &str = "reborn";
+
+impl ReportedModel {
+    /// Read the wire field. Trimmed, because an empty string claims nothing.
+    ///
+    /// The only constructor of [`ModelName`], so every `Named` is one this produced.
+    pub fn read(field: Option<&str>) -> Self {
+        match field.map(str::trim) {
+            None | Some("") => Self::Absent,
+            Some(RUNTIME_PLACEHOLDER_MODEL) => Self::Placeholder,
+            Some(name) => Self::Named(ModelName(name.to_owned())),
+        }
+    }
+
+    /// Whether this can be compared with the pin at all.
+    pub fn is_measurement(&self) -> bool {
+        matches!(self, Self::Named(_))
+    }
+
+    /// The named model, or `None` for the two cases that name nothing.
+    pub fn named(&self) -> Option<&str> {
+        match self {
+            Self::Named(name) => Some(name.as_str()),
+            Self::Placeholder | Self::Absent => None,
+        }
+    }
+
+    /// How this is stored and read back. `None` is [`Self::Absent`]; the placeholder round-trips
+    /// as itself rather than as a name, so a reader cannot mistake it for one.
+    pub fn wire(&self) -> Option<&str> {
+        match self {
+            Self::Named(name) => Some(name.as_str()),
+            Self::Placeholder => Some(RUNTIME_PLACEHOLDER_MODEL),
+            Self::Absent => None,
+        }
+    }
+}
+
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum InstanceError {
     #[error("{field} needs a {want:?} credential, got {got:?}")]
@@ -213,6 +310,34 @@ impl<S: InstanceState> ServiceInstance<S> {
     }
 }
 
+/// Everything one service instance is built from.
+///
+/// # Why a struct and not ten arguments
+///
+/// [`ServiceInstance::new`] carried `#[allow(clippy::too_many_arguments)]` — the **only** lint
+/// suppression in this workspace — and then ran three runtime guards precisely because the
+/// signature let the wrong thing arrive: the runtime credential must carry `RuntimeMember`, the
+/// context binding's must not carry `RecordAppend`, and the two must not be the same handle.
+///
+/// Two adjacent `CredentialRef` parameters are exactly the swap that third guard exists to catch,
+/// and the compiler cannot help, because they are the same type. Named fields do not make the
+/// guards unnecessary — a caller can still fill one in wrongly — but they put the name beside the
+/// value at every call site instead of leaving it to position, and they retire the suppression
+/// rather than living under it.
+pub struct InstanceParts<'a> {
+    pub slug: Slug,
+    pub definition: ServiceDefinition,
+    pub guidance: Guidance,
+    pub runtime_identity: RuntimeIdentity,
+    /// Must carry [`CredentialPurpose::RuntimeMember`].
+    pub runtime_credential: CredentialRef,
+    pub context_binding: ContextBinding,
+    pub model: ModelSelection,
+    pub requested_capabilities: CapabilityProfile,
+    pub claimed_org: Option<OrgId>,
+    pub parts: &'a dyn PartSource,
+}
+
 impl ServiceInstance<Unverified> {
     /// Build an instance from configuration.
     ///
@@ -222,19 +347,19 @@ impl ServiceInstance<Unverified> {
     ///
     /// `guidance` is a validated [`Guidance`] and not an `Option` — guidance is mandatory and
     /// there is no unguided composition to fall back to.
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        slug: Slug,
-        definition: ServiceDefinition,
-        guidance: Guidance,
-        runtime_identity: RuntimeIdentity,
-        runtime_credential: CredentialRef,
-        context_binding: ContextBinding,
-        model: ModelSelection,
-        requested_capabilities: CapabilityProfile,
-        claimed_org: Option<OrgId>,
-        parts: &dyn PartSource,
-    ) -> Result<Self, InstanceError> {
+    pub fn new(from: InstanceParts<'_>) -> Result<Self, InstanceError> {
+        let InstanceParts {
+            slug,
+            definition,
+            guidance,
+            runtime_identity,
+            runtime_credential,
+            context_binding,
+            model,
+            requested_capabilities,
+            claimed_org,
+            parts,
+        } = from;
         if runtime_credential.purpose() != CredentialPurpose::RuntimeMember {
             return Err(InstanceError::WrongCredentialPurpose {
                 field: "runtime identity",
@@ -438,7 +563,7 @@ pub struct Ask<'a> {
     pub question: &'a str,
     pub records: &'a [crate::record::AccountRecord],
     /// What the store established. Decides the note the model is shown — see
-    /// [`RecordsState::note`].
+    /// `RecordsState::note`.
     pub records_state: &'a RecordsState,
     /// When the records were fetched. Passed in and journalled rather than read from a clock, so
     /// the envelope can be rebuilt byte-identically after a crash (ADR 0005).
@@ -782,19 +907,25 @@ mod tests {
     }
 
     fn instance(slug: &str) -> ServiceInstance<Unverified> {
-        ServiceInstance::new(
-            Slug::parse(slug).unwrap(),
-            definition(),
-            guidance(),
-            RuntimeIdentity::parse("member-1").unwrap(),
-            CredentialRef::new(CredentialPurpose::RuntimeMember, "keyring:member"),
-            ContextBinding::new(CredentialRef::new(CredentialPurpose::RecordScope, "keyring:recs"))
-                .unwrap(),
-            model(),
-            CapabilityProfile::READ_ONLY_RECORDS,
-            None,
-            &parts(),
-        )
+        ServiceInstance::new(InstanceParts {
+            slug: Slug::parse(slug).unwrap(),
+            definition: definition(),
+            guidance: guidance(),
+            runtime_identity: RuntimeIdentity::parse("member-1").unwrap(),
+            runtime_credential: CredentialRef::new(
+                CredentialPurpose::RuntimeMember,
+                "keyring:member",
+            ),
+            context_binding: ContextBinding::new(CredentialRef::new(
+                CredentialPurpose::RecordScope,
+                "keyring:recs",
+            ))
+            .unwrap(),
+            model: model(),
+            requested_capabilities: CapabilityProfile::READ_ONLY_RECORDS,
+            claimed_org: None,
+            parts: &parts(),
+        })
         .unwrap()
     }
 
@@ -811,39 +942,85 @@ mod tests {
 
     #[test]
     fn a_composition_naming_a_missing_part_refuses_the_whole_instance() {
-        let err = ServiceInstance::new(
-            Slug::parse("acme").unwrap(),
-            definition(),
-            guidance(),
-            RuntimeIdentity::parse("m").unwrap(),
-            CredentialRef::new(CredentialPurpose::RuntimeMember, "a"),
-            ContextBinding::new(CredentialRef::new(CredentialPurpose::RecordScope, "b")).unwrap(),
-            model(),
-            CapabilityProfile::READ_ONLY_RECORDS,
-            None,
-            &Parts(BTreeMap::new()),
-        )
+        let err = ServiceInstance::new(InstanceParts {
+            slug: Slug::parse("acme").unwrap(),
+            definition: definition(),
+            guidance: guidance(),
+            runtime_identity: RuntimeIdentity::parse("m").unwrap(),
+            runtime_credential: CredentialRef::new(CredentialPurpose::RuntimeMember, "a"),
+            context_binding: ContextBinding::new(CredentialRef::new(
+                CredentialPurpose::RecordScope,
+                "b",
+            ))
+            .unwrap(),
+            model: model(),
+            requested_capabilities: CapabilityProfile::READ_ONLY_RECORDS,
+            claimed_org: None,
+            parts: &Parts(BTreeMap::new()),
+        })
         .unwrap_err();
         assert!(matches!(err, InstanceError::MissingParts { missing: 2, .. }));
     }
 
     #[test]
     fn cross_wired_credentials_are_refused() {
-        let err = ServiceInstance::new(
-            Slug::parse("acme").unwrap(),
-            definition(),
-            guidance(),
-            RuntimeIdentity::parse("m").unwrap(),
-            CredentialRef::new(CredentialPurpose::RuntimeMember, "same"),
-            ContextBinding::new(CredentialRef::new(CredentialPurpose::RecordScope, "same"))
-                .unwrap(),
-            model(),
-            CapabilityProfile::READ_ONLY_RECORDS,
-            None,
-            &parts(),
-        )
+        let err = ServiceInstance::new(InstanceParts {
+            slug: Slug::parse("acme").unwrap(),
+            definition: definition(),
+            guidance: guidance(),
+            runtime_identity: RuntimeIdentity::parse("m").unwrap(),
+            runtime_credential: CredentialRef::new(CredentialPurpose::RuntimeMember, "same"),
+            context_binding: ContextBinding::new(CredentialRef::new(
+                CredentialPurpose::RecordScope,
+                "same",
+            ))
+            .unwrap(),
+            model: model(),
+            requested_capabilities: CapabilityProfile::READ_ONLY_RECORDS,
+            claimed_org: None,
+            parts: &parts(),
+        })
         .unwrap_err();
         assert_eq!(err, InstanceError::CrossWiredCredentials);
+    }
+
+    #[test]
+    fn operator_configuration_cannot_enter_either_serving_credential_slot() {
+        let operator = CredentialRef::new(CredentialPurpose::OperatorConfiguration, "env:OPERATOR");
+        assert!(matches!(
+            ContextBinding::new(operator.clone()),
+            Err(InstanceError::WrongCredentialPurpose {
+                want: CredentialPurpose::RecordScope,
+                got: CredentialPurpose::OperatorConfiguration,
+                ..
+            })
+        ));
+
+        let err = ServiceInstance::new(InstanceParts {
+            slug: Slug::parse("acme").unwrap(),
+            definition: definition(),
+            guidance: guidance(),
+            runtime_identity: RuntimeIdentity::parse("m").unwrap(),
+            runtime_credential: operator,
+            context_binding: ContextBinding::new(CredentialRef::new(
+                CredentialPurpose::RecordScope,
+                "records",
+            ))
+            .unwrap(),
+            model: model(),
+            requested_capabilities: CapabilityProfile::READ_ONLY_RECORDS,
+            claimed_org: None,
+            parts: &parts(),
+        })
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            InstanceError::WrongCredentialPurpose {
+                want: CredentialPurpose::RuntimeMember,
+                got: CredentialPurpose::OperatorConfiguration,
+                ..
+            }
+        ));
     }
 
     // ── data sources degrade ────────────────────────────────────────────────────────
@@ -930,19 +1107,25 @@ mod tests {
             "Real content about the organization. ".repeat(20)
         );
         let declared = Guidance::parse(&text, "acme", "account-analysis").unwrap();
-        let v = ServiceInstance::new(
-            Slug::parse("acme").unwrap(),
-            definition(),
-            declared,
-            RuntimeIdentity::parse("member-1").unwrap(),
-            CredentialRef::new(CredentialPurpose::RuntimeMember, "keyring:member"),
-            ContextBinding::new(CredentialRef::new(CredentialPurpose::RecordScope, "keyring:recs"))
-                .unwrap(),
-            model(),
-            CapabilityProfile::READ_ONLY_RECORDS,
-            None,
-            &parts(),
-        )
+        let v = ServiceInstance::new(InstanceParts {
+            slug: Slug::parse("acme").unwrap(),
+            definition: definition(),
+            guidance: declared,
+            runtime_identity: RuntimeIdentity::parse("member-1").unwrap(),
+            runtime_credential: CredentialRef::new(
+                CredentialPurpose::RuntimeMember,
+                "keyring:member",
+            ),
+            context_binding: ContextBinding::new(CredentialRef::new(
+                CredentialPurpose::RecordScope,
+                "keyring:recs",
+            ))
+            .unwrap(),
+            model: model(),
+            requested_capabilities: CapabilityProfile::READ_ONLY_RECORDS,
+            claimed_org: None,
+            parts: &parts(),
+        })
         .unwrap()
         .verify(&Store("acme-sales"))
         .unwrap();
@@ -1011,18 +1194,22 @@ mod tests {
 
     #[test]
     fn verification_replaces_the_claim_and_surfaces_disagreement() {
-        let claimed = ServiceInstance::new(
-            Slug::parse("acme").unwrap(),
-            definition(),
-            guidance(),
-            RuntimeIdentity::parse("m").unwrap(),
-            CredentialRef::new(CredentialPurpose::RuntimeMember, "a"),
-            ContextBinding::new(CredentialRef::new(CredentialPurpose::RecordScope, "b")).unwrap(),
-            model(),
-            CapabilityProfile::READ_ONLY_RECORDS,
-            Some(OrgId::parse("stale-claim").unwrap()),
-            &parts(),
-        )
+        let claimed = ServiceInstance::new(InstanceParts {
+            slug: Slug::parse("acme").unwrap(),
+            definition: definition(),
+            guidance: guidance(),
+            runtime_identity: RuntimeIdentity::parse("m").unwrap(),
+            runtime_credential: CredentialRef::new(CredentialPurpose::RuntimeMember, "a"),
+            context_binding: ContextBinding::new(CredentialRef::new(
+                CredentialPurpose::RecordScope,
+                "b",
+            ))
+            .unwrap(),
+            model: model(),
+            requested_capabilities: CapabilityProfile::READ_ONLY_RECORDS,
+            claimed_org: Some(OrgId::parse("stale-claim").unwrap()),
+            parts: &parts(),
+        })
         .unwrap();
         let v = claimed.verify(&Store("acme-sales")).unwrap();
         assert_eq!(v.org().as_str(), "acme-sales", "the store's answer wins");
@@ -1038,19 +1225,51 @@ mod tests {
             outreach: crate::capability::Access::ReadOnly,
             runtime_tools: crate::capability::ToolAccess::Sandbox,
         };
-        let i = ServiceInstance::new(
-            Slug::parse("acme").unwrap(),
-            definition(),
-            guidance(),
-            RuntimeIdentity::parse("m").unwrap(),
-            CredentialRef::new(CredentialPurpose::RuntimeMember, "a"),
-            ContextBinding::new(CredentialRef::new(CredentialPurpose::RecordScope, "b")).unwrap(),
-            model(),
-            greedy,
-            None,
-            &parts(),
-        )
+        let i = ServiceInstance::new(InstanceParts {
+            slug: Slug::parse("acme").unwrap(),
+            definition: definition(),
+            guidance: guidance(),
+            runtime_identity: RuntimeIdentity::parse("m").unwrap(),
+            runtime_credential: CredentialRef::new(CredentialPurpose::RuntimeMember, "a"),
+            context_binding: ContextBinding::new(CredentialRef::new(
+                CredentialPurpose::RecordScope,
+                "b",
+            ))
+            .unwrap(),
+            model: model(),
+            requested_capabilities: greedy,
+            claimed_org: None,
+            parts: &parts(),
+        })
         .unwrap();
         assert_eq!(*i.capabilities(), CapabilityProfile::READ_ONLY_RECORDS);
+    }
+
+    /// Every value that can be built survives `wire` and back as itself, which is what lets the
+    /// journal store one and a later reader trust it. `read` is the only way to build one, so the
+    /// fields below are the whole space — including the ones a bare-`String` `Named` got wrong.
+    #[test]
+    fn every_reported_model_round_trips_through_the_wire() {
+        let mut shapes = [false; 3];
+        for field in [
+            None,
+            Some(""),
+            Some("   "),
+            Some(RUNTIME_PLACEHOLDER_MODEL),
+            Some(" reborn "),
+            Some("qwen/qwen3.5-397b-a17b"),
+            Some("  padded  "),
+        ] {
+            let model = ReportedModel::read(field);
+            shapes[match model {
+                ReportedModel::Named(_) => 0,
+                ReportedModel::Placeholder => 1,
+                ReportedModel::Absent => 2,
+            }] = true;
+            assert_eq!(ReportedModel::read(model.wire()), model, "{field:?} did not round trip");
+        }
+        // The positive control: all three shapes arose, so none passes by never being built.
+        assert_eq!(shapes, [true; 3]);
+        assert_eq!(ReportedModel::read(Some("  padded  ")).named(), Some("padded"));
     }
 }

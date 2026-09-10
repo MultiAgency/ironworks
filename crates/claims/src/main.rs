@@ -21,21 +21,33 @@
 //! test; they can only be true or false. Its reader deliberately does *not* accept a count-shaped
 //! line as `passing`, so the old form cannot come back by accident.
 
-use ironworks_claims::{Verdict, commands, members, paths, root, tallies, toolchain};
+use ironworks_claims::{CHECKS, Verdict, root, self_description};
+
+/// `--json <path>`, or `None`. Deliberately hand-parsed: one optional flag does not justify a
+/// dependency in the one crate whose independence from this workspace is the point.
+fn json_destination() -> Option<String> {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if arg == "--json" {
+            return args.next();
+        }
+    }
+    None
+}
 
 fn main() -> std::process::ExitCode {
     let root = root();
-    let mut findings = tallies::check(&root);
-    findings.extend(commands::check(&root));
-    findings.extend(paths::check(&root));
-    findings.extend(paths::check_anchors(&root));
-    findings.extend(paths::check_symbols(&root));
-    findings.extend(paths::check_experiments(&root));
-    findings.extend(paths::check_experiment_numbers(&root));
-    findings.extend(paths::check_bare_docs(&root));
-    findings.extend(members::check(&root));
-    // Last, because it is the slow one: it shells out to cargo twice.
-    findings.extend(toolchain::check(&root));
+    // `CHECKS` rather than a list here, so the suite and this binary cannot run different sets.
+    // The last two are the slow ones: they shell out to a subprocess, `toolchain` twice.
+    let mut findings = Vec::new();
+    for check in CHECKS {
+        findings.extend(check.findings(&root));
+    }
+    // **Last, and it has to be.** Its input is this binary's own output rather than the tree, so
+    // every check must have reported before it can ask whether the prose names them all.
+    let names: Vec<&str> = CHECKS.iter().map(|c| c.name).collect();
+    let described = self_description::check(&root, &names, &findings);
+    findings.extend(described);
 
     println!("measured claims vs what the tree says\n");
     for f in &findings {
@@ -45,6 +57,35 @@ fn main() -> std::process::ExitCode {
             f.subject,
             f.detail
         );
+    }
+
+    // `--json <path>` emits the same findings a machine can read.
+    //
+    // **Emitting, never recording.** This crate's layering row says it depends on nothing inside
+    // the workspace, and that is load-bearing rather than incidental: the thing that verifies the
+    // tree must not be entangled with what it verifies, or a change to a crate could break the
+    // control that checks that crate. So the findings leave as JSON and something else decides
+    // what to do with them — `ironworks-evidence`'s recorder is the first such reader.
+    if let Some(path) = json_destination() {
+        let rows: Vec<serde_json::Value> = findings
+            .iter()
+            .map(|f| {
+                serde_json::json!({
+                    // `claim` is the identity and `subject` is where to look. They are usually the
+                    // same string and are emitted separately anyway, because for the tally rows
+                    // they are not — and a reader that guessed which was which would be guessing.
+                    "claim": f.claim,
+                    "subject": f.subject,
+                    "verdict": f.verdict.as_str(),
+                    "detail": f.detail,
+                })
+            })
+            .collect();
+        let doc = serde_json::json!({ "findings": rows });
+        if let Err(why) = std::fs::write(&path, format!("{doc:#}\n")) {
+            eprintln!("ironworks-claims: cannot write {path}: {why}");
+            return std::process::ExitCode::from(2);
+        }
     }
 
     let fails = findings.iter().filter(|f| f.verdict == Verdict::Fail).count();

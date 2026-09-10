@@ -39,6 +39,6 @@ backend or socket location changes the conclusion.
 
 ## What changed
 
-`deploy/rustworks-ironclaw@.service` now uses `ProtectHome=read-only`. The installed unit was
+`deploy/ironworks-ironclaw@.service` now uses `ProtectHome=read-only`. The installed unit was
 reloaded and the isolated control plane was restarted and observed healthy.
 

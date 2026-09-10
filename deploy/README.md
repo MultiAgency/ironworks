@@ -15,12 +15,12 @@ do either: a restart that forgets every thread is a restart that loses conversat
 
 ## The units
 
-    rustworks-ironclaw@.service   one trusted control plane and persistent /workspace per client
-    user/rustworks-docker.service one rootless worker daemon in each client account's user manager
-    rustworks-devstore.service    the demo record store — synthetic accounts only
-    rustworks-telegram.service    the channel adapter; the token reaches one process, never a
-                                  command line, because an argument is visible in `ps`
-    rustworks-relay.service       dev/relay-loop.sh — one fresh `relay` process per cycle
+    ironworks-ironclaw@.service   one trusted control plane and persistent /workspace per client
+    user/ironworks-docker.service one rootless worker daemon in each client account's user manager
+    ironworks-devstore.service    the demo record store — synthetic accounts only
+    ironworks-telegram@.service   one tenant channel adapter; its token reaches one process
+    ironworks-relay@.service      one tenant relay; one fresh `relay` process per cycle
+    ironworks-attest@.timer       refreshes that tenant's confinement evidence every five minutes
 
 **`devstore` here is a deliberate exception, not a contradiction.** It calls itself a proof
 fixture and not a deployment, and that is correct: this unit serves the *demo*, whose records are
@@ -28,33 +28,55 @@ invented, RFC 2606-reserved and marked synthetic. It must never become the recor
 tenant with real records — that path needs the Account Service, and this unit exists partly so
 nobody is tempted to point the demo at it.
 
-**The relay no longer names it.** `rustworks-relay.service` used to carry
-`Wants=rustworks-devstore.service`, which asserted a fact the unit cannot know: a tenant's store is
+**The relay no longer names it.** The predecessor of `ironworks-relay@.service` used to carry
+`Wants=ironworks-devstore.service`, which asserted a fact the unit cannot know: a tenant's store is
 a credential and endpoint in the registry the unit already passes as `--registry`. On a host serving
 from the Account Service that dependency started a synthetic store nothing read, and neither
 operator-side switch turned it off — `disable` does not hold because `Wants=` restarts it, and
 `mask` refuses while the unit file occupies the path the mask symlink needs. Both measured. The
 dependency is gone; start `devstore` deliberately when a deployment actually serves the demo book.
 
-## Where it lives, and why not the obvious name
+## Where it lives, and the two paths that keep the old name
 
-**`/opt/rustworks`, not `/opt/ironworks`.** That path is occupied by the Python implementation on
-the host this deploys to — a live tree, written to the same day this was checked, carrying a
-`DEPLOYED_MANIFEST.sha256` that something verifies. The two systems coexist for as long as
-retirement takes, so the Rust one takes a name that cannot be mistaken for it: `/opt/rustworks`,
-`/etc/rustworks`, `/var/lib/rustworks`, and `rustworks-*.service` so a `systemctl` listing is
-unambiguous.
+**The procedure below describes the host.** `/opt/ironworks`, `/etc/ironworks`,
+`/var/lib/ironworks/<slug>`, `/run/ironworks-attest/<slug>` and the `ironworks-ironclaw@`,
+`ironworks-relay@`, `ironworks-telegram@` and `ironworks-attest@` units are live. The Python tree
+moved aside to `/opt/ironworks-py` — moved, not removed, because it still runs the Account Service
+this tenant reads its records from and a Telegram bridge serving three rooms of its own
+(`docs/experiments/0056-the-served-host-was-never-running-the-pinned-model.md`).
 
-The units originally said `/opt/ironworks`, written when nothing was known about the host. Copying
-a different codebase over a running production tree is what that would have done.
+**The runtime serves from the pinned artifacts.** `ironworks-ironclaw@relationship-demo` replaced
+`rustworks-ironclaw@`, and its `check-ironclaw-artifacts.sh` preflight refuses to start unless the
+installed binary hashes to the root-owned `/opt/ironclaw/artifact-manifest.env` and this client's
+rootless daemon resolves the manifest's worker image. The running process's executable hashed to
+the manifest's binary, and all four `rustworks-*` units were removed
+(`docs/experiments/0058-the-serving-host-ran-its-own-preflight-from-a-directory-the-login-account-could-write.md`).
+What `dev/prove-host.sh` scores there is under "What remains".
+
+**Two paths keep the old name and are not oversights.** `/opt/rustworks` is pruned to
+`GUIDANCE.md` alone: the published registry binds that guidance by absolute path, `publish-one`
+reconstructs the exact former byte string, so the path could not move in the operation that
+migrated the schema (`0056`), and moving it now means resetting the lifecycle store — "What
+remains" says what that costs. `/var/lib/rustworks` is the frozen pre-cutover lifecycle store and
+journals — the rollback path (`0056`). Delete it once the new cell has been trusted for a while; two
+lifecycle stores for one tenant is a divergence waiting to be read from the wrong one.
+
+**The rule the move earned, and it outlives this section:** read a deployed binding out of the
+deployment, never out of the procedure that created it. This document described two guidance
+layouts while the host ran a third, and a plan written from the document named the wrong directory
+twice — `docs/experiments/0055-the-served-host-predates-the-registry-it-is-read-by.md`.
 
 ## Why IronClaw is no longer inside the served Compose stack
 
 IronWorks still calls `POST /api/v1/responses`. That is the correct ingress; the mistake was
 expecting a request field to select a workspace. In IronClaw 1.4.0, `builtin.shell` reaches a
 persistent `/workspace` only when the runtime itself boots with
-`IRONCLAW_REBORN_PROFILE=hosted-single-tenant-volume-sandboxed`. The `production` profile used by
-`docker-compose.serve.yml` does not wire a user-sandbox process backend.
+`IRONCLAW_REBORN_PROFILE=hosted-single-tenant-volume-sandboxed`. The `production` profile the
+served stack used before does not wire a user-sandbox process backend, which is why the Compose
+file that declared it has been retired rather than kept as a record: its own header told a reader
+not to use it, nothing set the image tag it required, and it named a unit file that does not
+exist. The contract it once probed is recorded in `docs/experiments/`, which is where a
+measurement belongs.
 
 The local sandbox backend is Docker-managed. Giving the old capability-dropped IronClaw container
 `/var/run/docker.sock` would give that container control of the host while making the deployment
@@ -68,6 +90,21 @@ The `ironclaw-<client>` service account can reach its own daemon because creatin
 that client's worker is its job. It cannot open another client's private runtime directory or
 storage root, and it is not a member of the host `docker` group. Neither IronWorks nor the worker
 receives a socket. IronClaw's managed proxy remains the worker's egress boundary.
+
+**Each client's rootless daemon must be Docker 28 or newer, and this is a hard precondition rather
+than a recommendation.** IronClaw creates the worker's egress network with
+`com.docker.network.bridge.gateway_mode_ipv4=isolated`
+(`ironclaw@4cb47cfaf3/crates/lanes/ironclaw_sandbox/src/sandbox_process/managed_egress.rs:50`) and
+then verifies the network carries it
+(`ironclaw@4cb47cfaf3/crates/lanes/ironclaw_sandbox/src/sandbox_process/railway.rs:136`), so a
+daemon that does not know the option cannot host a sandbox at all. **Measured, not inferred from a version number:** 27.5.1 refuses the create with
+`400 unknown gateway mode "isolated"` and the shell tool reports a sandbox infrastructure error
+with nothing written; 28.5.2 and 29.8.0 both accept it and the network reports
+`gateway_mode=isolated`. So the floor lies between 27.5.1 and 28.5.2 — **28.0.0 itself is
+untested**, and an operator pinning an early 28 should confirm rather than assume
+(`docs/experiments/0059-the-sandbox-works-once-the-model-is-told-the-tools-other-name.md`).
+Upstream's own sandbox reports run 29.x. **Nothing on this host has been checked against this** —
+the requirement was found on a laptop probe, and no served host's daemon version has been read.
 
 ## Installing it
 
@@ -84,18 +121,42 @@ cache and guidance exclusions, the unit reinstall on every re-sync, the truncati
 /dev/null`, the store that must be running before `adopt`, and what `--dry-run` does not prove.
 
     # paths and a service user that owns nothing else
-    sudo install -d -o "$USER" -g "$USER" -m 0755 /opt/rustworks
+    sudo install -d -o root -g root -m 0755 /opt/ironworks
     sudo install -d -o root -g root -m 0755 /opt/ironclaw/bin
-    sudo install -d -m 0700 /etc/rustworks
-    sudo useradd --system --no-create-home --shell /usr/sbin/nologin rustworks
-    sudo install -d -o rustworks -g rustworks -m 0750 /var/lib/rustworks
+    sudo install -d -m 0700 /etc/ironworks
+    sudo useradd --system --no-create-home --shell /usr/sbin/nologin ironworks
+    sudo install -d -o ironworks -g ironworks -m 0750 /var/lib/ironworks
     sudo install -d -o root -g root -m 0711 /var/lib/ironclaw
 
     # source, without build output, git, generated pages, secrets, the cargo cache, or any
     # tenant guidance a published registry points at
-    rsync -az --delete --exclude /target/ --exclude /.git/ --exclude /site/ --exclude /local/ \
+    rsync -az --delete --rsync-path="sudo rsync" --no-o --no-g \
+          --exclude /target/ --exclude /.git/ --exclude /site/ --exclude /local/ \
           --exclude /.cargo-home/ --exclude /GUIDANCE.md --exclude __pycache__/ \
-          ./ multi-serve:/opt/rustworks/
+          ./ multi-serve:/opt/ironworks/
+
+**Three parts of that line are load-bearing, and so is `-o root -g root` above.** This tree is
+root-owned because systemd executes part of it *as root*: a unit line beginning `ExecStartPre=+`
+ignores `User=`, and all three serving units have one; `ironworks-attest@.service` is `User=root`
+outright and runs `deploy/refresh-attestation.sh` every five minutes. When `/opt/ironworks` was
+owned by the login account, that account could rewrite the preflight and get root at the next
+restart — unattended,
+because the units are `Restart=always`
+(`docs/experiments/0058-the-serving-host-ran-its-own-preflight-from-a-directory-the-login-account-could-write.md`).
+
+- `--rsync-path="sudo rsync"` — without it a plain `rsync` now fails with
+  `mkstemp … failed: Permission denied (13)`. **That failure is the guard working, not a step to
+  route around.**
+- **`--no-o --no-g` — without these the fix undoes itself.** `-a` implies `-o -g`, and rsync running
+  as root on the far side *applies* them, stamping every file with the operator laptop's local uid
+  and gid. Measured 2026-09-07: the same sync proposes **410** owner/group changes without these
+  flags and **none** with them. A uid that means one person locally means something else, or
+  nothing, on the host.
+- `--dry-run -i` before a real run, reading the `*deleting` lines. A dry run proves nothing about
+  *permissions*, though — it never attempts the write. The plain-`rsync` refusal above had to be
+  measured for real, not inferred from a clean dry run.
+
+`dev/prove-host.sh` check 11 asserts the ownership all of this depends on.
 
 **Every exclusion is rooted, and two of them protect files that exist only on the host.**
 `/.cargo-home/` is the build cache, and losing it turns a one-minute rebuild into a cold one.
@@ -107,29 +168,34 @@ member on a one-way `confine`. **Choose that path before publishing, and never l
 what it names.** To check a sync before running it, use `--dry-run -i` and read the `*deleting`
 lines; grepping for `^deleting` matches nothing and reads as safe when it is not.
 
-    # binaries, built in a container so no toolchain lands on the host
-    docker run --rm -u "$(id -u):$(id -g)" -v /opt/rustworks:/src -w /src \
+    # binaries, built in a container so no toolchain lands on the host. Root, not the invoker:
+    # the tree is root-owned, and `target/release/` holds binaries two units execute.
+    sudo docker run --rm -u 0:0 -v /opt/ironworks:/src -w /src \
       -e CARGO_HOME=/src/.cargo-home rust:1.97-bookworm \
       cargo build --release -p ironworks-cli -p ironworks-telegram -p ironworks-devstore
 
-    sudo install -m 0644 /opt/rustworks/deploy/rustworks-*.service /etc/systemd/system/
+    sudo install -m 0644 /opt/ironworks/deploy/ironworks-*.service /etc/systemd/system/
+    sudo install -m 0644 /opt/ironworks/deploy/ironworks-*.timer /etc/systemd/system/
     sudo install -d -o root -g root -m 0755 /etc/systemd/user
-    sudo install -m 0644 /opt/rustworks/deploy/user/rustworks-docker.service /etc/systemd/user/
+    sudo install -m 0644 /opt/ironworks/deploy/user/ironworks-docker.service /etc/systemd/user/
     sudo systemctl daemon-reload
 
-**These three lines belong to every re-sync, not just the first install.** `rsync` updates
-`/opt/rustworks/deploy/`; it does not touch `/etc/systemd/system/`, so systemd keeps running
+**These unit-install lines belong to every re-sync, not just the first install.** `rsync` updates
+`/opt/ironworks/deploy/`; it does not touch `/etc/systemd/system/`, so systemd keeps running
 whatever units it was given last. A drifted unit fails in the least obvious way available — the one
 that cost a serving loop here pointed `--registry` at the wrong directory and omitted its
 `EnvironmentFile`, so the relay started cleanly and then could not read the registry it had just
 been handed. Check before starting anything:
 
-    for u in /opt/rustworks/deploy/rustworks-*.service; do
+    for u in /opt/ironworks/deploy/ironworks-*.service \
+             /opt/ironworks/deploy/ironworks-*.timer; do
       diff -q "/etc/systemd/system/$(basename "$u")" "$u" || echo "DRIFTED: $(basename "$u")"
     done
 
-The two serving environment files are separate custody boundaries. Both are read by systemd as
-root before it changes to `User=rustworks`, so neither has to be readable by the service account.
+Each cell has four root-owned environment files. All are read by systemd as root before it changes
+to `User=ironworks-<slug>`, so none has to be readable by the service account. The channel adapter
+credential is deliberately shared by exactly that cell's relay and adapter; the others belong to
+one unit or one cell.
 
 **`install /dev/null` truncates, so run it once per file and never again.** These files hold a
 runtime member's `api_token`, which this pin issues exactly once and cannot reissue (`0043`); a
@@ -137,22 +203,100 @@ second `install` over a populated file destroys a credential replaceable only by
 member and deleting the old one. It has cost one. To add a value to a file that already exists,
 `sudoedit` it; to check first, `sudo test -s <path> && echo populated`.
 
-    sudo install -o root -g root -m 0600 /dev/null /etc/rustworks/telegram.env
-    sudoedit /etc/rustworks/telegram.env
+    sudo install -o root -g root -m 0600 /dev/null \
+      /etc/ironworks/telegram-relationship-demo.env
+    sudoedit /etc/ironworks/telegram-relationship-demo.env
     # exactly: TELEGRAM_BOT_TOKEN=<the BotFather token>
 
-    sudo install -o root -g root -m 0600 /dev/null /etc/rustworks/relay.env
-    sudoedit /etc/rustworks/relay.env
-    # shared endpoints, plus every env:NAME handle the one-tenant registry names:
+    sudo install -o root -g root -m 0600 /dev/null \
+      /etc/ironworks/relay-relationship-demo.env
+    sudoedit /etc/ironworks/relay-relationship-demo.env
+    # endpoints and the exact handles named by this cell's one-entry registry:
     # IRONWORKS_BASE=http://127.0.0.1:3997
     # IRONCLAW_API=http://127.0.0.1:3997               # lifecycle commands read this name
     # IRONWORKS_RECORDS=<the store serving this tenant>
-    # <SLUG>_RECORDS=<records bearer>
-    # <SLUG>_MEMBER=<IronClaw member bearer>
+    # IRONWORKS_RECORDS_TOKEN=<records bearer>
+    # IRONCLAW_MEMBER_TOKEN=<IronClaw member bearer>
+    # IRONWORKS_MEMBER_ID=<member id recorded by lifecycle>
+
+    sudo install -o root -g root -m 0600 /dev/null \
+      /etc/ironworks/cell-relationship-demo.env
+    sudoedit /etc/ironworks/cell-relationship-demo.env
+    # exactly two literal, distinct, fleet-unique ports:
+    # ADAPTER_PORT=3994
+    # IRONCLAW_PORT=3997
+
+### The channel adapter's own credential
+
+**`/poll` is a destructive write.** The offset is the acknowledgement, so
+`GET /poll?offset=999999999` tells Telegram to discard everything it is holding — before the seam
+has journalled any of it, with no row left to recover from and nothing reporting an error. Loopback
+is not a boundary on this host: the Python fleet under `/opt/ironworks-py` and one
+`ironclaw-<slug>` process per client all run here, under their own accounts, and any of them can
+open `127.0.0.1:3994`. So the adapter requires a bearer token on `/poll` and `/send`, and refuses to
+start without one (exit 64). `/health` stays open; it is the one route with no backlog behind it.
+
+**And loopback is not the edge of this host either.** A `cloudflared` tunnel publishes
+`localhost:3011` — the `secretary` cell's IronClaw — to the public internet under its own hostname.
+Nothing is bound to a public interface, so `ss -ltnp` shows only SSH and reads as a host with no
+exposed service. **Do not reason about this machine's attack surface from its listeners.** Measured
+2026-09-07: every data route on that instance refuses an unauthenticated request with `401`,
+through the tunnel as well as on loopback — session, tool settings, threads and response retrieval
+alike; only the WebUI shell answers `200`. So this is a note about where to look, not a defect. The
+tunnel belongs to `secretary` rather than to anything here, and is recorded because a reader
+working out what shares this host will not otherwise find it.
+
+**One file, read by both units.** The same secret pasted into `telegram-<slug>.env` and
+`relay-<slug>.env` is two
+things to rotate, and a rotation that updates one copy is a channel that stops — which is the same
+symptom as the adapter being down, several layers from its cause.
+
+    sudo install -o root -g root -m 0600 /dev/null \
+      /etc/ironworks/channel-adapter-relationship-demo.env
+    sudoedit /etc/ironworks/channel-adapter-relationship-demo.env
+    # exactly: CHANNEL_ADAPTER_TOKEN=<32+ random bytes, e.g. `openssl rand -hex 32`>
+
+The same `install /dev/null` warning applies as above: it truncates, so run it once per file. This
+one is cheaper to lose than a runtime member's `api_token` — it is a value you generate rather than
+one a pin issues exactly once — but replacing it is still a coordinated restart of both units.
+
+**Roll it out in this order, and the order is not a preference.** The relay ignores whether the far
+end wants a credential; the adapter does not.
+
+1. Write `/etc/ironworks/channel-adapter-relationship-demo.env`.
+2. Install the unit files and `systemctl daemon-reload` — the `install`/`daemon-reload` lines under
+   "Installing it", which belong to every re-sync and not only the first install. Both units gained
+   an `EnvironmentFile` line, so a drifted unit here reads no token at all.
+3. Restart **`ironworks-relay@relationship-demo.service` first** — the side that *sends* a token. An adapter that
+   ignores it is unaffected, so the channel keeps working throughout.
+4. Restart **`ironworks-telegram@relationship-demo.service` second** — the side that *requires* one.
+
+Reverse those two and the channel is down between them: the adapter refuses every poll and send
+from a relay that is not yet presenting a token. It fails in the safe direction — a refused poll
+carries no `updates` array, so the seam reads it as malformed and the cursor does not move, and a
+refused send carries `"accepted": false`, which is provable absence and licenses a free resend. But
+"safe" here means recoverable, not invisible: the room goes unanswered for the length of the
+window.
+
+Verify from the host. The middle call is the control: without it, an adapter that authenticated
+nothing would pass the other two:
+
+    curl -s http://127.0.0.1:3994/health
+    # {"ok":true}   — no credential, and no backlog behind it
+    curl -s -o /dev/null -w '%{http_code}\n' "http://127.0.0.1:3994/poll?offset=0"
+    # 401           — the control: the same route, no credential
+    sudo bash -c '. /etc/ironworks/channel-adapter-relationship-demo.env; \
+      curl -s -o /dev/null -w "%{http_code}\n" \
+        -H "authorization: Bearer $CHANNEL_ADAPTER_TOKEN" \
+        "http://127.0.0.1:3994/poll?offset=0"'
+    # 200
+
+**Offset 0 acknowledges nothing, which is why it is the safe one to check with.** Any other offset
+in that last command discards a real backlog.
 
 **`IRONWORKS_RECORDS` names whichever store serves this tenant**, and the choice is a real one. A
 tenant with real records uses the Account Service and needs a provisioned org and a bearer. The
-demo book this repository ships uses `rustworks-devstore` on `3996`, whose identity is
+demo book this repository ships uses `ironworks-devstore` on `3996`, whose identity is
 `dev-token-coordination` resolving to org `coordination-eval` — written in the committed unit, so
 that path carries no records secret at all. Point a tenant with real records at devstore and you
 have done the one thing that unit's own comment forbids.
@@ -163,18 +307,59 @@ have done the one thing that unit's own comment forbids.
 wrong late is worse than early: `publish-one` refuses when the recorded org and the handle's org
 disagree, and the fix is a fresh store, because `adopt` will not overwrite a slug.
 
-Do not put `TELEGRAM_BOT_TOKEN` in `relay.env`; only the adapter calls Telegram. The files may be
-created before or after their unit files are installed, but each must exist before its own unit is
-started. Installing them does not start either service.
+Do not put `TELEGRAM_BOT_TOKEN` in `relay-<slug>.env`; only the adapter calls Telegram. Do not put
+`CHANNEL_ADAPTER_TOKEN` in either of these two: it belongs to both units, and giving it a file of
+its own is what keeps one copy rather than two. The files may be created before or after their unit
+files are installed, but each must exist before its own unit is started. Installing them does not
+start any service.
 
-Build the pinned IronClaw binary and its worker image from the revision in `IRONCLAW_PIN`, then
-install the binary as `/opt/ironclaw/bin/ironclaw` and export the image that the upstream profile
-expects. Each rootless daemon has a separate image store, so a host-daemon tag alone is not enough:
+Build the IronClaw binary and worker image from the exact official Git object named by
+`IRONCLAW_PIN`; do not build either artifact from a checkout's current files. The build script
+archives that object into a fresh temporary tree, builds the unmodified archive, and emits one
+local manifest beside its binary and worker archive. `IRONCLAW_PIN` is its only revision input and
+has no fallback:
 
-    cargo build --release -p ironclaw
-    sudo install -m 0755 target/release/ironclaw /opt/ironclaw/bin/ironclaw
-    docker build -f Dockerfile.sandbox-worker -t ironclaw-worker:latest .
-    docker save -o /opt/ironclaw/ironclaw-worker.tar ironclaw-worker:latest
+**This discipline covers the artifacts this repository builds, and nothing else sharing the host.**
+Surveyed 2026-09-07: four IronClaw runtimes run on `multi-serve`, and three carry an `ironclaw.rev`
+label matching the pin — but two of those, `multiclaw` and `secretary-ironclaw-1`, are tagged
+`ironclaw:main`. **A floating tag pins nothing.** Their labels agree with `IRONCLAW_PIN` today; a
+rebuild of `main` moves them and the label re-attests to whatever was built rather than catching
+the drift, because a label records what an image *is*, not what it was supposed to be. `probe-up.sh`
+refuses an unlabelled image for exactly this reason and cannot help here, since these are labelled
+and correct — right up until they are not. The fourth, `ironclaw-nbot`, is deliberately
+`rollback-v010-pre140` at 1.3.0, which `docs/UPGRADE.md` records is **not an ancestor of 1.4.0**.
+
+**Pinned 2026-09-07, and the shape of the defect is worth keeping.** Their compose files read
+`image: ${IRONCLAW_IMAGE:-ironclaw:main}` — **a fallback literal for a pin**, the exact hazard the
+one rule names: a default is the one value that can silently outrank the configuration. It sat two
+lines from a correctly digest-pinned `postgres:16-alpine@sha256:…`. Both stacks now set
+`IRONCLAW_IMAGE` to the image **ID** in their `.env`, which takes effect on the next recreate and
+changes nothing running. The ID rather than the `ironclaw:4cb47cfaf` revision tag that image also
+carries, because a tag can be re-pointed and an ID cannot — and `name@sha256:` is a registry digest
+form these locally-built images have no registry to satisfy.
+
+    BUILD_ROOT="$(mktemp -d)"
+    /opt/ironworks/dev/build-pinned-ironclaw-artifacts.sh \
+      --source /path/to/official/ironclaw-checkout \
+      --output "$BUILD_ROOT/artifacts"
+
+Keep that output together in its private staging directory until every affected client can
+be stopped and upgraded in one attended window. Installing the binary and manifest and loading
+the image into each daemon is not atomic: a
+running instance could otherwise see a new binary beside an old manifest, or a manifest naming an
+image its daemon has not loaded. The safe rollout below stops every affected active IronClaw
+instance, installs the manifest last, and starts all of them explicitly. `enable --now` is not an
+upgrade operation and must not be read as restarting an already-running instance.
+
+The manifest records the exact revision, the installed binary's SHA-256, the worker archive's
+SHA-256, and Docker's immutable `sha256:…` image ID. These identify one local build's bytes; they
+do **not** claim that another machine will reproduce them. The archive digest is checked before
+loading, then the staging archive can be discarded: startup needs the loaded image, not the tarball
+that transported it. The IronClaw unit loads the root-owned manifest after the client environment,
+verifies the installed binary and image ID in that client's private daemon, and refuses startup on
+any missing or mismatched value. The manifest uses the pin's
+`IRONCLAW_REBORN_SANDBOX_IMAGE` name directly, never `ironclaw-worker:latest`, so systemd can exec
+the installed binary without a variable-renaming wrapper.
 
 Install Docker's rootless extras plus `uidmap`, `slirp4netns` and `fuse-overlayfs`. For client slug
 `acme`, create a dedicated control-plane user and storage root. The subordinate UID/GID range must
@@ -192,7 +377,7 @@ it by `ironclaw-acme`. The explicit `[identity] tenant` and `default_owner` are 
 IronClaw derives its worker, proxy and network names from that pair. The service preflight refuses
 to start if either value differs from the service instance.
 
-`/etc/rustworks/ironclaw-acme.env` is root-owned, mode 0600 and contains at least
+`/etc/ironworks/ironclaw-acme.env` is root-owned, mode 0600 and contains at least
 `IRONCLAW_PORT=3997`, `IRONCLAW_REBORN_WEBUI_USER_ID=acme`,
 `IRONCLAW_REBORN_DOCKER_HOST=unix:///run/user/UID/docker.sock` (with `UID` replaced by
 `id -u ironclaw-acme`), the WebUI token, and the model provider key. The UID-specific socket is
@@ -202,8 +387,10 @@ The WebUI user is checked against both `default_owner` and the service instance 
 
 Docker supports a rootless daemon under that account's user manager, not a system unit with
 `User=` ([Docker rootless-mode guidance](https://docs.docker.com/engine/security/rootless/tips/)).
-Enable lingering so the user manager survives logout, enable its daemon, load the pinned
-worker image into the private image store, then start IronClaw. This host must use cgroup v2 with
+Enable lingering so the user manager survives logout and enable its daemon. Each private daemon
+preserves the
+content-addressed image ID recorded in the manifest; the startup preflight checks it before the
+control plane is allowed to start. This host must use cgroup v2 with
 the systemd cgroup driver; otherwise rootless Docker ignores IronClaw's worker memory and PID
 limits, and the deployment proof fails:
 
@@ -212,12 +399,67 @@ limits, and the deployment proof fails:
     sudo -u ironclaw-acme env XDG_RUNTIME_DIR="/run/user/$ACME_UID" \
       systemctl --user daemon-reload
     sudo -u ironclaw-acme env XDG_RUNTIME_DIR="/run/user/$ACME_UID" \
-      systemctl --user enable --now rustworks-docker.service
-    sudo -u ironclaw-acme env HOME=/var/lib/ironclaw/acme \
-      XDG_RUNTIME_DIR="/run/user/$ACME_UID" \
-      DOCKER_HOST="unix:///run/user/$ACME_UID/docker.sock" \
-      docker load -i /opt/ironclaw/ironclaw-worker.tar
-    sudo systemctl enable --now rustworks-ironclaw@acme.service
+      systemctl --user enable --now ironworks-docker.service
+
+For a first installation, finish creating every client account and daemon before continuing, and
+list every new instance below. For an upgrade, put **every currently active instance receiving
+these shared artifacts** in `AFFECTED_CLIENTS`; do not leave an old process running across the
+non-atomic installation window. The example names are placeholders. The staging archive is
+verified, loaded, and its manifest identity read back from every daemon before the root-owned,
+non-writable manifest becomes authoritative:
+
+    (
+    set -euo pipefail
+    AFFECTED_CLIENTS=(acme globex)
+    for client in "${AFFECTED_CLIENTS[@]}"; do
+      sudo systemctl stop "ironworks-ironclaw@$client.service"
+    done
+    sudo install -o root -g root -m 0755 \
+      "$BUILD_ROOT/artifacts/ironclaw" /opt/ironclaw/bin/ironclaw
+    worker_archive="$BUILD_ROOT/artifacts/ironclaw-worker.tar"
+    worker_archive_sha="$(sed -n 's/^IRONCLAW_WORKER_ARCHIVE_SHA256=//p' \
+      "$BUILD_ROOT/artifacts/artifact-manifest.env")"
+    test "$(sha256sum "$worker_archive" | awk '{print $1}')" = "$worker_archive_sha"
+    worker_image="$(sed -n 's/^IRONCLAW_REBORN_SANDBOX_IMAGE=//p' \
+      "$BUILD_ROOT/artifacts/artifact-manifest.env")"
+    [[ "$worker_image" =~ ^sha256:[0-9a-f]{64}$ ]]
+    for client in "${AFFECTED_CLIENTS[@]}"; do
+      uid="$(id -u "ironclaw-$client")"
+      sudo -u "ironclaw-$client" env HOME="/var/lib/ironclaw/$client" \
+        XDG_RUNTIME_DIR="/run/user/$uid" \
+        DOCKER_HOST="unix:///run/user/$uid/docker.sock" \
+        docker load < "$worker_archive"
+      sudo -u "ironclaw-$client" env HOME="/var/lib/ironclaw/$client" \
+        XDG_RUNTIME_DIR="/run/user/$uid" \
+        DOCKER_HOST="unix:///run/user/$uid/docker.sock" \
+        docker image inspect "$worker_image" >/dev/null
+    done
+    sudo install -o root -g root -m 0644 \
+      "$BUILD_ROOT/artifacts/artifact-manifest.env" /opt/ironclaw/artifact-manifest.env
+    sudo systemctl daemon-reload
+    for client in "${AFFECTED_CLIENTS[@]}"; do
+      sudo systemctl restart "ironworks-ironclaw@$client.service"
+      sudo systemctl is-active --quiet "ironworks-ironclaw@$client.service"
+      test "$(sudo systemctl show "ironworks-ironclaw@$client.service" \
+        --property=Result --value)" = success
+      test "$(sudo -u "ironclaw-$client" env HOME="/var/lib/ironclaw/$client" \
+        IRONCLAW_REBORN_HOME="/var/lib/ironclaw/$client" \
+        /opt/ironclaw/bin/ironclaw config get identity.tenant)" = "$client"
+    done
+    sudo systemctl enable "ironworks-ironclaw@acme.service"
+    )
+
+An active unit after that explicit restart means both `ExecStartPre` checks ran successfully
+against the newly installed files and client custody. The final `config get` is the non-secret
+identity read-back from the restarted binary; it must print the loop's client slug. If any command
+fails, leave the affected control planes stopped and reconcile the installed set rather than
+installing another manifest over the conflict.
+
+Passing the startup checks establishes local artifact identity and availability in this one
+daemon. It does not establish a reproducible build, the effective model used for a turn, resistance
+to the root operator, or that a worker was created or invoked. In particular, no shipped service
+currently declares the sandbox capability, so active worker use still requires the separate
+synthetic workspace proof described below before any product claim can rely on it.
 
 The second instance used here may be a disposable synthetic client; creating it is part of testing
 the deployment and is not gated by the result it exists to measure. It gets another OS user,
@@ -233,7 +475,7 @@ Apply the explicit workspace policy, which leaves `builtin.shell` reachable and 
 other catalogued model tool (including authority-changing and general HTTP tools), then prove that
 IronWorks really uses the sandbox:
 
-    ironworks lifecycle confine CLIENT --store /var/lib/rustworks/lifecycle.store
+    ironworks lifecycle confine CLIENT --store /var/lib/ironworks/lifecycle.store
     dev/prove-workspace.sh
 
 The proof creates a random value inside the sandbox, then reads the same value from two fresh
@@ -259,7 +501,7 @@ deployment needs a service definition that asks for one.
 
 **The container build is the choice worth keeping.** The host runs the live fleet; installing
 rustup there would leave ~1 GB of toolchain on it permanently to produce three binaries. The
-container leaves a 78 MB cargo cache under `/opt/rustworks/.cargo-home`, which is kept
+container leaves a 78 MB cargo cache under `/opt/ironworks/.cargo-home`, which is kept
 deliberately — it makes the next rebuild about a minute rather than several.
 
 **Verify the composition after building, not just that it compiled.** `ironworks compose` on the
@@ -302,12 +544,12 @@ chat id like `-1002000001`.
     export CLIENT_RECORDS=<records bearer> CLIENT_MEMBER=<the minted member bearer>
     export IRONCLAW_OPERATOR_TOKEN=<operator token> IRONCLAW_MEMBER_TOKEN="$CLIENT_MEMBER"
 
-    ironworks lifecycle adopt CLIENT --store /var/lib/rustworks/lifecycle.store \
+    ironworks lifecycle adopt CLIENT --store /var/lib/ironworks/lifecycle.store \
       --service relationship-intelligence --channel <channel id> \
       --records-credential env:CLIENT_RECORDS --member-credential env:CLIENT_MEMBER
 
-    ironworks lifecycle confine CLIENT --store /var/lib/rustworks/lifecycle.store --dry-run
-    ironworks lifecycle confine CLIENT --store /var/lib/rustworks/lifecycle.store
+    ironworks lifecycle confine CLIENT --store /var/lib/ironworks/lifecycle.store --dry-run
+    ironworks lifecycle confine CLIENT --store /var/lib/ironworks/lifecycle.store
 
 **`--dry-run` shows the plan; it does not rehearse the run.** It opens the store read-only and
 writes nothing, which is the only way to see this step twice — confinement writes approval-off
@@ -320,34 +562,78 @@ mismatch exits 2 having touched nothing. Trust that over the dry run.
 
 **Run both as the account that will own the store.** `adopt` creates the store *before* it validates
 the environment, so a run with the wrong env still leaves a `lifecycle.store` owned by whoever ran
-it — and a root-owned store breaks the `runuser -u rustworks` step below. Use the same account
+it — and a root-owned store breaks the `runuser -u ironworks` step below. Use the same account
 there and here.
 
 Confinement writes one settings row per catalogued tool, which is comfortably more than the
 runtime's 30 requests per 60 seconds. Leave a minute before asking it for a turn, or the refusal
 reads as a defect in whatever ran next.
 
+Enable the cell's attestation timer after that first clean measurement. It binds the supplied
+member credential, derives policy from the lifecycle-recorded service, reads the complete
+catalogue, and publishes JSON only for a drift-free result:
+
+    sudo systemctl enable --now ironworks-attest@relationship-demo.timer
+
+The timer refreshes every five minutes; evidence expires after ten. A measured drift removes the
+current file immediately, while an unavailable runtime leaves the prior file to expire naturally.
+The relay unit requires `/run/ironworks-attest/relationship-demo/current.json` for every new
+logical turn and records its four fingerprints with that turn. Recovery and fetch of an already
+accepted response do not consult current attestation state. So a stopped or disabled timer is a
+cell that refuses every new turn within ten minutes while every unit it serves through stays
+active: `dev/prove-host.sh` check 12 asserts the timer is enabled and active, and check 13 that the
+current file names this cell's slug and member and has not expired.
+
 ### Publishing one attended tenant
 
 After adoption and `lifecycle confine` have recorded a certified `member_confined` stage, construct
 the registry from lifecycle state rather than copying identifiers into JSON by hand. Run as the
-`rustworks` account: the live registry is mutable service state under `/var/lib/rustworks`, while
-the root-only credentials remain in `/etc/rustworks/relay.env` and are loaded into this attended
+`ironworks-relationship-demo` account: the live registry is mutable service state under its cell,
+while the root-only credentials remain in `/etc/ironworks/relay-relationship-demo.env` and are loaded into this attended
 process without appearing in arguments.
 
-    sudo systemctl stop rustworks-relay.service
-    sudo bash -c 'set -a; . /etc/rustworks/relay.env; set +a; \
-      exec runuser -u rustworks --preserve-environment -- \
-      /opt/rustworks/target/release/ironworks registry publish-one relationship-demo \
-        --store /var/lib/rustworks/lifecycle.store \
-        --registry /var/lib/rustworks/registry.json \
-        --guidance /opt/rustworks/GUIDANCE.md \
+Install the initial guidance at the tenant-specific canonical path. This direct installation is
+only bootstrap: once a registry names the path, all replacements go through `guidance
+publish-one`.
+
+    sudo install -d -o ironworks-relationship-demo -g ironworks-relationship-demo -m 0700 \
+      /etc/ironworks/relationship-demo
+    sudo install -o ironworks-relationship-demo -g ironworks-relationship-demo -m 0600 \
+      ./GUIDANCE.initial.md /etc/ironworks/relationship-demo/guidance.md
+
+    sudo systemctl stop ironworks-relay@relationship-demo.service
+    sudo bash -c 'set -a; . /etc/ironworks/relay-relationship-demo.env; set +a; \
+      exec runuser -u ironworks-relationship-demo --preserve-environment -- \
+      /opt/ironworks/target/release/ironworks registry publish-one relationship-demo \
+        --store /var/lib/ironworks/lifecycle.store \
+        --registry /var/lib/ironworks/relationship-demo/registry.json \
+        --guidance /etc/ironworks/relationship-demo/guidance.md \
         --records-credential env:RELATIONSHIP_DEMO_RECORDS \
         --member-credential env:RELATIONSHIP_DEMO_MEMBER'
 
+**A registry published before the `org` field existed is migrated by the same `publish-one`
+command — never by hand.** Registry entries now carry the org the records credential resolves to,
+and the relay refuses the whole registry when it is absent (§B-4). After re-measuring both
+credential identities, `publish-one` recognizes only the exact byte string its former no-`org`
+publisher produced for this tenant. It durably publishes the current candidate first, then
+compare-and-swaps the current registry identity. The original `staged` history row keeps the
+legacy digest as the record of what first reached that stage; appending another would falsely say
+the stage was reached twice. A byte-different file, even semantically equivalent JSON, is refused
+unchanged. A crash-released lock beside the registry serializes publish and rollback commands and
+is held until the lifecycle transaction commits.
+
+Rerun the command above. `MIGRATED … old -> new` means both the file and lifecycle binding are
+current. A valid current-schema `.previous` file is preserved. A missing or legacy rollback cannot
+be promised as loadable by the strict current reader, so the command deliberately replaces it
+with the versioned prior-absence marker and says that rollback now removes the live registry. If a
+crash lands after the file rename but before SQLite commits, rerunning the same command completes
+the compare-and-swap without republishing or replacing a valid rollback. Confirm with `ironworks
+status` and the relay's own `relay: tenant … scope … verified by …` line before re-enabling the
+unit.
+
 `publish-one` refuses before writing unless the records handle resolves to the lifecycle org and
 the member handle's complete `/session` subject equals the recorded runtime tenant and user. It
-validates the guidance and constructed one-tenant registry, writes a same-directory mode-0600
+parses the guidance and constructed one-tenant registry, writes a same-directory mode-0600
 temporary file, syncs the file and directory around every rename, and durably preserves the old
 registry as `registry.json.previous` before publishing. It then records `staged`. A crash after the
 rename but before SQLite recording is visible and recoverable by rerunning the same command; an
@@ -359,15 +645,93 @@ actual prior state instead of leaving a process able to serve a file that did no
 
 Rollback is an implemented and tested operation, not a hand edit:
 
-    sudo systemctl stop rustworks-relay.service
-    sudo -u rustworks /opt/rustworks/target/release/ironworks registry rollback-one \
-      --registry /var/lib/rustworks/registry.json
+    sudo systemctl stop ironworks-relay@relationship-demo.service
+    sudo -u ironworks-relationship-demo /opt/ironworks/target/release/ironworks registry rollback-one \
+      --registry /var/lib/ironworks/relationship-demo/registry.json
 
-It validates the preserved registry, restores it through the same file-sync/directory-sync/rename
+It restores the preserved registry through the same file-sync/directory-sync/rename
 sequence, keeps `registry.json.previous` for another recovery, and does not rewrite historical
 lifecycle progress. Restarting the relay remains an attended operator action. The acceptance test
 publishes a new registry, loads and routes through it, rolls back, and loads and routes through the
 prior registry again.
+
+### Publishing a guidance update
+
+After the registry exists, direct copying to the canonical guidance path is not a supported update
+path. Put the candidate beside operator staging state, stop the tenant relay, and let the binary
+derive both the service and canonical destination from the matching registry entry:
+
+    sudo install -o ironworks-relationship-demo -g ironworks-relationship-demo -m 0600 \
+      ./GUIDANCE.candidate.md /var/lib/ironworks/relationship-demo/GUIDANCE.candidate.md
+    sudo systemctl stop ironworks-relay@relationship-demo.service
+    sudo -u ironworks-relationship-demo /opt/ironworks/target/release/ironworks guidance publish-one \
+      relationship-demo --registry /var/lib/ironworks/relationship-demo/registry.json \
+      --source /var/lib/ironworks/relationship-demo/GUIDANCE.candidate.md
+
+The command parses the candidate against that derived slug and service and publishes through a
+same-directory owner-only temporary
+file with file and directory sync around the atomic rename. It retains the prior bytes as
+`GUIDANCE.md.previous` under the registry publication lock. Its output contains only a byte count
+and SHA-256 digest; tenant guidance is never echoed. Inspect those values, remove the staging copy,
+then restart the relay as a separate attended action.
+
+Rollback is equally explicit and does not consume the prior artifact. It parses the preserved
+bytes against the registry-derived slug and service before changing the live file:
+
+    sudo systemctl stop ironworks-relay@relationship-demo.service
+    sudo -u ironworks-relationship-demo /opt/ironworks/target/release/ironworks guidance rollback-one \
+      relationship-demo --registry /var/lib/ironworks/relationship-demo/registry.json
+
+Run `dev/prove-host.sh` after restart. It derives the live slug, service, and guidance path from the
+one-entry registry and requires `compose` to accept it read-only.
+
+## Encrypted state backup and restore
+
+`deploy/backup.example.json` is the closed-world configuration shape. Copy it to
+`/etc/ironworks/backup.json`, replace every example with an exact tenant or fleet path, and keep it
+root-owned at mode `0600`. The repository and password file are mandatory; the binary carries no
+fallback. Roots must be narrow absolute literal directories, and every named file must resolve
+below its corresponding root.
+
+Install `restic`, then take an attended first snapshot:
+
+```text
+sudo install -d -m 0700 /var/lib/ironworks/backup-staging
+sudo /opt/ironworks/target/release/ironworks state snapshot \
+  --config /etc/ironworks/backup.json \
+  --output /var/lib/ironworks/backup-staging
+```
+
+The command takes online SQLite backups of the lifecycle store, each cell journal and proposal
+store, copies the backup configuration, bound registry, guidance, credentials and configured pin/artifact manifests into
+a root-only staging directory, verifies its digest manifest, uploads that directory through
+restic, reports success only from restic's exit status, and removes the plaintext staging tree.
+The encrypted manifest records each archived file's canonical
+restore destination; credentials and configured fleet files additionally require root ownership.
+The complete manifest remains inside the encrypted snapshot beside the files it describes. After
+the first upload, run
+`check-state-backup.sh` and `rehearse-state-restore.sh` manually. The latter restores the newest
+tagged snapshot into a disposable directory and runs `ironworks state verify-snapshot` without
+contacting IronClaw, a channel, or a record service. Both exit `2` (FAIL) for a repository that was
+reached and failed integrity or authentication, and the rehearsal also for a corrupt, incomplete,
+wrongly bound or wrongly permissioned restore. Both exit `3` (BLOCKED) whenever that was never
+measured: the repository unreachable or locked by another process, `restic` or `python3` not
+installed, or the configuration or its password file unreadable — and, for the rehearsal, no
+disposable directory, no verifier at `/opt/ironworks/target/release/ironworks`, or a verifier that
+exits without a verdict. `dev/test-state-backup.sh` holds both scripts to that offline.
+
+There is deliberately no timer or automated retention yet. Schedule and pruning become justified
+only after an attended upload and restore have both produced PASS; automating an unproved restore
+path would turn a missing measurement into unattended state change.
+
+An attended recovery restores beside, never over, live state. Run `verify-snapshot` first; stop
+only the affected tenant's relay, Telegram adapter, attestation timer and IronClaw unit; retain the
+current tenant directory under a timestamped rollback name; install the verified tenant directory
+at `/var/lib/ironworks/<slug>`; and start only those four units. Directory replacement must use a
+host facility that provides an atomic exchange (Linux `renameat2(RENAME_EXCHANGE)` or an
+equivalent deployment primitive). If that facility is absent, stop: a two-rename approximation is
+not this procedure. Keep the displaced directory until a recovered open turn has followed normal
+recovery and delivery, then remove it only as a separate attended decision.
 
 ## Rehearsing the cursor handoff
 
@@ -424,7 +788,7 @@ is silent, and it is the most expensive mistake available at cutover.
 Two related ways to reach the same place:
 
 - an attended relay run as `root` writes a root-owned journal that the unit, running as
-  `rustworks`, then cannot open;
+  `ironworks`, then cannot open;
 - a relay pointed at a journal from a *different* tenant's history inherits that tenant's cursor.
 
 ### What a rehearsal must show
@@ -437,13 +801,13 @@ Every criterion is measured from **inside the room**, not from the relay's own a
    is durable. **Provoke the compacted case explicitly**: once rows below the acknowledged offset
    are gone, `cursor_acked` is the only thing carrying the position, and a restart that survives
    with rows present proves the easier half;
-4. `ironworks status --journal /var/lib/rustworks/serve.journal` — the path
-   `rustworks-relay.service` actually passes — ends at `0 unresolved turn(s)`;
+4. `ironworks status --journal /var/lib/ironworks/relationship-demo/serve.journal` — the path
+   `ironworks-relay@relationship-demo.service` actually passes — ends at `0 unresolved turn(s)`;
 5. handing back leaves 1-4 true in the other direction.
 
 ### Why two
 
-**Both now start from a populated journal.** `/var/lib/rustworks/serve.journal` holds the turn of
+**Both now start from a populated journal.** `/var/lib/ironworks/serve.journal` holds the turn of
 2026-09-04 and the cursor has advanced past it, so the clean start this section was first written
 around no longer exists. The only way to recover one is to point the relay at a fresh `--journal`,
 which is precisely the mistake described above: it re-reads every update Telegram still retains
@@ -510,14 +874,18 @@ and cannot prove is the part above, because it has no second bot and no retained
    with: both runs now start from a populated journal, so the first is not a warm-up and nothing
    should be planned as learned on day one at day two's expense.
 
-5. **Repoint the existing tenant's `channel`, and accept the two publishes.** A second published
-   tenant is the cheaper-looking option and it is closed to us: `docs/PRD.md` §23 step 1 keeps the
-   constraint that **the cursor is shared across every admitted tenant, so one client relay is safe
-   and two are not**, and step 5 — per-tenant journal and loop — is not done. Publishing a second
-   tenant to avoid two publishes would break the ordering the PRD sets in order to protect a
-   rehearsal. The publishes themselves are the half already proven, as the paragraph above records.
+5. **Repoint the existing tenant's `channel`, and accept the two publishes.** This remains the
+   rehearsal shape even though the repository now carries templated per-tenant relay and Telegram
+   units: the two-cell availability and isolation qualification has not produced PASS, so a second
+   client is still not admitted. The publishes themselves are the half already proven, as the
+   paragraph above records.
 
 ## What remains
+
+**The cell was redeployed onto this architecture on 2026-09-07.** What that moved, and the two
+paths that keep the old name, are under "Where it lives" above;
+`docs/experiments/0056-the-served-host-was-never-running-the-pinned-model.md` records the run, the
+two unit defects it found, and the first turn served under an applied model policy.
 
 `multi-serve` is a Hetzner Ubuntu 24.04 host reached over SSH as an unprivileged operator account;
 direct root SSH remains disabled. **The name is not DNS and is not an alias anywhere by default** —
@@ -533,10 +901,10 @@ and the dedicated `ironclaw-relationship-demo` daemon measured both rootless sec
 and all four units are installed. A Hetzner firewall admits inbound SSH only.
 
 **It serves, and that is still one turn rather than a behavioural claim.**
-`rustworks-telegram` and `rustworks-relay` are enabled and active, and one message in the tenant's
+`ironworks-telegram` and `ironworks-relay` are enabled and active, and one message in the tenant's
 room was polled, routed, scope-verified against the record store, composed over 8 records, answered
 by the confined member and delivered — `ironworks status` reporting no unresolved turn afterwards.
-`rustworks-devstore` is stopped and disabled: this tenant's records come from the Account Service,
+`ironworks-devstore` is stopped and disabled: this tenant's records come from the Account Service,
 and the relay no longer names a store.
 
 **Most of it is now independently verified in this repository.** `dev/prove-host.sh` has reached
@@ -547,6 +915,48 @@ at 53 catalogued, 2 reachable, approval off, and registry digest `a3f91ef2615d44
 is the client's own room and is not written here for the reason the address is not; `PROVE_HOST_*`
 carries no expectation for it, and no check reaches it.
 The units, the confinement and the digest measured as recorded here.
+
+**Superseded on 2026-09-07, and the digest above is the old one.** Publishing the tenant's `org`
+field rewrote the registry — `MIGRATED relationship-demo registry a3f91ef2615d440f ->
+5c62e5168c417c8c` — so the recorded value that run scored against is no longer what the host holds.
+The live digest is now `5c62e5168c417c8c`, and `dev/prove-host.sh` defaults to it. A later run the
+same day, after IronClaw was cut over to the artifact-manifest unit, scored **9 PASS, 1 FAIL, 0
+BLOCKED**: the remaining FAIL was this stale digest, in the proof rather than on the host. With that
+corrected and an eleventh check added, the host scored **11 PASS, 0 FAIL, 0 BLOCKED** (`0058`).
+Checks 12 and 13 — the attestation timer, and the age of the evidence it keeps — came later, and
+check 11 widened to every command systemd runs as root and to the deployment tree those commands
+run from. Measured on 2026-09-10 with all thirteen, the host scored **13 PASS, 0 FAIL, 0 BLOCKED**
+(`0063`).
+
+That eleventh check, `privilege.root_execution_paths`, exists because of what this same day found:
+a unit line beginning `ExecStartPre=+` runs as **root** regardless of `User=`, and all three serving
+units have one. It walks every path systemd runs as root — a `+` or `!` prefix, or any command of a
+unit whose effective `User=` is root or unset, which takes in `ironworks-attest@.service` and
+whatever its timer triggers — and every directory above it, failing on any component not owned by
+uid 0 or writable by group or other. A unit it cannot read blocks it rather than passing unread.
+Whenever one of those paths lies under `/opt/ironworks`, it also scans that whole tree, without
+following symlinks or crossing filesystems, for any object not owned by uid 0 or writable by group
+or other. That is what covers what a root command runs in turn, which no unit line names — the
+`ironworks` binary `refresh-attestation.sh` executes — and it holds the tree to the root ownership
+this document already requires of it. It reports the first five offenders and a count; a tree it
+cannot read in full blocks it.
+**Deploys into `/opt/ironworks` must now run as root** — an `rsync` as the login account will
+fail, and that failure is the point.
+
+Two things that run established are worth keeping. The tenant's IronClaw now starts through
+`ironworks-ironclaw@.service`, whose `check-ironclaw-artifacts.sh` preflight refuses to start
+unless the installed binary hashes to the root-owned manifest and this client's rootless daemon
+resolves the manifest's worker image — so the serving binary's provenance is now checked at every
+start rather than asserted here. And `model.policy_matches_pin` passed *after* the runtime was
+replaced, which is the drift `MODEL_PIN` warns about and the first time that warning has been
+tested rather than restated.
+
+**`/opt/rustworks/GUIDANCE.md` is load-bearing and must not be deleted.** The live registry names
+this tenant's guidance at that absolute path, and by the rule above the path is fixed at
+publication: moving it means resetting the lifecycle store, which spends another member on a
+one-way `confine` (§L-9). The rest of `/opt/rustworks` is gone — the directory is pruned to that
+file, all four `rustworks-*` units were removed, and `ironworks-*` units serve in their place
+(`0058`) — but that one file stays until there is a reason worth a member.
 
 **The failure was the proof's own, and this file caused it.** It expected the member id in the
 truncated form this paragraph used to carry — `520144ef` — while the runtime reports the full
@@ -573,24 +983,28 @@ data channel it is told to distrust. Measured on the host with its own binary, 2
 `guidance 2676 bytes (ea05f11f902bed58)` against `1401` for the corrected file — **1,270 bytes of
 operator instructions in every prompt**, the imperative "Add, as headed sections in the visible
 body" among them, pointing at the sales-shaped sections that persona exists to refuse.
-`ironworks compose` now reports that count itself, as a warning rather than a refusal: guidance is
-a tenant's own prose and may legitimately hold the sequence, so refusing it would stop serving a
-tenant over punctuation.
+The first containment reported that count from `compose` as a warning. The control now lives in
+`Guidance::parse`: this guidance format has no use for a stray HTML terminator, and treating the
+hazardous shape as valid was what forced every activation path to remember a second gate.
 
-It reached real turns rather than merely being able to. `/var/lib/rustworks/registry.json` names
-`/opt/rustworks/GUIDANCE.md` for this tenant, that file was written at 21:18:08 UTC on 2026-09-04,
-and `rustworks-relay` entered active at 23:00:08 UTC, so every cycle since composed with it — the
+It reached real turns rather than merely being able to. `/var/lib/ironworks/registry.json` names
+`/opt/ironworks/GUIDANCE.md` for this tenant, that file was written at 21:18:08 UTC on 2026-09-04,
+and `ironworks-relay` entered active at 23:00:08 UTC, so every cycle since composed with it — the
 turn this section records included, under alloy `4e68bf09c447a410` rather than the
 `d6b30a462440e6ae` the corrected file produces. The same trap is already documented on
 `ironworks_domain::composition`'s fact-field parser, for a declared key containing that delimiter.
 The template did it to itself, by example.
 
-**Corrected and installed 2026-09-05 01:18:46 UTC**, and the fix was a file copy into
-`/opt/rustworks` and nothing else — no restart, no unit change, no registry publish. It composed
+**Corrected and installed 2026-09-05 01:18:46 UTC**, and the fix at that time was a file copy into
+`/opt/ironworks` and nothing else — no restart, no unit change, no registry publish. It composed
 `guidance 1401 bytes (347488a6f7cbf3bb)` under alloy `d6b30a462440e6ae`, matching the repository
 copy part for part. `dev/relay-loop.sh` runs a fresh process per cycle, so guidance is re-read from
 disk every cycle: the first cycle on the corrected file ran two seconds after it landed, under a
 new pid, and the loop polled cleanly through it.
+
+That direct-copy procedure is historical evidence, not current instruction. It was superseded by
+the `guidance publish-one` gate above, which refuses the two hazards before replacing live bytes and
+keeps a durable rollback artifact.
 
 **The served guidance moved again at 02:08:35 UTC the same day, deliberately and not as part of
 that fix.** Settling the guidance shape (recorded in `fixtures/tenants/guidance.template.md`)

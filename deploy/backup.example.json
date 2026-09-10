@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "repository": "s3:s3.example.invalid/ironworks-backups",
+  "password_file": "/etc/ironworks/backup/restic-password",
+  "lifecycle_root": "/var/lib/ironworks",
+  "lifecycle_store": "/var/lib/ironworks/lifecycle.store",
+  "tenants": [
+    {
+      "slug": "tenant-example",
+      "state_root": "/var/lib/ironworks/tenant-example",
+      "config_root": "/etc/ironworks",
+      "journal": "/var/lib/ironworks/tenant-example/serve.journal",
+      "proposals": "/var/lib/ironworks/tenant-example/serve.journal.proposals",
+      "registry": "/var/lib/ironworks/tenant-example/registry.json",
+      "guidance": "/etc/ironworks/tenant-example/guidance.md",
+      "credentials": [
+        "/etc/ironworks/relay-tenant-example.env",
+        "/etc/ironworks/telegram-tenant-example.env",
+        "/etc/ironworks/channel-adapter-tenant-example.env",
+        "/etc/ironworks/cell-tenant-example.env"
+      ]
+    }
+  ],
+  "fleet_files": [
+    {
+      "source": "/opt/ironworks/MODEL_PIN",
+      "root": "/opt/ironworks",
+      "name": "MODEL_PIN"
+    },
+    {
+      "source": "/opt/ironclaw/artifact-manifest.env",
+      "root": "/opt/ironclaw",
+      "name": "ironclaw-artifact-manifest.env"
+    }
+  ]
+}

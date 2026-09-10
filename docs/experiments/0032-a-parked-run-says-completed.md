@@ -49,8 +49,8 @@ That turns an existing line into something load-bearing it was not written to be
 
 `ironworks_ironclaw::to_outcome` maps `WireStatus::Completed` to `Outcome::Completed { text, usage }`,
 where `text` is `output_text(&doc.output)`, which skips content parts that carry no `text`
-(`model.rs:228-233`). The measured `function_call` item has **no `content` array at all**, so the
-text is empty.
+(`crates/ironclaw/src/model.rs::output_text`). The measured `function_call` item has **no `content`
+array at all**, so the text is empty.
 
 So a tools-enabled turn that parks would today be recorded as a completed turn, commit a thread
 pointer, and deliver nothing. This is not a live defect — IronWorks sends no `tools`, so no run can

@@ -15,6 +15,18 @@ pub const VERDICTS: &[&str] = &["PASS", "FAIL", "REVIEW", "BLOCKED"];
 /// **Two shapes exist and both are current**: the early runs are a bare list of case rows, the
 /// later ones a map carrying `suite` and `ingredients` alongside `cases`. Accept either rather
 /// than normalising the archive.
+///
+/// # This decode is duplicated on purpose
+///
+/// `crates/evidence/src/transcript.rs::cases` is the same three arms, and `site` and the regrade
+/// ledger share it. **This crate deliberately does not**, and that is not an oversight to tidy: the
+/// control must not read its evidence through the same function as the code it checks. If that
+/// reader were wrong — counting an object's `cases` from the wrong key, say — both sides would
+/// agree and this check would report every tally holding while the page published a different
+/// number. That is §K-8's positive control applied to the harness itself, and the price is these
+/// nine lines.
+///
+/// It is also why `crates/claims` declares no dependency on any workspace crate.
 pub fn transcript_counts(path: &Path) -> Result<BTreeMap<String, usize>, String> {
     let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
     let doc: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
@@ -69,12 +81,7 @@ pub fn recorded_claims(markdown: &str) -> Vec<Claim> {
 fn transcript_name(line: &str) -> Option<String> {
     crate::backticked(line, |c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
         .into_iter()
-        .find(|s| {
-            s.ends_with(".json")
-                && s.len() > 5
-                && s.as_bytes()[..4].iter().all(u8::is_ascii_digit)
-                && s.as_bytes().get(4) == Some(&b'-')
-        })
+        .find(|s| s.ends_with(".json") && crate::experiment_number(s).is_some())
 }
 
 /// Every `<n> <VERDICT>` pair in a line.
@@ -96,6 +103,16 @@ fn tally(text: &str) -> BTreeMap<String, usize> {
 }
 
 /// Check every experiment writeup's tally against its transcript.
+/// The stable identity of a tally claim: the transcript whose counts are being checked.
+///
+/// **Not the line anchor.** `README.md:164` is where a reader should look and is useless as an
+/// identity — it moves whenever the lines above it do, so the same claim would arrive at the next
+/// run under a new name and read as newly unmeasured rather than as a verdict that moved. The
+/// transcript is what the claim is *about*, and it does not move.
+fn tally_claim(transcript: &str) -> String {
+    format!("tally:{transcript}")
+}
+
 pub fn check(root: &Path) -> Vec<Finding> {
     let dir = root.join("docs/experiments");
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -121,14 +138,20 @@ pub fn check(root: &Path) -> Vec<Finding> {
             };
             let path = dir.join(&transcript);
             if !path.is_file() {
-                findings.push(Finding::blocked(
-                    where_,
-                    format!("names {transcript}, which is not in the tree"),
-                ));
+                findings.push(
+                    Finding::blocked(
+                        where_,
+                        format!("names {transcript}, which is not in the tree"),
+                    )
+                    .claiming(tally_claim(&transcript)),
+                );
                 continue;
             }
             match transcript_counts(&path) {
-                Err(why) => findings.push(Finding::blocked(where_, format!("{transcript}: {why}"))),
+                Err(why) => findings.push(
+                    Finding::blocked(where_, format!("{transcript}: {why}"))
+                        .claiming(tally_claim(&transcript)),
+                ),
                 Ok(actual) => {
                     let disagree: Vec<String> = VERDICTS
                         .iter()
@@ -145,12 +168,18 @@ pub fn check(root: &Path) -> Vec<Finding> {
                         })
                         .collect();
                     if disagree.is_empty() {
-                        findings.push(Finding::pass(where_, format!("{transcript} tallies")));
+                        findings.push(
+                            Finding::pass(where_, format!("{transcript} tallies"))
+                                .claiming(tally_claim(&transcript)),
+                        );
                     } else {
-                        findings.push(Finding::fail(
-                            where_,
-                            format!("{transcript} — {}", disagree.join("; ")),
-                        ));
+                        findings.push(
+                            Finding::fail(
+                                where_,
+                                format!("{transcript} — {}", disagree.join("; ")),
+                            )
+                            .claiming(tally_claim(&transcript)),
+                        );
                     }
                 }
             }

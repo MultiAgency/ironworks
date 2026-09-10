@@ -119,18 +119,18 @@ fn instance(slug: &str, claimed: Option<&str>) -> ServiceInstance<Unverified> {
         "s",
     )
     .unwrap();
-    ServiceInstance::new(
-        Slug::parse(slug).unwrap(),
+    ServiceInstance::new(ironworks_domain::InstanceParts {
+        slug: Slug::parse(slug).unwrap(),
         definition,
         guidance,
-        RuntimeIdentity::parse("m").unwrap(),
-        CredentialRef::new(CredentialPurpose::RuntimeMember, "env:RUNTIME"),
-        ContextBinding::new(scope_credential()).unwrap(),
-        ModelSelection::from_pin(&ModelPin::parse("M # c").unwrap()),
-        CapabilityProfile::READ_ONLY_RECORDS,
-        claimed.map(|c| OrgId::parse(c).unwrap()),
-        &parts(),
-    )
+        runtime_identity: RuntimeIdentity::parse("m").unwrap(),
+        runtime_credential: CredentialRef::new(CredentialPurpose::RuntimeMember, "env:RUNTIME"),
+        context_binding: ContextBinding::new(scope_credential()).unwrap(),
+        model: ModelSelection::from_pin(&ModelPin::parse("M # c").unwrap()),
+        requested_capabilities: CapabilityProfile::READ_ONLY_RECORDS,
+        claimed_org: claimed.map(|c| OrgId::parse(c).unwrap()),
+        parts: &parts(),
+    })
     .unwrap()
 }
 
@@ -265,6 +265,12 @@ fn an_unusable_catalog_row_is_dropped_rather_than_failing_the_read() {
     let scope = instance("acme", None).verify(&book).unwrap().record_scope();
     let catalog = book.catalog(&scope).unwrap();
     assert_eq!(catalog.len(), 1, "one bad row must not blind the analyst to the good ones");
+    // Dropping is right; dropping *silently* is not. `Degradation::Partial { unreadable }` exists
+    // so the model can be told "two are missing" — its own doc argues the model can act on that
+    // and cannot act on "some". Without a count here the caller reports `Complete` over a book
+    // that quietly shrank, so a store schema change would take records away from every tenant
+    // with nothing anywhere reporting it.
+    assert_eq!(catalog.dropped(), 2, "the rows that were dropped were not counted");
 }
 
 #[test]

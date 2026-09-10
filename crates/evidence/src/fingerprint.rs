@@ -24,15 +24,21 @@ pub struct Fingerprint {
 /// `None` is the honest answer for a suite whose book is not in this repository, and it is
 /// distinct from a book of zero records.
 ///
+/// # Three answers, because there were two
+///
+/// Every read here was `.ok()?`, so a directory that could not be listed and a file that could not
+/// be opened both became `None` — the same value the paragraph above reserves for *"the book is
+/// not in this repository"*. A permission error on one record therefore reported a suite as
+/// unbound rather than as unreadable, and that is a claim about evidence.
+///
 /// **Sorted by file name**, so the value does not depend on directory order — the one detail that
 /// would make this irreproducible on another machine.
-pub fn book(book_dir: impl AsRef<Path>) -> Option<Fingerprint> {
+pub fn book(book_dir: impl AsRef<Path>) -> Result<Option<Fingerprint>, std::io::Error> {
     let dir = book_dir.as_ref();
     if !dir.is_dir() {
-        return None;
+        return Ok(None);
     }
-    let mut files: Vec<_> = std::fs::read_dir(dir)
-        .ok()?
+    let mut files: Vec<_> = std::fs::read_dir(dir)?
         .filter_map(Result::ok)
         .map(|e| e.path())
         .filter(|p| p.extension().is_some_and(|x| x == "json"))
@@ -41,14 +47,16 @@ pub fn book(book_dir: impl AsRef<Path>) -> Option<Fingerprint> {
 
     let mut manifest = String::new();
     for path in &files {
-        let bytes = std::fs::read(path).ok()?;
-        let name = path.file_name()?.to_string_lossy().into_owned();
+        let bytes = std::fs::read(path)?;
+        // A path that came from `read_dir` has a file name; an empty one would change the
+        // manifest rather than panic, and no such path reaches here.
+        let name = path.file_name().unwrap_or_default().to_string_lossy().into_owned();
         manifest.push_str(&format!("{name} {}\n", hex(&Sha256::digest(&bytes))));
     }
-    Some(Fingerprint {
+    Ok(Some(Fingerprint {
         records: files.len(),
         fingerprint: ironworks_domain::composition::digest16(manifest.as_bytes()),
-    })
+    }))
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -67,8 +75,9 @@ mod tests {
     /// `0020-account-coordination-ten-account-book.json` and `0021`.
     #[test]
     fn the_current_book_fingerprints_as_the_transcripts_record() {
-        let root = crate::root();
+        let root = crate::test_root();
         let got = book(root.join("fixtures/account-coordination/book"))
+            .expect("the coordination book is readable")
             .expect("the coordination book is in this repository");
         assert_eq!(got.records, 10);
         assert_eq!(
@@ -79,8 +88,10 @@ mod tests {
 
     #[test]
     fn a_book_that_is_not_here_fingerprints_as_none() {
-        // Distinct from a book of zero records, which is a book we looked at and found empty.
-        assert_eq!(book("/nonexistent/book"), None);
+        // Distinct from a book of zero records, which is a book we looked at and found empty —
+        // and distinct again from a book we could not read, which is now an `Err` rather than a
+        // third thing wearing this same `None`.
+        assert_eq!(book("/nonexistent/book").expect("absence is not an IO failure"), None);
     }
 
     #[test]

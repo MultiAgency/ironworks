@@ -210,10 +210,8 @@ mod tests {
     use super::*;
 
     fn book() -> Book {
-        super::super::book::load(
-            &ironworks_evidence::root().join("fixtures/account-coordination/book"),
-        )
-        .unwrap()
+        super::super::book::load(&crate::test_root().join("fixtures/account-coordination/book"))
+            .unwrap()
     }
 
     #[test]

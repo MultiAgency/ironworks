@@ -17,6 +17,8 @@ path = "src/main.rs"
 # asking the type is what makes this fixture agree with production by construction rather than by
 # a restated regex.
 ironworks-domain = { path = "../domain" }
+# The request reader and response writer this shares with `devchannel`; see that crate.
+ironworks-devhttp = { path = "../devhttp" }
 serde_json = { workspace = true }
 
 [lints]

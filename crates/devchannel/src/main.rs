@@ -40,8 +40,9 @@
 //! acknowledged through=42
 //! ```
 
+use ironworks_devhttp::{respond, respond_text};
 use sha2::{Digest, Sha256};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::BufReader;
 use std::net::{TcpListener, TcpStream};
 use std::sync::Mutex;
 
@@ -199,44 +200,23 @@ fn main() {
 }
 
 fn handle(mut stream: TcpStream, cfg: &Config, state: &Mutex<State>) {
+    ironworks_devhttp::set_timeouts(&stream);
     let Ok(clone) = stream.try_clone() else { return };
     let mut reader = BufReader::new(clone);
-    let mut request_line = String::new();
-    if reader.read_line(&mut request_line).is_err() {
-        return;
-    }
-    let mut length = 0usize;
-    loop {
-        let mut h = String::new();
-        match reader.read_line(&mut h) {
-            Ok(0) | Err(_) => break,
-            Ok(_) if h == "\r\n" || h == "\n" => break,
-            Ok(_) => {
-                if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
-                    length = v.trim().parse().unwrap_or(0);
-                }
-            }
-        }
-    }
-    let mut body = vec![0u8; length];
-    if length > 0 && reader.read_exact(&mut body).is_err() {
-        return;
-    }
+    let request = match ironworks_devhttp::read(&mut reader) {
+        Ok(request) => request,
+        Err(why) => return ironworks_devhttp::respond_refusal(&mut stream, why),
+    };
 
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or("");
-    let target = parts.next().unwrap_or("");
-    let (path, query) = target.split_once('?').unwrap_or((target, ""));
-
-    match (method, path) {
+    match (request.method.as_str(), request.path.as_str()) {
         ("GET", "/health") => respond(&mut stream, 200, "{\"ok\":true}"),
         ("GET", "/observations") => {
             let s = state.lock().expect("state");
             let body = s.observations.join("\n");
             respond_text(&mut stream, 200, &body);
         }
-        ("GET", "/poll") => poll(&mut stream, cfg, state, query),
-        ("POST", "/send") => send(&mut stream, cfg, state, &body),
+        ("GET", "/poll") => poll(&mut stream, cfg, state, &request.query),
+        ("POST", "/send") => send(&mut stream, cfg, state, &request.body),
         _ => respond(&mut stream, 404, "{\"error\":\"no such path\"}"),
     }
 }
@@ -362,24 +342,4 @@ fn send(stream: &mut TcpStream, cfg: &Config, state: &Mutex<State>, body: &[u8])
 
 fn hex12(bytes: &[u8]) -> String {
     bytes.iter().take(6).map(|b| format!("{b:02x}")).collect()
-}
-
-fn respond(stream: &mut TcpStream, code: u16, body: &str) {
-    write_response(stream, code, "application/json", body);
-}
-
-fn respond_text(stream: &mut TcpStream, code: u16, body: &str) {
-    write_response(stream, code, "text/plain; charset=utf-8", body);
-}
-
-fn write_response(stream: &mut TcpStream, code: u16, content_type: &str, body: &str) {
-    let head = format!(
-        "HTTP/1.1 {code} {}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\n\
-         Connection: close\r\n\r\n",
-        if code == 200 { "OK" } else { "ERR" },
-        body.len()
-    );
-    let _ = stream.write_all(head.as_bytes());
-    let _ = stream.write_all(body.as_bytes());
-    let _ = stream.flush();
 }

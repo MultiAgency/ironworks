@@ -38,17 +38,18 @@
 //! The reference enforces that with a field-name blacklist, because its CLI takes `k=v` pairs
 //! from shell and a future caller passing `token=$TOK` would otherwise write one. **This crate
 //! has no such surface** — every write goes through a typed method whose parameters are
-//! [`Slug`](ironworks_domain::Slug), [`OpaqueId`], [`Stage`] and timestamps, so there is nowhere to
+//! [`Slug`], [`OpaqueId`], [`Stage`] and timestamps, so there is nowhere to
 //! put a secret rather than a rule against putting one there. The proof is a test that reads the
 //! database file's bytes and looks for sentinels.
 //!
-//! # Not in this slice
+//! # Not in this crate
 //!
-//! Deprovisioning, revocation probes, the residual-authority ledger, suspension, live
-//! reconciliation adapters, and serving-process reload. [`Reconcile`] is a trait with fixture
-//! implementations only — the point is to make the crash boundaries representable and testable
-//! *before* wiring foreign systems, so the adapters arrive into a shape whose semantics are
-//! already proven.
+//! External effects remain outside this operator-state boundary. The CLI owns narrow
+//! adoption/confinement/publication coordination, `ironworks-reconcile` owns live IronClaw
+//! measurements, and `ironworks-records` owns Account Service administration contracts. There is
+//! no end-to-end provisioning or deprovisioning orchestrator, residual-authority ledger, or
+//! suspension. [`Reconcile`] remains the read-side abstraction used to compare recorded state with
+//! authoritative systems.
 //!
 //! Suspension is absent deliberately, not pending. The upstream `admin/users/<id>/status`
 //! endpoint exists, but at the pinned revision the session store consults only the signature,
@@ -82,7 +83,7 @@ pub use confinement::{
 };
 pub use inspect::{
     ConfinementAxis, ConfinementOutcome, ConfinementReport, Finding, Inspection, Ledger,
-    LiveConfinement, NoReconciler, Verdict, inspect,
+    LiveConfinement, NoReconciler, Readiness, Verdict, inspect,
 };
 pub use runtime::{
     BoundSubject, ObservedAt, RuntimeIdError, RuntimeSubject, RuntimeTenantId, RuntimeUserId,
@@ -313,7 +314,7 @@ type StoredProgress = (Option<String>, Option<String>, Option<String>, Option<St
 ///
 /// `open_readonly` accepts every known version. Older stores hold valid lifecycle state; refusing
 /// them would make inspection impossible until somebody ran a writing command.
-const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS lifecycle_meta (
@@ -535,6 +536,12 @@ enum Shape {
 
 #[derive(Debug, thiserror::Error)]
 pub enum LifecycleError {
+    #[error("the lifecycle snapshot at {path} could not be created: {source}")]
+    Snapshot {
+        path: String,
+        #[source]
+        source: std::io::Error,
+    },
     #[error("the lifecycle store at {path} could not be opened: {source}")]
     Open {
         path: String,
@@ -606,6 +613,20 @@ pub enum LifecycleError {
         "instance {slug} cannot certify confinement because no runtime member identity is recorded"
     )]
     ConfinementMemberMissing { slug: String },
+    #[error(
+        "instance {slug} cannot migrate its registry binding from stage {stage}; the binding must already be staged"
+    )]
+    RegistryBindingNotStaged { slug: String, stage: String },
+    #[error(
+        "instance {slug} records registry binding {recorded}, not expected legacy binding {expected}; refusing to rewrite authority history"
+    )]
+    RegistryBindingMismatch { slug: String, recorded: String, expected: String },
+    #[error("instance {slug} has no recorded registry binding to migrate")]
+    RegistryBindingMissing { slug: String },
+    #[error(
+        "instance {slug}'s registry binding changed before the conditional migration committed"
+    )]
+    RegistryBindingCasLost { slug: String },
     #[error(
         "instance {slug} cannot be activated from stage {stage}: activation requires every stage \
          through {last} and a passing smoke"
@@ -821,6 +842,11 @@ fn drift_from_columns(
     }
 }
 
+/// The columns [`read_attempt`] reads, named once so the list and the decode cannot disagree.
+const ATTEMPT_COLUMNS: &str = "variant,expected,at,subject_tenant,subject_user,service,\
+                               service_version,policy_fingerprint,catalogued,auto_approve,\
+                               blocked_kind";
+
 /// Rebuild one attempt, re-applying every invariant its constructors discharged.
 ///
 /// # It fails closed, and never into absence
@@ -850,23 +876,24 @@ fn read_attempt(conn: &Connection, id: i64) -> Result<attempt::ConfinementAttemp
         Option<String>,
     );
     let row: Row = conn.query_row(
-        "SELECT variant, expected, at, subject_tenant, subject_user, service, service_version,
-                policy_fingerprint, catalogued, auto_approve, blocked_kind
-         FROM confinement_attempts WHERE id=?1",
+        &format!("SELECT {ATTEMPT_COLUMNS} FROM confinement_attempts WHERE id=?1"),
         params![id],
         |r| {
+            // **By name.** `subject_tenant`, `subject_user` and `service` are three adjacent
+            // `Option<String>` columns, so a positional decode reads a transposed SELECT list
+            // without complaint — and an attempt then records the wrong subject as its own.
             Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-                r.get(7)?,
-                r.get(8)?,
-                r.get(9)?,
-                r.get(10)?,
+                r.get("variant")?,
+                r.get("expected")?,
+                r.get("at")?,
+                r.get("subject_tenant")?,
+                r.get("subject_user")?,
+                r.get("service")?,
+                r.get("service_version")?,
+                r.get("policy_fingerprint")?,
+                r.get("catalogued")?,
+                r.get("auto_approve")?,
+                r.get("blocked_kind")?,
             ))
         },
     )?;
@@ -1091,6 +1118,41 @@ fn opened(path: &Path, source: rusqlite::Error) -> LifecycleError {
 }
 
 impl LifecycleStore {
+    /// The connection, whatever a previous panic left behind.
+    ///
+    /// `lock().expect("lifecycle lock")` opened 17 methods, and a poisoned mutex made every one of them
+    /// abort — inside a store whose error enum exists to fail closed and whose whole subject is
+    /// what an operator intended and what the world reports. Poisoning means *some other* thread panicked while holding this; the
+    /// data behind it is a SQLite connection, which has its own transactional integrity and is not
+    /// left half-written by a panic in Rust code. Taking the guard is therefore the honest
+    /// recovery, and it is one documented decision rather than 17 undocumented ones.
+    fn locked(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Copy a consistent live view into a new owner-only SQLite file.
+    pub fn snapshot_to(&self, destination: impl AsRef<Path>) -> Result<(), LifecycleError> {
+        let destination = destination.as_ref();
+        let reservation =
+            std::fs::OpenOptions::new().write(true).create_new(true).open(destination).map_err(
+                |source| LifecycleError::Snapshot {
+                    path: destination.display().to_string(),
+                    source,
+                },
+            )?;
+        drop(reservation);
+        ironworks_domain::restrict_to_owner(destination).map_err(|source| {
+            LifecycleError::Snapshot { path: destination.display().to_string(), source }
+        })?;
+        let source = self.locked();
+        let mut target = Connection::open(destination)?;
+        let backup = rusqlite::backup::Backup::new(&source, &mut target)?;
+        backup.run_to_completion(128, std::time::Duration::from_millis(1), None)?;
+        drop(backup);
+        target.close().map_err(|(_, source)| LifecycleError::Sqlite(source))?;
+        Ok(())
+    }
+
     /// Open for writing, initialising or migrating as the file requires.
     ///
     /// # The ordering is the correctness property
@@ -1204,10 +1266,10 @@ impl LifecycleStore {
         service: &ServiceId,
         channel: &ChannelRef,
         evidence: &AdoptionEvidence,
-        now: &str,
+        now: &ObservedAt,
     ) -> Result<InstanceSpec, LifecycleError> {
         self.require_writable()?;
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         let tx = conn.unchecked_transaction()?;
         let exists: i64 = tx.query_row(
             "SELECT count(*) FROM instances WHERE slug=?1",
@@ -1227,7 +1289,7 @@ impl LifecycleStore {
                 service.as_str(),
                 channel.as_str(),
                 Stage::MemberMinted.tag(),
-                now,
+                now.as_str(),
             ],
         )?;
         for (stage, adopted) in [
@@ -1239,14 +1301,19 @@ impl LifecycleStore {
             tx.execute(
                 "INSERT INTO stage_history(slug,stage,at,adopted,created_id)
                  VALUES(?1,?2,?3,?4,NULL)",
-                params![slug.as_str(), stage.tag(), now, i64::from(adopted)],
+                params![slug.as_str(), stage.tag(), now.as_str(), i64::from(adopted)],
             )?;
         }
         tx.execute(
             "INSERT INTO authority_identities(
                  slug,authority,opaque_id,provenance,observed_at,subject_tenant,subject_user
              ) VALUES(?1,?2,?3,'adopted',?4,NULL,NULL)",
-            params![slug.as_str(), Authority::OrgRegistration.tag(), evidence.org.as_str(), now,],
+            params![
+                slug.as_str(),
+                Authority::OrgRegistration.tag(),
+                evidence.org.as_str(),
+                now.as_str(),
+            ],
         )?;
         tx.execute(
             "INSERT INTO authority_identities(
@@ -1256,7 +1323,7 @@ impl LifecycleStore {
                 slug.as_str(),
                 Authority::Member.tag(),
                 evidence.subject.user().as_str(),
-                now,
+                now.as_str(),
                 evidence.subject.tenant().as_str(),
             ],
         )?;
@@ -1271,9 +1338,9 @@ impl LifecycleStore {
     }
 
     /// Record what an operator asked for. Idempotent: a repeat keeps the existing progress.
-    pub fn declare(&self, spec: &InstanceSpec, now: &str) -> Result<(), LifecycleError> {
+    pub fn declare(&self, spec: &InstanceSpec, now: &ObservedAt) -> Result<(), LifecycleError> {
         self.require_writable()?;
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         conn.execute(
             "INSERT INTO instances(slug,org,service,channel,started_at,updated_at)
              VALUES(?1,?2,?3,?4,?5,?5)
@@ -1284,7 +1351,7 @@ impl LifecycleStore {
                 spec.org.as_str(),
                 spec.service.as_str(),
                 spec.channel.as_str(),
-                now
+                now.as_str()
             ],
         )?;
         Ok(())
@@ -1300,13 +1367,19 @@ impl LifecycleStore {
     /// existence, when it brought something into existence. It is what lets custody distinguish
     /// *the member we minted* from *a member that happens to exist* — the difference between a
     /// clean instance and one carrying authority nobody accounted for.
+    ///
+    /// `provenance` was a `bool` named `adopted`, three lines above
+    /// `if adopted { IdentityProvenance::Adopted } else { IdentityProvenance::Created }` — the
+    /// enum is declared in this same file and the translation was written twice. A call site read
+    /// `store.reach(&slug, stage, IdentityProvenance::Created, created, now)`, where `false` said nothing about which of
+    /// the two it meant.
     pub fn reach(
         &self,
         slug: &Slug,
         stage: Stage,
-        adopted: bool,
+        provenance: IdentityProvenance,
         created: Option<&OpaqueId>,
-        now: &str,
+        now: &ObservedAt,
     ) -> Result<(), LifecycleError> {
         self.require_writable()?;
         if stage == Stage::MemberConfined {
@@ -1337,11 +1410,11 @@ impl LifecycleStore {
                 predecessor: previous.tag().to_owned(),
             });
         }
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         let tx = conn.unchecked_transaction()?;
         let changed = tx.execute(
             "UPDATE instances SET stage=?2, updated_at=?3 WHERE slug=?1",
-            params![slug.as_str(), stage.tag(), now],
+            params![slug.as_str(), stage.tag(), now.as_str()],
         )?;
         if changed == 0 {
             return Err(LifecycleError::NoSuchInstance { slug: slug.as_str().to_owned() });
@@ -1351,8 +1424,9 @@ impl LifecycleStore {
             params![
                 slug.as_str(),
                 stage.tag(),
-                now,
-                i64::from(adopted),
+                now.as_str(),
+                // The column is a 0/1 flag and the reader turns it back into the enum.
+                i64::from(provenance == IdentityProvenance::Adopted),
                 created.map(OpaqueId::as_str)
             ],
         )?;
@@ -1360,17 +1434,103 @@ impl LifecycleStore {
             && let Some(authority) =
                 Authority::ALL.iter().copied().find(|a| a.created_at() == stage)
         {
-            let provenance =
-                if adopted { IdentityProvenance::Adopted } else { IdentityProvenance::Created };
             tx.execute(
                 "INSERT INTO authority_identities(
                      slug,authority,opaque_id,provenance,observed_at,subject_tenant,subject_user
                  ) VALUES(?1,?2,?3,?4,?5,NULL,NULL)",
-                params![slug.as_str(), authority.tag(), id.as_str(), provenance.tag(), now],
+                params![
+                    slug.as_str(),
+                    authority.tag(),
+                    id.as_str(),
+                    provenance.tag(),
+                    now.as_str()
+                ],
             )?;
         }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Replace one already-staged registry identity after its exact on-disk legacy encoding was
+    /// durably migrated by the caller.
+    ///
+    /// This is a compare-and-swap, not a second staging mechanism. It accepts only the recorded
+    /// legacy digest and preserves the original staged history row, whose legacy digest remains
+    /// the durable record of what first reached that stage. The current identity's `observed_at`
+    /// records the migration time. Appending a second `staged` row would falsely say the lifecycle
+    /// stage was reached twice. Repeating with the current digest is idempotent crash recovery.
+    pub fn migrate_registry_binding(
+        &self,
+        slug: &Slug,
+        expected_legacy: &OpaqueId,
+        current: &OpaqueId,
+        now: &ObservedAt,
+    ) -> Result<bool, LifecycleError> {
+        self.require_writable()?;
+        let conn = self.locked();
+        let tx = conn.unchecked_transaction()?;
+        let stage: Option<Option<String>> = tx
+            .query_row("SELECT stage FROM instances WHERE slug=?1", params![slug.as_str()], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        let Some(stage) = stage else {
+            return Err(LifecycleError::NoSuchInstance { slug: slug.as_str().to_owned() });
+        };
+        let reached = stage
+            .as_deref()
+            .map(|tag| Stage::from_tag(tag).ok_or(LifecycleError::Corrupt { what: "stage" }))
+            .transpose()?;
+        if !reached.is_some_and(|stage| stage >= Stage::Staged) {
+            return Err(LifecycleError::RegistryBindingNotStaged {
+                slug: slug.as_str().to_owned(),
+                stage: reached.map_or("none".to_owned(), |stage| stage.tag().to_owned()),
+            });
+        }
+
+        let identity: Option<(String, String)> = tx
+            .query_row(
+                "SELECT opaque_id,provenance FROM authority_identities
+                 WHERE slug=?1 AND authority=?2",
+                params![slug.as_str(), Authority::RegistryEntry.tag()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((recorded, provenance)) = identity else {
+            return Err(LifecycleError::RegistryBindingMissing { slug: slug.as_str().to_owned() });
+        };
+        if recorded == current.as_str() {
+            return Ok(false);
+        }
+        if recorded != expected_legacy.as_str() {
+            return Err(LifecycleError::RegistryBindingMismatch {
+                slug: slug.as_str().to_owned(),
+                recorded,
+                expected: expected_legacy.as_str().to_owned(),
+            });
+        }
+        IdentityProvenance::from_tag(&provenance)
+            .ok_or(LifecycleError::Corrupt { what: "authority identity provenance" })?;
+        let changed = tx.execute(
+            "UPDATE authority_identities SET opaque_id=?3, observed_at=?4
+             WHERE slug=?1 AND authority=?2 AND opaque_id=?5",
+            params![
+                slug.as_str(),
+                Authority::RegistryEntry.tag(),
+                current.as_str(),
+                now.as_str(),
+                expected_legacy.as_str()
+            ],
+        )?;
+        if changed != 1 {
+            return Err(LifecycleError::RegistryBindingCasLost { slug: slug.as_str().to_owned() });
+        }
+        tx.execute(
+            "UPDATE instances SET updated_at=?2 WHERE slug=?1",
+            params![slug.as_str(), now.as_str()],
+        )?;
+        tx.commit()?;
+        Ok(true)
     }
 
     /// Append a qualifying confinement observation and advance `member_confined`, atomically.
@@ -1390,7 +1550,7 @@ impl LifecycleStore {
         let policy = attempt
             .policy()
             .expect("ConfinementEvidence always contains a policy-bound measurement");
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         let tx = conn.unchecked_transaction()?;
 
         let instance: Option<(String, Option<String>)> = tx
@@ -1476,7 +1636,7 @@ impl LifecycleStore {
         &self,
         slug: &Slug,
         smoke: &SmokeEvidence,
-        now: &str,
+        now: &ObservedAt,
     ) -> Result<(), LifecycleError> {
         self.require_writable()?;
         let progress = self.progress(slug)?;
@@ -1488,12 +1648,18 @@ impl LifecycleStore {
                 last: last.tag().to_owned(),
             });
         }
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         conn.execute(
             "UPDATE instances SET smoke_isolation=?2, smoke_reachability=?3, smoke_at=?4,
                                   updated_at=?5
              WHERE slug=?1",
-            params![slug.as_str(), smoke.isolation(), smoke.reachability(), smoke.at(), now],
+            params![
+                slug.as_str(),
+                smoke.isolation(),
+                smoke.reachability(),
+                smoke.at(),
+                now.as_str()
+            ],
         )?;
         Ok(())
     }
@@ -1510,7 +1676,7 @@ impl LifecycleStore {
             | ServingObservation::NotServing { observed_at } => Some(observed_at.clone()),
             ServingObservation::Unknown => None,
         };
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         conn.execute(
             "UPDATE instances SET serving=?2, serving_at=?3 WHERE slug=?1",
             params![slug.as_str(), observation.tag(), at],
@@ -1519,7 +1685,7 @@ impl LifecycleStore {
     }
 
     pub fn spec(&self, slug: &Slug) -> Result<Option<InstanceSpec>, LifecycleError> {
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         conn.query_row(
             "SELECT org,service,channel FROM instances WHERE slug=?1",
             params![slug.as_str()],
@@ -1542,7 +1708,7 @@ impl LifecycleStore {
     /// How far provisioning reached. `NotStarted` for an instance that was never declared — which
     /// says nothing whatever about what exists.
     pub fn progress(&self, slug: &Slug) -> Result<ProvisionProgress, LifecycleError> {
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         let row: Option<StoredProgress> = conn
             .query_row(
                 "SELECT stage, smoke_isolation, smoke_reachability, smoke_at
@@ -1569,7 +1735,7 @@ impl LifecycleStore {
     }
 
     pub fn serving(&self, slug: &Slug) -> Result<ServingObservation, LifecycleError> {
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         let row: Option<(String, Option<String>)> = conn
             .query_row(
                 "SELECT serving, serving_at FROM instances WHERE slug=?1",
@@ -1591,7 +1757,7 @@ impl LifecycleStore {
 
     /// Every stage reached, with whether it was done or adopted.
     pub fn history(&self, slug: &Slug) -> Result<Vec<(Stage, String, bool)>, LifecycleError> {
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         let mut stmt = conn.prepare(
             "SELECT stage, at, adopted FROM stage_history WHERE slug=?1 ORDER BY at, rowid",
         )?;
@@ -1626,7 +1792,7 @@ impl LifecycleStore {
         only: Option<IdentityProvenance>,
     ) -> Result<Recorded, LifecycleError> {
         let progress = self.progress(slug)?;
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         let mut identities = std::collections::BTreeMap::new();
         if self.version >= 3 {
             let mut stmt = conn.prepare(
@@ -1712,7 +1878,7 @@ impl LifecycleStore {
         &self,
         authority: Authority,
     ) -> Result<std::collections::BTreeSet<OpaqueId>, LifecycleError> {
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         let (sql, tag) = if self.version >= 3 {
             (
                 "SELECT DISTINCT opaque_id FROM authority_identities WHERE authority=?1",
@@ -1746,7 +1912,7 @@ impl LifecycleStore {
         attempt: &attempt::ConfinementAttempt,
     ) -> Result<i64, LifecycleError> {
         self.require_writable()?;
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         let tx = conn.unchecked_transaction()?;
         let id = insert_attempt(&tx, slug, attempt)?;
         tx.commit()?;
@@ -1766,7 +1932,7 @@ impl LifecycleStore {
         slug: &Slug,
         member: &OpaqueId,
     ) -> Result<Option<attempt::ConfinementAttempt>, LifecycleError> {
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         let id: Option<i64> = conn
             .query_row(
                 "SELECT id FROM confinement_attempts
@@ -1795,7 +1961,7 @@ impl LifecycleStore {
         slug: &Slug,
         limit: usize,
     ) -> Result<Vec<attempt::ConfinementAttempt>, LifecycleError> {
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         let mut stmt = conn.prepare(
             "SELECT id FROM confinement_attempts WHERE slug=?1 ORDER BY at DESC, id DESC LIMIT ?2",
         )?;
@@ -1806,7 +1972,7 @@ impl LifecycleStore {
     }
 
     pub fn unfinished(&self) -> Result<Vec<Slug>, LifecycleError> {
-        let conn = self.conn.lock().expect("lifecycle lock");
+        let conn = self.locked();
         let mut stmt = conn.prepare(
             "SELECT slug FROM instances WHERE smoke_at IS NULL ORDER BY started_at, slug",
         )?;

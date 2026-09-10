@@ -29,7 +29,6 @@ use crate::confinement::{Confinement, PolicyBinding};
 use crate::runtime::RuntimeSubject;
 use crate::state::{InstanceSpec, ProvisionProgress, ServingObservation, Stage};
 use crate::{AuthorityInventory, BlockedReason, OpaqueId, holdings};
-use ironworks_domain::NonEmptyReason;
 use std::fmt;
 
 /// Whether the store this history came from can hold observations at all.
@@ -124,9 +123,8 @@ fn applicability(recorded: &crate::Recorded) -> Applicability {
 
 /// What an inspection concluded.
 ///
-/// Four outcomes, and the point of having four is that the last two are not the first two. A
-/// check that could not run is never a PASS (§F-14), and authority nobody has accounted for is
-/// never silently a PASS either.
+/// Three outcomes. A check that could not run is never a PASS (§F-14), and authority nobody has
+/// accounted for is never silently a PASS either.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Verdict {
     /// Everything IronWorks recorded is accounted for, nothing unmanaged, nothing unmeasured.
@@ -140,30 +138,13 @@ pub enum Verdict {
     /// This matches the reference's own mapping: outstanding authority exits **3**, not 2 —
     /// nothing is broken, but the state cannot be certified clean.
     Blocked,
-    /// An operator has explicitly classified a known risk, **with a recorded reason**.
-    ///
-    /// The reason lives in the variant, so this cannot be produced by anything that has not
-    /// written one down — *a waiver nobody can account for later is the same as no waiver*.
-    ///
-    /// **Nothing in this slice constructs it.** The residual-authority ledger is where operator
-    /// classifications live and it is not built yet. It is defined here so the shape of a verdict
-    /// is settled before something needs it, and specifically so that unmanaged authority is
-    /// never normalized into it — that would be exactly the "make a gate green by forgetting"
-    /// move §F-9 forbids.
-    AcceptedRisk(NonEmptyReason),
 }
 
 impl Verdict {
-    /// Whether this may promote. `Blocked` and `Fail` may not; an explicitly accepted risk may,
-    /// and stays visibly different from `Pass` in every report.
-    pub fn promotable(&self) -> bool {
-        matches!(self, Self::Pass | Self::AcceptedRisk(_))
-    }
-
     /// The operator convention already used by `dev/prove.sh`: 0 / 2 / 3.
     pub fn exit_code(&self) -> i32 {
         match self {
-            Self::Pass | Self::AcceptedRisk(_) => 0,
+            Self::Pass => 0,
             Self::Fail => 2,
             Self::Blocked => 3,
         }
@@ -174,17 +155,54 @@ impl Verdict {
             Self::Pass => "PASS",
             Self::Fail => "FAIL",
             Self::Blocked => "BLOCKED",
-            Self::AcceptedRisk(_) => "ACCEPTED_RISK",
         }
     }
 }
 
 impl fmt::Display for Verdict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::AcceptedRisk(reason) => write!(f, "ACCEPTED_RISK ({reason})"),
-            other => f.write_str(other.tag()),
+        f.write_str(self.tag())
+    }
+}
+
+/// Whether lifecycle has made this instance ready to route.
+///
+/// This is deliberately orthogonal to [`Verdict`]. A complete observation can establish that an
+/// unstarted instance holds no authority at all, which is a clean evidence result and still not a
+/// service that may be promoted. Conversely, readiness says nothing about whether authority was
+/// measured.
+///
+/// `Ready` means **activated and routable**, not observed serving. [`ServingObservation`] remains
+/// a separate axis, and its `Unknown` variant does not make readiness unknowable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Readiness {
+    Ready,
+    NotReady,
+}
+
+impl Readiness {
+    fn from_progress(progress: &ProvisionProgress) -> Self {
+        match progress {
+            ProvisionProgress::Activated { .. } => Self::Ready,
+            ProvisionProgress::NotStarted | ProvisionProgress::Provisioning { .. } => {
+                Self::NotReady
+            }
         }
+    }
+}
+
+impl Readiness {
+    pub fn tag(self) -> &'static str {
+        match self {
+            Self::Ready => "READY",
+            Self::NotReady => "NOT_READY",
+        }
+    }
+}
+
+impl fmt::Display for Readiness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.tag())
     }
 }
 
@@ -291,10 +309,13 @@ fn assess_confinement(
     } else {
         lines.push("certification: member_confined has never been certified.".into());
     }
-    let historical = axis.latest().map(ConfinementAttempt::historical);
+    // Matched on the **attempt**, not on a `historical` derived from it. Deriving first left three
+    // arms re-fetching `axis.latest()` and asserting `expect("a reading implies an attempt")` —
+    // three claims in prose about an `Option` the arm had already proved was `Some`.
+    let latest = axis.latest();
 
     // ── what history says ───────────────────────────────────────────────────────────
-    match (&historical, axis.ledger()) {
+    match (latest.map(|attempt| (attempt, attempt.historical())), axis.ledger()) {
         (None, Some(Ledger::PredatesLedger)) => lines.push(
             "history: this store predates the confinement ledger, so no observation could have \
              been recorded — which is not the same as none having been made."
@@ -303,21 +324,20 @@ fn assess_confinement(
         (None, _) => {
             lines.push(format!("history: no confinement observation for member {member}."))
         }
-        (Some(Historical::CleanAt { policy }), _) => lines.push(format!(
-            "history: clean measurement against {policy}, at {}.",
-            axis.latest().expect("a reading implies an attempt").at()
-        )),
-        (Some(Historical::DriftedAt { policy, drift }), _) => lines.push(format!(
+        (Some((attempt, Historical::CleanAt { policy })), _) => {
+            lines.push(format!("history: clean measurement against {policy}, at {}.", attempt.at()))
+        }
+        (Some((attempt, Historical::DriftedAt { policy, drift })), _) => lines.push(format!(
             "history: {} drift(s) against {policy}, at {}.",
             drift.len(),
-            axis.latest().expect("a reading implies an attempt").at()
+            attempt.at()
         )),
-        (Some(Historical::Misbound { authenticated, .. }), _) => lines.push(format!(
+        (Some((attempt, Historical::Misbound { authenticated, .. })), _) => lines.push(format!(
             "history: an attempt at {} authenticated as {authenticated}, not this member. That is \
              a past failure, not proof about the credential in use now.",
-            axis.latest().expect("a reading implies an attempt").at()
+            attempt.at()
         )),
-        (Some(Historical::Unmeasured { reason }), _) => lines.push(format!(
+        (Some((_, Historical::Unmeasured { reason })), _) => lines.push(format!(
             "history: the last attempt for this member measured nothing — {reason}."
         )),
     }
@@ -371,7 +391,9 @@ fn assess_confinement(
                     ));
                     // The durable half. Every shape that is not a current-policy baseline blocks,
                     // and each says the same one-command remedy rather than leaving a dead end.
-                    let baseline = historical.as_ref().is_some_and(|h| h.is_baseline_for(current));
+                    let baseline = latest
+                        .map(ConfinementAttempt::historical)
+                        .is_some_and(|h| h.is_baseline_for(current));
                     if baseline {
                         lines.push(format!(
                             "  SCOPE: about the {} catalogued settings rows, verified live against \
@@ -486,7 +508,6 @@ pub fn inspect(
     } else {
         Verdict::Pass
     };
-
     Inspection {
         spec: spec.clone(),
         progress: progress.clone(),
@@ -499,6 +520,37 @@ pub fn inspect(
 }
 
 impl Inspection {
+    /// Whether lifecycle has activated this instance. Independent of both authority evidence and
+    /// the serving-process observation.
+    ///
+    /// Derived rather than stored: it is a pure function of `progress`, and a second copy in the
+    /// struct is a second answer that a future constructor could set inconsistently.
+    pub fn readiness(&self) -> Readiness {
+        Readiness::from_progress(&self.progress)
+    }
+
+    /// Whether this complete inspection licenses promotion.
+    ///
+    /// Both axes are required: acceptable authority evidence cannot promote an unactivated
+    /// instance, and activation cannot override failed or incomplete evidence.
+    pub fn promotable(&self) -> bool {
+        self.verdict == Verdict::Pass && self.readiness() == Readiness::Ready
+    }
+
+    /// CLI status. Evidence failures retain their established codes; a clean authority
+    /// observation of an incomplete lifecycle is separately nonzero rather than masquerading as
+    /// a ready service.
+    pub fn exit_code(&self) -> i32 {
+        let evidence = self.verdict.exit_code();
+        if evidence != 0 {
+            evidence
+        } else if self.promotable() {
+            0
+        } else {
+            4
+        }
+    }
+
     /// The compact operator report. Identifiers only — the types it reads from have nowhere to
     /// put a credential, so there is nothing here to redact.
     pub fn render(&self) -> String {
@@ -510,6 +562,17 @@ impl Inspection {
         ));
         out.push_str(&format!("recorded   {}\n", describe_progress(&self.progress)));
         out.push_str(&format!("serving    {}\n", describe_serving(&self.serving)));
+        out.push_str(&format!(
+            "readiness  {}\n",
+            match self.readiness() {
+                Readiness::Ready => {
+                    "READY — activated and routable; whether it is serving is reported separately"
+                }
+                Readiness::NotReady => {
+                    "NOT_READY — lifecycle has not activated this instance; authority evidence is separate"
+                }
+            }
+        ));
         out.push_str("authority  (what the authoritative systems report)\n");
         for holding in &self.holdings {
             out.push_str(&format!(

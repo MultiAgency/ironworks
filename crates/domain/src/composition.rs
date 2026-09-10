@@ -189,10 +189,20 @@ pub enum GuidanceError {
          — fill in the template rather than serving an empty brief"
     )]
     TooShort { slug: String, len: usize, min: usize },
+
+    #[error(
+        "instance {slug:?}: guidance contains a stray HTML comment terminator after {bytes} \
+         model-visible bytes — operator notes escaped their comment"
+    )]
+    LeakedComment { slug: String, bytes: usize },
+
+    #[error("instance {slug:?}: guidance contains {count} unwritten template stub(s)")]
+    UnwrittenStubs { slug: String, count: usize },
 }
 
 /// Below this, a guidance file is a template nobody filled in.
 const MIN_CONTENT: usize = 400;
+const STUB_MARKER: &str = "TO BE WRITTEN";
 
 impl Guidance {
     /// This guidance's digest, in the same shape as [`Alloy::digest`].
@@ -287,6 +297,13 @@ impl Guidance {
         // past the minimum.
         let stripped = strip_html_comments(text);
         let content = stripped.trim();
+        if let Some(bytes) = content.find("-->") {
+            return Err(GuidanceError::LeakedComment { slug: slug.to_owned(), bytes });
+        }
+        let unwritten = content.matches(STUB_MARKER).count();
+        if unwritten != 0 {
+            return Err(GuidanceError::UnwrittenStubs { slug: slug.to_owned(), count: unwritten });
+        }
         if content.len() < MIN_CONTENT {
             return Err(GuidanceError::TooShort {
                 slug: slug.to_owned(),
@@ -394,13 +411,15 @@ const JOIN: &str = "\n\n---\n\n";
 /// by it. A second implementation would be a second answer to a question that must have exactly
 /// one — which is the defect a fingerprint exists to rule out.
 pub fn digest16(bytes: &[u8]) -> String {
-    Sha256::new()
-        .chain_update(bytes)
-        .finalize()
-        .iter()
-        .take(8)
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    digest16_of(Sha256::new().chain_update(bytes))
+}
+
+/// [`digest16`] for a digest accumulated over many pieces rather than one slice.
+///
+/// The same sixteen characters of the same hash — a caller that must feed a hasher incrementally
+/// gets the shape from here rather than re-authoring the fold, so there stays exactly one answer.
+pub fn digest16_of(hasher: Sha256) -> String {
+    hasher.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
 
 /// Fuse a composition's parts with validated guidance into an alloy.
@@ -697,6 +716,23 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, GuidanceError::TooShort { .. }));
+    }
+
+    #[test]
+    fn legacy_leaked_notes_and_unwritten_stubs_are_not_guidance() {
+        let marker = "<!-- tenant-guidance v1 slug: acme service: account-analysis -->\n\n";
+        let leaked =
+            format!("{marker}operator-only bytes-->\n{}", "Real tenant guidance. ".repeat(30));
+        assert!(matches!(
+            Guidance::parse(&leaked, "acme", "account-analysis"),
+            Err(GuidanceError::LeakedComment { bytes: 19, .. })
+        ));
+
+        let stubbed = format!("{marker}{STUB_MARKER}\n{}", "Shared template prose. ".repeat(30));
+        assert!(matches!(
+            Guidance::parse(&stubbed, "acme", "account-analysis"),
+            Err(GuidanceError::UnwrittenStubs { count: 1, .. })
+        ));
     }
 
     #[test]

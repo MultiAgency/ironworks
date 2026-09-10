@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# COST: real model turns against the probe. Needs a probe and a model key.
 # Prove delivery across real process restarts: what a client does and does not read twice.
 #
 #   dev/probe-up.sh              # runtime + disposable record store
@@ -32,15 +33,15 @@
 # strongest available evidence — a second logical turn would carry a different response id.
 #
 # Verdicts follow the operator convention: PASS / FAIL / BLOCKED, exiting 0 / 2 / 3.
-set -uo pipefail
-
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
-cd "$ROOT"
+# shellcheck source=dev/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 STORE_PORT="${PROBE_STORE_PORT:-3996}"
 CHAN_PORT="${PROVE_CHANNEL_PORT:-3994}"
 STORE_TOKEN="dev-token-eval"
+# The org that token resolves to in the probe store (dev/probe-up.sh). The registry records it
+# so a mis-pointed credential is refused at boot rather than served against the wrong book.
+STORE_ORG="eval"
 GUIDANCE="fixtures/eval.guidance.md"
 SLUG="eval"
 SERVICE="relationship-intelligence"
@@ -57,27 +58,16 @@ ASK="Name the single account with a confirmed budget. One line."
 UID_BASE=$(( $(date +%s) % 900000 + 1000 ))
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ironworks-delivery.XXXXXX")"
 CHAN_PID=""
+# shellcheck disable=SC2329  # invoked indirectly, through `on_exit`.
 cleanup() { [ -n "$CHAN_PID" ] && kill "$CHAN_PID" 2>/dev/null; rm -rf "$WORK"; }
-trap cleanup EXIT
-
-pass=0; failed=0; blocked=0
-verdict() {
-  printf '%-9s %-30s %s\n' "$2" "$1" "${3:-}"
-  case "$2" in PASS) pass=$((pass+1));; FAIL) failed=$((failed+1));; BLOCKED) blocked=$((blocked+1));; esac
-}
+on_exit cleanup
 
 # ── preconditions ────────────────────────────────────────────────────────────────────────
-[ -n "${IRONWORKS_BASE:-}" ] && [ -n "${IRONWORKS_TOKEN:-}" ] || {
-  echo "prove-delivery: IRONWORKS_BASE / IRONWORKS_TOKEN are unset. Run dev/probe-up.sh and" >&2
-  echo "                export the lines it prints." >&2
-  exit 3
-}
-curl -fsS --max-time 3 "$IRONWORKS_BASE/api/health" >/dev/null 2>&1 || {
-  verdict "runtime.reachable" BLOCKED "$IRONWORKS_BASE did not answer /api/health"; exit 3; }
-curl -fsS --max-time 3 "http://127.0.0.1:$STORE_PORT/health" >/dev/null 2>&1 || {
-  verdict "store.reachable" BLOCKED "no record store on :$STORE_PORT (dev/probe-up.sh)"; exit 3; }
+need_env IRONWORKS_BASE IRONWORKS_TOKEN
+need_runtime
+need_store
 cargo build -q -p ironworks-cli -p ironworks-devchannel 2>/dev/null || {
-  verdict "build" BLOCKED "cargo build failed"; exit 3; }
+  give_up "build" "cargo build failed"; }
 BIN=./target/debug/ironworks
 
 # One tenant is a registry with one entry — relay has no single-tenant path, deliberately, so a
@@ -85,7 +75,7 @@ BIN=./target/debug/ironworks
 # name the same environment variables this script already exports.
 REGISTRY="$WORK/registry.json"
 cat > "$REGISTRY" <<JSON
-{"tenants":[{"slug":"$SLUG","channel":"$GROUP","service":"relationship-intelligence",
+{"tenants":[{"slug":"$SLUG","channel":"$GROUP","org":"$STORE_ORG","service":"relationship-intelligence",
   "guidance":"$GUIDANCE",
   "records_credential":"env:IRONWORKS_RECORDS_TOKEN",
   "runtime_credential":"env:IRONWORKS_TOKEN"}]}
@@ -100,15 +90,9 @@ CHAN="http://127.0.0.1:$CHAN_PORT"
 channel() {
   local id="$1"; shift
   [ -n "$CHAN_PID" ] && { kill "$CHAN_PID" 2>/dev/null; wait "$CHAN_PID" 2>/dev/null; CHAN_PID=""; }
-  ( exec "$CHAN_BIN" --port "$CHAN_PORT" --update "$id=$GROUP:$ASK" "$@" ) \
-      >/dev/null 2>&1 </dev/null &
-  CHAN_PID=$!
-  disown 2>/dev/null || true
-  for _ in $(seq 1 30); do
-    curl -fsS --max-time 1 "$CHAN/health" >/dev/null 2>&1 && return 0
-    sleep 0.2
-  done
-  CHAN_PID=""
+  CHAN_PID="$(start_fixture "$CHAN/health" \
+    "$CHAN_BIN" --port "$CHAN_PORT" --update "$id=$GROUP:$ASK" "$@")"
+  [ -n "$CHAN_PID" ] && return 0
   return 1
 }
 
@@ -129,49 +113,6 @@ redeliver() {
       --channel "$CHAN" --update "$id" ${@+"$@"} 2>&1
 }
 
-obs()        { curl -fsS --max-time 3 "$CHAN/observations" 2>/dev/null; }
-no_model()   { grep -q "not a valid model name\|model provider rejected" <<<"$1"; }
-# States in which the boundary was never set up, so the check measured nothing. BLOCKED, not FAIL.
-#
-# This script had `no_model` and nothing else, and it cost two investigations on 2026-08-31 alone:
-# `deliver.b7_redelivery_after_ack_gap` reported `rc=2/0 accepted=1 create=2 acks=2` twice, and
-# both times the cause was the runtime's **30 requests / 60 seconds** limit — tripped by a
-# `dev/prove.sh` or eval run in the preceding minute, not by anything this script tests. Run alone
-# after a full window it scores 4/4 with `create=1`. A rate limit is an unavailable dependency;
-# scoring it as FAIL reports a delivery defect that does not exist, and an operator who chases two
-# of those learns to skim the ones that matter.
-#
-# `service_unavailable` is here because the runtime refuses a turn it cannot finish inside
-# `DEFAULT_RESPONSES_WAIT_TIMEOUT` (30s) with a 503 — see `crates/ironclaw/src/client.rs`. That is the
-# runtime declining, never this script's boundary failing. Deliberately NOT called "the provider
-# is degraded": the provider and the runtime are different parties, and only one of them is
-# upstream of us.
-#
-# `HTTP 429` and not a bare `429`, because a bare one matches inside a hex digest and turns a
-# clean run into a false BLOCKED. Measured 2026-09-04 in `dev/prove-cutover.sh`, which had copied
-# this line: two of eight sittings blocked on runs that had delivered, both on a token like
-# `request 4297bd26b3b174a1`. **This script is exposed more, not less** — every check passes the
-# output of TWO relay runs to `degraded`, and each prints an alloy digest, a request digest and a
-# `resp_` id, so there are six chances per check rather than three.
-#
-# Narrowing loses no real coverage only if the number is ANCHORED rather than PREFIXED, and the
-# first attempt prefixed it. `crates/ironclaw/src/client.rs::interpret_error` carries the error
-# envelope's `code`, so a rate limit normally arrives as `rate_limit...` and `rate.?limit` already
-# holds it — but its no-envelope branch puts `raw.body` into the text verbatim, and a proxy's own
-# `429 Too Many Requests` page carries the number and nothing else on this line. Requiring the
-# literal `HTTP 429` dropped exactly that case, and dropping it scores an environment failure as
-# FAIL: reporting a defect that is not there, which `dev/prove.sh` names as the worse error.
-#
-# So the number matches only where it is not inside a hex run. That excludes
-# `request 4297bd26b3b174a1` — the digest that produced the false BLOCKEDs — while keeping both
-# `HTTP 429: ` (`crates/records/src/append.rs`) and a bare proxy page.
-degraded()   { grep -qE "timed out (writing|reading)|rate limited|rate.?limit|(^|[^0-9a-f])429([^0-9a-f]|$)|service_unavailable|provider .* unavailable" <<<"$1"; }
-# The failing run's OWN last words, so a BLOCKED verdict names what stopped it. Same shape as
-# `dev/prove.sh`'s: the first `ironworks:` line is a success message, so taking the last non-empty
-# line is what makes a transient distinguishable from a regression.
-why()        { grep -v '^$' <<<"$1" | tail -n1 | cut -c1-88; }
-creates()    { awk -F'\t' '$1=="create"' "$1" 2>/dev/null | wc -l | tr -d ' '; }
-fetches()    { awk -F'\t' '$1=="fetch"'  "$1" 2>/dev/null | wc -l | tr -d ' '; }
 accepted()   { grep -c '^accepted chunk=' <<<"$1" | tr -d ' '; }
 digests()    { grep -oE 'sha256=[0-9a-f]+' <<<"$1"; }
 
@@ -192,7 +133,7 @@ else
   two="$(relay "$J" "$L")"; rc2=$?
   log="$(obs)"
   if no_model "$one$two"; then verdict "deliver.known_unsent" BLOCKED "runtime has no usable model key"
-  elif degraded "$one$two"; then verdict "deliver.known_unsent" BLOCKED "dependency unavailable: $(why "$one$two")"
+  elif unsettled "$one$two"; then verdict "deliver.known_unsent" BLOCKED "$(unsettled_why "$one$two")"
   elif [ $rc1 -eq 0 ] && [ $rc2 -eq 0 ] \
     && grep -q "delivery=known_unsent" <<<"$one" \
     && grep -q "a resend is safe; nothing reached the client" <<<"$one" \
@@ -207,7 +148,7 @@ else
   fi
 fi
 
-sleep 5
+pace
 
 # ── 2. B5: the residual window ───────────────────────────────────────────────────────────
 # The channel has the answer; the process died before writing that down. A duplicate is
@@ -223,7 +164,7 @@ else
   first="$(digests "$log" | head -n1)"
   second="$(digests "$log" | tail -n1)"
   if no_model "$one$two"; then verdict "deliver.b5_residual_window" BLOCKED "runtime has no usable model key"
-  elif degraded "$one$two"; then verdict "deliver.b5_residual_window" BLOCKED "dependency unavailable: $(why "$one$two")"
+  elif unsettled "$one$two"; then verdict "deliver.b5_residual_window" BLOCKED "$(unsettled_why "$one$two")"
   elif [ $rc1 -eq 75 ] && [ $rc2 -eq 0 ] \
     && grep -q "CRASHING at after-send" <<<"$one" \
     && [ "$(accepted "$log")" = 2 ] \
@@ -238,7 +179,7 @@ else
   fi
 fi
 
-sleep 5
+pace
 
 # ── 3. partial delivery, and evidence that cannot be lowered ─────────────────────────────
 # One chunk lands and is confirmed; the next is accepted and the reply is lost. The count is the
@@ -263,7 +204,7 @@ else
   after="$(grep -oE "update $((UID_BASE+3)) delivery=[a-z]+" <<<"$two" | tail -n1)"
 
   if no_model "$one$two"; then verdict "deliver.partial_evidence_holds" BLOCKED "runtime has no usable model key"
-  elif degraded "$one$two"; then verdict "deliver.partial_evidence_holds" BLOCKED "dependency unavailable: $(why "$one$two")"
+  elif unsettled "$one$two"; then verdict "deliver.partial_evidence_holds" BLOCKED "$(unsettled_why "$one$two")"
   elif [ $rc1 -eq 0 ] && [ "$partial" = 1 ] \
     && [ "$(accepted "$log")" -ge 2 ] \
     && grep -q "NEEDS AN OPERATOR — a resend may put a second copy" <<<"$one" \
@@ -277,7 +218,7 @@ else
   fi
 fi
 
-sleep 5
+pace
 
 # ── 4. B7: delivered, then death before the offset went out ──────────────────────────────
 # The answer is in the client's room and the channel has not been told to stop sending the
@@ -293,7 +234,7 @@ else
   two="$(relay "$J" "$L")"; rc2=$?
   log="$(obs)"
   if no_model "$one$two"; then verdict "deliver.b7_redelivery_after_ack_gap" BLOCKED "runtime has no usable model key"
-  elif degraded "$one$two"; then verdict "deliver.b7_redelivery_after_ack_gap" BLOCKED "dependency unavailable: $(why "$one$two")"
+  elif unsettled "$one$two"; then verdict "deliver.b7_redelivery_after_ack_gap" BLOCKED "$(unsettled_why "$one$two")"
   elif [ $rc1 -eq 75 ] && [ $rc2 -eq 0 ] \
     && grep -q "CRASHING at after-delivered" <<<"$one" \
     && [ "$(grep -c 'acknowledged through=' <<<"$mid")" = 1 ] \
@@ -311,13 +252,10 @@ else
 fi
 
 # ── verdict ──────────────────────────────────────────────────────────────────────────────
-printf '\n%d passed, %d failed, %d blocked\n' "$pass" "$failed" "$blocked"
-printf 'chunk digests come from the channel, so an identical duplicate is proven, not inferred.\n'
-printf 'create counts are taken at the runtime adapter boundary and survive each restart.\n'
 # Measured: running this and dev/prove.sh back to back trips the runtime's 30-requests-per-60-
 # seconds limit, and a rate-limited turn fails in a way that reads exactly like a recovery defect.
 # It cost one false FAIL on B2 before it was diagnosed.
-printf 'wait ~60s before running dev/prove.sh: the runtime allows 30 requests per 60 seconds.\n'
-[ "$failed" -gt 0 ] && exit 2
-[ "$blocked" -gt 0 ] && exit 3
-exit 0
+summary \
+  'chunk digests come from the channel, so an identical duplicate is proven, not inferred.' \
+  'create counts are taken at the runtime adapter boundary and survive each restart.' \
+  'wait ~60s before running dev/prove.sh: the runtime allows 30 requests per 60 seconds.'

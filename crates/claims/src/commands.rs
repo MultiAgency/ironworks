@@ -70,16 +70,27 @@ fn invocation(line: &str) -> Option<(String, String)> {
 }
 
 /// Ask the binary whether it knows a flag. Parse-only: nothing is read, opened or sent.
-fn rejects(binary: &Path, root: &Path, verb: &str, flag: &str) -> bool {
+///
+/// **`Err` rather than `false` when the binary will not run**, because the two mean opposite
+/// things and the first version conflated them. `false` is "the parser accepted this flag" —
+/// which [`check`] reports as a pass — so a binary that was present but unspawnable certified
+/// every documented flag in the tree. `toolchain::cargo_ok` already treats an unrunnable
+/// subprocess as BLOCKED; two subprocess checkers in one crate must not disagree about what
+/// "could not measure" means. [`check`]'s `seen.is_empty()` guard covers *read* nothing; this
+/// covers *ran* nothing.
+fn rejects(binary: &Path, root: &Path, verb: &str, flag: &str) -> Result<bool, String> {
     let mut cmd = std::process::Command::new(binary);
     cmd.current_dir(root);
     for word in verb.split_whitespace() {
         cmd.arg(word);
     }
-    let Ok(out) = cmd.args([flag, "x"]).output() else { return false };
+    let out = cmd
+        .args([flag, "x"])
+        .output()
+        .map_err(|e| format!("could not run {}: {e}", binary.display()))?;
     let mut text = String::from_utf8_lossy(&out.stdout).into_owned();
     text.push_str(&String::from_utf8_lossy(&out.stderr));
-    text.contains(&format!("unknown flag {flag}"))
+    Ok(text.contains(&format!("unknown flag {flag}")))
 }
 
 /// Check that every documented flag is one the binary's parser accepts.
@@ -93,22 +104,26 @@ pub fn check(root: &Path) -> Vec<Finding> {
     }
     let mut seen = std::collections::BTreeSet::new();
     let mut findings = Vec::new();
-    for md in doc_files(root) {
-        let Ok(text) = std::fs::read_to_string(&md) else { continue };
-        let where_ = md.strip_prefix(root).unwrap_or(&md).to_string_lossy().into_owned();
+    for (where_, text) in crate::scan_docs(root, doc_files(root)) {
         for inv in documented(&text) {
             for flag in &inv.flags {
                 if !seen.insert((inv.verb.clone(), flag.clone())) {
                     continue;
                 }
-                if rejects(&binary, root, &inv.verb, flag) {
-                    findings.push(Finding::fail(
+                match rejects(&binary, root, &inv.verb, flag) {
+                    Ok(false) => {}
+                    Ok(true) => findings.push(Finding::fail(
                         where_.clone(),
                         format!(
                             "documents `{} {flag}`, which the binary rejects as unknown",
                             inv.verb
                         ),
-                    ));
+                    )),
+                    // One unrunnable spawn blocks the whole check rather than this one flag: the
+                    // binary is the same for every row, so the next spawn has no reason to differ,
+                    // and reporting the rest as passing would be the vacuous half of a run nobody
+                    // could act on.
+                    Err(why) => return vec![Finding::blocked("documented commands", why)],
                 }
             }
         }
@@ -119,11 +134,7 @@ pub fn check(root: &Path) -> Vec<Finding> {
             "found no ironworks invocations to check",
         )];
     }
-    if findings.is_empty() {
-        findings.push(Finding::pass(
-            "documented commands",
-            format!("{} documented flag(s) all parse", seen.len()),
-        ));
-    }
-    findings
+    crate::reported("documented commands", findings, || {
+        format!("{} documented flag(s) all parse", seen.len())
+    })
 }

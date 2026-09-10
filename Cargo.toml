@@ -6,8 +6,11 @@ members = [
     "crates/channel",
     "crates/channel-http",
     "crates/devchannel",
+    "crates/devhttp",
     "crates/telegram",
     "crates/devstore",
+    "crates/store",
+    "crates/testkit",
     "crates/journal",
     "crates/lifecycle",
     "crates/reconcile",
@@ -27,7 +30,10 @@ members = [
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.97"
-repository = "https://github.com/multiagency/ironworks-rs"
+# Nothing mechanical checks this field — not the claims checker, not cargo — which is how it came
+# to name a repository that did not exist for as long as it did. Correct it by hand when the remote
+# moves; nothing else will.
+repository = "https://github.com/MultiAgency/ironworks"
 
 # Dependency budget is a design constraint, not an afterthought. The process this becomes holds
 # every tenant's bearer token; the Python it borrows from has zero runtime dependencies, and that
@@ -41,6 +47,15 @@ thiserror = "2"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+
+# A doc link that no longer resolves is wrong in the present tense — the same rule
+# `crates/claims/src/paths.rs::check_symbols` applies to citations in `.md`, applied to the ones in
+# `.rs`. It is denied rather than warned **and** `cargo doc` is one of the commands
+# `crates/claims/src/toolchain.rs` runs, because a denied lint nothing invokes is a control that
+# looks like one and is not: neither `cargo test` nor `cargo clippy` runs rustdoc.
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
 
 [workspace.lints.clippy]
 todo = "deny"

@@ -22,9 +22,9 @@ boundaries are; 9–18 track each capability as it moves from requirement to mea
 carries a date: a claim is anchored to the file, experiment or revision that measured it, so a
 statement that has gone stale is one a re-measurement corrects rather than one a calendar retires.
 
-`crates/claims` machine-checks *part* of this file: every repo-relative path it references, every
-line-anchored citation's range, every experiment it cites by bare name, and every documented
-command flag. It does **not** check this document's measurements — no check reads a figure in this
+`crates/claims` machine-checks *part* of this file — it is one of the documents named in
+`CLAUDE.md`'s "What is machine-checked, and what is not", which is where the list of checks lives
+rather than in a second copy here. It does **not** check this document's measurements — no check reads a figure in this
 file, which is why a wrong one here once survived a green run. **A measurement in this document is
 checked by re-measuring it**, and a green grader is not evidence that a Today section is still
 true.
@@ -235,8 +235,9 @@ Each service must define a behavioural contract, its allowed capabilities, its c
 requirements, its authority limits, its output expectations, and its evaluation criteria.
 
 **Today:** `ServiceDefinition` (`crates/services`, `crates/domain/src/service.rs`) carries all six as
-data compiled into the binary, and unknown keys are refused rather than ignored. Two services ship
-(§14). A definition with `"evaluation": null` cannot carry an answer-quality claim.
+data compiled into the binary, and unknown keys are refused rather than ignored. One service ships
+(§14, and `services/README.md` is where the set is stated). A definition with `"evaluation": null`
+cannot carry an answer-quality claim; the one that ships names `fixtures/account-coordination`.
 
 ### Tenants
 
@@ -456,7 +457,10 @@ they did.
 
 ### Today
 
-Nothing provisions. `crates/lifecycle` models the problem completely and executes none of it:
+There is no end-to-end provisioning command. Focused operator commands can adopt and verify an
+existing Account Service scope and runtime member, confine that recorded member, and publish a
+strict one-entry registry. They deliberately do not pretend that adoption created authority or
+that a hand-written PASS file activated a measured deployment. `crates/lifecycle` carries
 `InstanceSpec` (what an operator asked for), `ProvisionProgress` (how far we got), and
 `AuthorityInventory` (what the authoritative systems say exists) are three separate types on
 purpose. The stage order is fixed (§F-2):
@@ -472,9 +476,11 @@ smoke"* unrepresentable rather than merely disallowed. `staged` before `smoke_pa
 activation is the contract: **the registry entry exists but is not live until isolation and
 reachability pass against the real credentials.**
 
-A tenant today is a hand-written registry entry naming a slug, a channel, a service, a guidance
-path, an address, and two credential handles — plus a guidance file, plus two credentials an
-operator set in the environment.
+A tenant today is a hand-written registry entry naming a slug, a channel, an org, a service, a
+guidance path, an address, and two credential handles — plus a guidance file, plus two credentials
+an operator set in the environment. The org is the one the records credential must resolve to, and
+`boot_tenant` refuses to serve on a disagreement; it is an expectation rather than an authority,
+which is why it can be written by hand without becoming a caller-supplied scope key (§B-1).
 
 ### Target — **H2**
 
@@ -508,12 +514,11 @@ partial provision that nobody is watching is exactly the state §F-1 exists to m
   tenant's routing, credentials or data scope.
 - **§B-6's six uniqueness refusals**, in particular: a shared member token means two tenants *are
   the same identity*; a shared account token serves the same records in two rooms.
-- **§B-8 — sealed-member status is probed, never inferred from the environment.** The reference
-  implementation compared against *this process's* environment variables, so the check was alive in
-  the operator console and inert in the process that serves tenants. Ask the runtime.
-- **§B-9 — the admin probe sends a browser User-Agent.** A hosted runtime behind bot protection
-  answers a default client `403`, and `403` is what the probe reads as proof of a sealed member.
-  Without the header every tenant certifies, including one whose token really is the operator's.
+- **§B-8 and §B-9 — the sealed-member probe**, stated in `docs/INVARIANTS.md` with the two defects
+  that produced them. What they constrain here is that certification depends on the runtime being
+  *asked and answered*: a probe that reads the wrong process's environment, or that is refused by
+  bot protection, certifies **every** tenant — including one whose token really is the operator's.
+  A provisioning step may not treat a probe's silence as a result.
 - **Provisioning must not assume the platform mints the record-scope credential.** *Requirement,
   from §11's record-origin decision.* A tenant who already holds an org is not excluded, so
   `org_registered` must be reachable by verifying an org as well as by creating one. The two are
@@ -605,7 +610,7 @@ seam reads them.
 
 **The contribution path is built.** `crates/domain/src/share.rs` holds a deterministic grammar and
 `crates/proposals` a durable proposal buffer; a person types a command naming an account and a note, the
-bytes are echoed back exactly, and `/confirm` (`crates/cli/src/main.rs::confirm_command`) promotes them
+bytes are echoed back exactly, and `/confirm` (`crates/cli/src/lib.rs::confirm_command`) promotes them
 through the one append route (`crates/records/src/append.rs`) under a separate append credential.
 
 **What is unmeasured is whether a room's notes actually accumulate into a usable book.** Nothing has
@@ -645,10 +650,8 @@ they do not have.
   and must not grow one. Promotion is a *person's* effect executed by deterministic code, not a
   capability the model holds — the model cannot propose, cannot confirm, and cannot see that a
   promotion happened except as a record like any other.
-- **The `approvals` named absence (§ the rule, `docs/INVARIANTS.md`).** `AuthorityPath::Approvals`
-  reports `implemented()` as `false` rather than being absent. When propose-and-confirm lands it
-  lands with an approval path and its own invariants, and those invariants must be written, not
-  inherited.
+- **Approval stays distinct from model authority.** Propose-and-confirm is a person's deterministic
+  effect: the model cannot propose, confirm or append, and `Access` still has no `Write` variant.
 - **Attribution is not sender identity.** `ActorRef` is the channel's attestation of who sent a
   message and it authorizes and keys; `ContributorId` is who a promoted record is attributed to and
   is operator-recorded in the registry. `ActorRef` has no `Display`, a redacted `Debug`, and one
@@ -678,7 +681,7 @@ refuses any activity id outside the `share-` namespace — which `crates/domain/
 load-bearing precisely because it means a bug *"can never land on an activity a tenant's team
 authored."* That path cannot create an account or a contact. An import through the seam is
 therefore not a widening of an existing capability but a new one, and it would arrive without
-precedent — the same shape as the `approvals` named absence.
+precedent or inherited invariants.
 
 **Two things that look like objections are not.**
 
@@ -754,26 +757,26 @@ and `docs/experiments/README.md` is the record. The graders' own controls are
 `cargo test -p ironworks-graders`; the Python self-test they replaced is gone.
 
 `relay` handles **one cycle and exits** — that is what keeps every crash boundary a real process
-boundary. `dev/relay-loop.sh` supervises it and `deploy/rustworks-relay.service` runs that, with
+boundary. `dev/relay-loop.sh` supervises it and `deploy/ironworks-relay@.service` runs that, with
 `Restart=always`. Both are committed, and `multi-serve` runs them for one tenant,
 which has served and delivered a turn. `deploy/README.md` records what that establishes; nothing in
 this repository verifies it, because no automated check reaches that host.
 
-Upstream contract facts that bound any design here, each measured at the revision named in
-`DESIGN.md`:
+**The upstream contract facts that bound any design here are in `DESIGN.md`'s "The upstream
+contract", and they are not listed again here.** They were, and the copy dropped the one thing that
+makes them usable: each fact there carries the `[measured @ rev]` marker it was actually confirmed
+against, and a pin bump moves those markers one fact at a time (`docs/UPGRADE.md` step 6). A list
+of the same sentences without their provenance reads as a single dated set, which is exactly what
+the per-fact mechanism exists to prevent — and `docs/INVARIANTS.md` §G-5 is the worked example of
+a copy of these facts lagging the original.
 
-- `DEFAULT_RESPONSES_WAIT_TIMEOUT` is 30s and a turn that outlasts it is **refused with 503, not
-  degraded**. The submission already happened, so the turn completes server-side and the answer is
-  recovered by replaying the idempotency key (ADR 0005), not by polling — no response id was
-  returned to poll.
-- HTTP 200 does not mean success. A failed turn returns 200 with `status: "failed"`.
-- Rate limit is **30 requests / 60 seconds per user**, shared with `/api/chat/send`.
-- `x_context` caps at 10 KB and is too small for a book (ADR 0003); the body cap is 4 MB.
-- `instructions` is sticky — the runtime prepends and persists it, so persona bytes accumulate in
-  thread history.
-- `model` is echoed on create but not on retrieval. **Which model produced a stored answer is
-  unverifiable after the fact**, and whether the pin is honoured at all is a property of the
-  provider, not of the request. The pin fails silently rather than closed.
+Four of them bound this section in particular, and the constraint rather than the fact is what
+belongs here: the 30-second refusal makes **recovery by idempotency-key replay** the only correct
+response to a slow turn (ADR 0005), not polling; a 200 that can carry `status: "failed"` makes
+**status parsing load-bearing** rather than optional; the per-user rate limit is shared with the
+chat surface, so **serving concurrency is bounded by a budget this repository does not own**; and
+a sticky `instructions` field means **persona bytes accumulate in thread history**, which is why
+continuation is a policy and not a default.
 
 ### Target — **H2**
 
@@ -815,6 +818,19 @@ journal holds identifiers only**, which is narrower and unusual but is a claim a
 Held as a conviction it is still the right thing to build first, for the reason above. Held as a
 wedge it is unevidenced, and §19.1 already names the only change that would make it one.
 
+**And the capability the service sells is not the differentiator either.** Upstream ships
+`commitment-digest`, `commitment-triage`, `delegation-tracker` and `decision-capture` as
+first-party skills at the pin, installable, free, and described in their own words as composing
+summaries of open commitments, deadlines and pending signals — which is
+`relationship-intelligence@2`'s territory stated plainly. They read through `memory_tree` and
+`memory_read`, the `ironclaw.memory.*` surface confinement disables and that §L-2 measured
+recovering this tenant's records unprompted. So a prospect who reads both trees finds the
+capability shipped by the runtime this product is built on. What upstream does not ship with it is
+the tenancy boundary, the tool floor and the evidence trail, and those are what is measured here.
+The reading is
+`docs/experiments/0051-the-probe-and-the-served-host-resolve-authority-differently.md`, finding 5;
+it measured nothing, and it does not need to — the skills are in the pinned tree.
+
 ### Today
 
 Isolation is enforced at the identity boundary, and the runtime gives exactly one primitive:
@@ -828,36 +844,26 @@ Isolation is enforced at the identity boundary, and the runtime gives exactly on
 - Confinement is implemented and proven live in `ironworks_lifecycle::confinement`: fresh →
   DRIFTED, applied → VERIFIED, one tool re-enabled → DRIFTED.
 
-Measured confinement facts at `4cb47cfaf3`, all of which constrain the platform design:
+**The measured confinement facts are `docs/INVARIANTS.md` §L-1 through §L-11, and they are not
+restated here.** They were, as an eight-bullet copy carrying its own row counts — and a count is
+the one thing about that catalogue that cannot be copied safely: it varies by *caller* and by
+*booted profile* both (`docs/experiments/0039-the-catalogue-has-two-axes.md`), so a bare number
+lifted out of §L loses the two qualifiers that make it true. `docs/AUDIT-BRIEF.md` §6 tells an
+auditor exactly that, which a second copy here was busy contradicting.
 
-- **§L-1** — a fresh member's settings catalogue is open: 53 rows, 51 `always_allow`, two locked
-  `ask_each_time`, approval on. The host-captured capability surface held 53 ids as well, and the
-  two sets are not the same 53: they overlap in 45, leaving 8 settings-only and 8 surface-only. The
-  fresh member received 25 direct provider definitions. **The row `0012` disputed was measured** —
-  a fresh probe on 2026-09-02 returned 53, and the missing id was `nearai.web_search`, which is in
-  the host capture too and had been miscounted as surface-only.
-- **§L-3** — sixteen authority-changing settings rows are denied first, of which **fourteen are
-  disabled**: the other two are the `operator_config_set_*` rows §L-4 holds at `ask_each_time`,
-  which the runtime refuses to disable. Sixteen is the deny list, fourteen is what gets written;
-  a sentence here should say which. Five are API-only and
-  absent from the measured captured/direct surfaces, but exhaustive deferred reachability is
-  **BLOCKED**. Keep the cost-free deny-first ordering; do not turn a partial measurement into less
-  confinement.
-- **§L-4** — the two `operator_config_set_*` settings rows are locked at `ask_each_time`:
-  `locked: true`, `mutable: false`; mutation returns HTTP 400 and read-back is unchanged. No model
-  approval/resume behavior was measured for these API-only rows.
-- **§L-5** — for a model-visible capability, `ask_each_time` is an approval gate rather than a
-  denial; that generic source fact does not establish model reachability for §L-4's API-only rows.
-- **§L-6** — ordinary settings are custody-backed and reversible by the member credential; the two
-  locked rows are the measured exception. Never describe the whole policy as immutable, and never
-  erase that exception.
-- **§L-7** — the verified claim covers the settings catalogue only. Exhaustive fresh-member
-  deferred reachability is **BLOCKED**.
-- **§L-8** — the achievable settings-catalogue floor is 50 disabled + 2 locked at `ask_each_time` +
-  approval off. It is not proof about ids outside that catalogue.
-- **§L-9** — approval-off is writable once. The API's deterministic activity id makes the second
-  `false` after `false → true` return HTTP 200 without changing the value. IronWorks' response-body
-  validation is load-bearing; the live proof detects that its cleanup leaves the member unconfined.
+What belongs in this section is what those facts **constrain about the product**, which §L does not
+say and should not:
+
+- **Confinement is a per-tenant obligation, not a one-time setup step.** §L-4 and §L-6 together
+  mean an applied policy can be reverted by the credential that applied it, so the target is
+  continuous reconciliation — see "Confinement is reconciled continuously" below.
+- **No capability claim may be stated over the executable surface.** §L-7 scopes the verified claim
+  to the settings catalogue, so a requirement written against "every tool the model can reach" is
+  unmeasurable as posed and must be rewritten or marked BLOCKED.
+- **Approval-off is spent, not configured.** §L-9 makes it one-way per member, which is why every
+  proof that writes it mints its own rather than borrowing one.
+- **The deny-first ordering is free and stays.** §L-3's partial reachability measurement is not a
+  reason to confine less.
 
 Two independent deployment findings once prevented that member-level result from establishing
 isolation between two sandbox-backed client control planes. The repository now has a fail-closed
@@ -865,9 +871,9 @@ deployment contract for both, but it has not been exercised on a deployment host
 
 - **Daemon authority is separated in the unit design.** Each `ironclaw-<client>` user manager runs
   its own rootless daemon, with a private home, socket and image/data store
-  (`deploy/user/rustworks-docker.service`). The root-owned client environment names that account's
+  (`deploy/user/ironworks-docker.service`). The root-owned client environment names that account's
   `/run/user/<uid>/docker.sock`, the IronClaw unit grants no `docker` supplementary group, and the
-  startup preflight rejects any other endpoint (`deploy/rustworks-ironclaw@.service`;
+  startup preflight rejects any other endpoint (`deploy/ironworks-ironclaw@.service`;
   `deploy/check-ironclaw-instance.sh`). It also rejects an OS account that was
   independently added to the shared `docker` group (`deploy/check-ironclaw-instance.sh`).
 - **Object-name inputs are explicit and checked.** IronClaw derives the workspace key, container,
@@ -998,21 +1004,17 @@ file meant the default.
 
 **Per-tenant selection already works, and now it is mandatory.** A tenant's entry names a service;
 the platform decides nothing for them. New services earn their place when a tenant needs a
-composition this one does not give them — not to make the set look fuller. **Adding a second
-service re-opens what §7 closed**, and the test below is what fires.
+composition this one does not give them — not to make the set look fuller. Adding a second service
+does not create a default; selecting it remains explicit.
 
 Under self-serve, service selection moves into the console and must stay in agreement with the
 guidance marker, which is the second half of the binding.
 
 ### Must not break
 
-- **The pair guarding the absent slot** (`crates/services/src/service.rs`):
-  `naming_no_service_is_refused_rather_than_defaulted`, and its control
-  `no_shipped_composition_is_organization_neutral`. The refusal is only *necessary* while every
-  shipped composition is addressed to someone; the control fails the day one is not, so whether a
-  silence may be filled is asked again by a person rather than answered by an accident of the
-  corpus. **If you add a service or reintroduce a default, these are what you will hit, and the
-  control must be rebuilt rather than deleted.**
+- **The absent slot stays absent** (`crates/services/src/service.rs::naming_no_service_is_refused_rather_than_defaulted`).
+  An empty name is unknown rather than a wildcard. A neutral service would not weaken that rule;
+  reintroducing a default would be the decision that changes it.
 - **A composition written for exactly one organization may name it; nothing that chose nothing may
   reach it.** `relationship-intelligence` names MultiAgency correctly, not by leak.
 - **Two things must agree and are deliberately separate**: the instance's configuration selects the
@@ -1143,13 +1145,14 @@ served from live state — folding them would make the generated page a runtime 
 
 ### Today
 
-Nothing deprovisions, and **less exists than this section used to claim.** What is unusually well
-specified is the *reference implementation's* model, recorded in §F-4 through §F-14. What is in
-`crates/lifecycle` is one half of it: `Verdict::AcceptedRisk(NonEmptyReason)` is defined, and
-`inspect.rs` says of it — *"Nothing in this slice constructs it. The residual-authority ledger is
-where operator classifications live and it is **not built yet**."* It is defined ahead of its
-producer on purpose, so unmanaged authority is never normalized into it. **The ledger itself does
-not exist here.**
+`ironworks tenant export` now writes an owner-only, complete, scoped `ironworks-book-v1` artifact
+and digest manifest without printing record content. There is deliberately no deprovision command:
+the attempted implementation created a second JSON ledger beside lifecycle state and encoded
+residual authority as prose, which could not satisfy §F-4 through §F-14. The Account Service
+administration response types remain available for contract work, but no destructive orchestration
+is exposed until the real residual-authority ledger and external cross-org controls exist. There
+is no accepted-risk verdict ahead of that ledger: a caller-supplied reason would not establish that
+an operator recorded a classification. **The ledger itself does not exist here.**
 
 **§F-4 and §F-5 are the shape this inherits:** deleting a member does not revoke its token, so a
 deprovisioned tenant leaves an authenticating session for up to 365 days, and the residual ledger
@@ -1176,36 +1179,23 @@ requiring either a measured revocation probe or an operator classification with 
 
 ### Must not break
 
-- **§F-6 — validity is measured; meaning is declared.** A residual session is a *fact*; what it
-  means varies, and conflating the two turns a security gate into noise.
-- **§F-7 — `REVOKED` is set only by a probe that measured a rejection.** Asserting it by hand makes
-  the gate an honour system.
-- **§F-8 — a waiver without a recorded reason is not a waiver.** `AcceptedRisk(NonEmptyReason)`
-  carries the reason *in the variant* so it cannot be produced without one.
-- **§F-9 — never make a gate green by forgetting.** A classification changes what the gate does,
-  never what the ledger says.
-- **§F-10 — an expiry is a fact about a token, not about the call that recorded it.** Only the first
-  record may describe when a token dies; recomputing on re-record turned an audit record into a
-  moving target.
-- **§F-11 — a re-recorded entry keeps its classification**, so a repeated deprovision cannot
-  silently re-arm a considered waiver.
-- **§F-12 — ask by exit code, not by parsing a list.** The listing exits non-zero *while authority
-  is outstanding*; `list | grep` under `pipefail` reports that status whatever grep found, and a
-  caller reading it as a boolean concludes the opposite of the truth.
-- **§F-14 — a check that could not run is never a PASS.** `BLOCKED` is distinct, and an offline run
-  cannot produce a clean green that proves nothing.
+**§F-6, §F-7, §F-8, §F-9, §F-10, §F-11, §F-12 and §F-14**, each stated once in
+`docs/INVARIANTS.md` and deliberately not restated here — they were, and a copy of an invariant is
+a second thing to keep in step with it.
+
+What this section owns is why *these* eight: **every one of them is a way a gate reports green
+without the thing it gates being true.** A residual session's validity confused with its meaning;
+`REVOKED` asserted rather than measured; a waiver with no recorded reason; a classification lost on
+re-record; an expiry recomputed until it stops describing the token; a listing read by `grep`
+instead of by exit code; a check that could not run counted as a pass. That is the shape of every
+defect this capability has produced so far, which is why the design below **records** rather than
+asserts, and why the ledger is the artefact rather than the gate's answer.
 
 ### Open
 
-**Export is now obligatory rather than courteous, and it is neither built nor designed.** §19.1
-settles on platform custody, so a tenant's records live in a store they hold no credential to. That
-decision is what created the obligation: without export, "their records are theirs" is a sentence
-with no mechanism behind it, and the records remainder above has no end. It does not block a second
-tenant, so it is not in §23's ordered steps — it is named in the trailing paragraph there.
-
-What a tenant is owed on the way out beyond a faithful copy — whether deletion is offered, whether
-it can be measured rather than asserted (§F-7's lesson), and what the ledger row for a *records*
-remainder would even hold — is undesigned.
+Export now provides the faithful copy platform custody requires. What remains undesigned is what a
+tenant is owed beyond it: whether deletion is offered, how deletion is measured rather than
+asserted (§F-7's lesson), and what the ledger row for a *records* remainder would hold.
 
 ---
 
@@ -1215,11 +1205,12 @@ remainder would even hold — is undesigned.
 
 `ironworks status` reports the turn journal, read-only, opening no runtime, record store, guidance
 or channel. `crates/reconcile` translates lifecycle intent into observed authority and orders
-findings by a rule: **`Fail` outranks `Blocked`** — a measured contradiction is worse news than an
-unmeasured one, and the operator should see the sharper fact first. `Skipped` deliberately does not
-exist: an inspection either measured something or reports why it could not.
+findings by the verdict ranking `CONTEXT.md` defines and `DESIGN.md`'s "Verdicts" section explains:
+the operator sees the sharper fact first, and an inspection either measured something or reports
+why it could not.
 
-`lifecycle` and `reconcile` are operator-side and no serving-path crate depends on either.
+Where `lifecycle` and `reconcile` sit relative to the serving path is `DESIGN.md`'s "Layering",
+which is the copy Cargo and the control both check.
 
 ### Target — **H2**
 
@@ -1235,8 +1226,8 @@ hides a `Fail` inside a `Blocked`.
   `AuthorityInventory` answer different questions and live in different places. Merging any two of
   them is how the reference's worst crash windows became invisible. A stage named `org_registered`
   reads as an assertion about the world; it is a note about ourselves.
-- **`AcceptedRisk` stays defined ahead of its producer**, specifically so unmanaged authority is
-  never normalized into it.
+- **No accepted-risk result exists before its ledger.** Otherwise a caller could turn unmanaged
+  authority green with an unrecorded sentence.
 - **The stores hold no content.** A reader who cannot see a single sentence of a conversation can
   still learn the whole client list from a world-readable file, which is why custody is stated once
   in `domain` rather than three times as a filesystem chore.
@@ -1369,6 +1360,13 @@ What is **not** supportable today, and must not be claimed:
 - **Completeness of confinement over the executable surface.** §L-7: **BLOCKED**. The measured
   settings catalogue and captured capability surface differ, and exhaustive fresh-member deferred
   reachability could not be completed.
+- **"Only we can do this."** The capability is upstream and first-party: `commitment-digest`,
+  `commitment-triage`, `delegation-tracker` and `decision-capture` ship in the pinned tree's
+  `skills/`, free and installable, and one of them describes itself as composing summaries of open
+  commitments and deadlines (§13). A demonstration that leads with what the service *does* is
+  answered by the runtime it runs on. What is supportable is narrower and is the same list this
+  section already holds: the tenancy boundary, the tool floor and the evidence trail — each scoped
+  to what was actually measured.
 
 ---
 
@@ -1414,7 +1412,7 @@ between Today and Target is the same distinction, and this table is where it is 
 
 | Criterion | State |
 |---|---|
-| a real private tenant operates end to end | **partial, and the remaining gap is duration rather than machinery.** One tenant answers over a real channel from a supervised loop: `multi-serve` runs `rustworks-relay` and `rustworks-telegram` for `relationship-demo`, which polled a real room, resolved scope server-side, composed over its records, answered from a confined member and delivered, leaving no unresolved turn. What is still missing is a tenant *operating* — days of traffic, not one turn. `dev/prove-host.sh` now verifies that host's units, live confinement and registry digest, but it observes no turn: the account of what was polled, composed, answered and delivered is still reported rather than checked |
+| a real private tenant operates end to end | **partial, and the remaining gap is duration rather than machinery.** One tenant answers over a real channel from a supervised loop: `multi-serve` runs `ironworks-relay` and `ironworks-telegram` for `relationship-demo`, which polled a real room, resolved scope server-side, composed over its records, answered from a confined member and delivered, leaving no unresolved turn. What is still missing is a tenant *operating* — days of traffic, not one turn. `dev/prove-host.sh` now verifies that host's units, live confinement and registry digest, but it observes no turn: the account of what was polled, composed, answered and delivered is still reported rather than checked |
 | tenant and audience scope are selected deterministically | **met** — §B-1 resolves org server-side; `route::resolve` is three-valued and refuses to resolve an ambiguity by picking |
 | only authorized context reaches the agent | **met** — `Ask` has no `org` field and no field for rendered text; `compile_fail` doctests hold that an unverified instance cannot build a turn at all |
 | secrets remain outside model-visible context | **met** — `CredentialRef` holds where a credential lives, never its value; the journal holds identifiers only |
@@ -1460,33 +1458,34 @@ internal document that flatters itself is worse than no document.
 
 What is not built, stated as of the tree this document sits in:
 
-- **Nothing provisions or deprovisions.** The models are complete and nothing executes them, with
-  one exception: `ironworks lifecycle confine` applies confinement against a live runtime and
-  re-measures it, so the `member_confined` step is executed today while the other six are not.
+- **There is no end-to-end provisioning or deprovisioning command.** Adoption, confinement,
+  strict registry publication and complete export are separate, narrow operator operations.
+  External org/member creation, measured activation, destructive Account Service qualification
+  and the residual-authority ledger remain open.
 - **The serving loop runs on one host, and most of what this repository says about it is now
-  measured.** `multi-serve` runs `rustworks-relay` and `rustworks-telegram` for one tenant, which
-  has answered and delivered. `dev/prove-host.sh` has reached that host read-only for the first
-  time and scored 7 PASS, 1 FAIL, 0 BLOCKED: the units, live confinement and registry digest
-  measured as recorded, and the one failure was the proof's own expected value rather than anything
-  the host reported. The org's account count and the channel are still operator-reported, no check
-  reaches them, and each further run is an operator decision taken in the moment. `DESIGN.md`
-  "Status" records the run and what it did not establish.
+  measured.** `multi-serve` runs `ironworks-relay` and `ironworks-telegram` for one tenant, which
+  has answered and delivered. What remains *un*measured is the limit worth publishing: the org's
+  account count and the channel are still operator-reported, no automated check reaches them, and
+  every further run of `dev/prove-host.sh` is an operator decision taken in the moment rather than
+  a thing that happens. The proof's score and what it did not establish are in `DESIGN.md`'s
+  "Status" block, which is where a current figure lives; quoting it a second time here would be a
+  number nothing derives.
 - **Two tenants exist and neither has been used in anger.** The operator's own org has answered one
   real question about real records from the workstation; `relationship-demo` has answered on the
   host. One turn each is not a tenant operating.
 - **No number from the evaluation suite is a pass rate, and the instrument is most of what the
-  probes measured.** Three seven-case runs at a composition that never moved scored 6/7, 4/7 and
-  3/7; every case has both passed and failed; `0026` read all fifty-nine recorded answers and found
-  thirty-seven pass, seven of the twenty-two failures the model's and fourteen the instrument's;
-  `0028` held out a sample that scored 9/10 against 10/10 in training. **No grader defect is
-  currently open** — `0038` was the last and is corrected with two-sided controls — but
-  `absence_as_negative` alone accounted for six, the one after it turned up in a different rule the
-  moment anyone searched in the untried direction, and `0038` itself came from a third kind of
-  search. Every direction tried has returned something, so assume the next one does too.
-  `docs/experiments/README.md` carries the arc in full, one line per measurement, and §21's fifth
-  criterion is where this bears on the product. What matters here: **these numbers describe one
-  synthetic book at one composition**, and what they cannot describe is a real tenant's records — a
-  limit no further reading of this corpus removes.
+  probes measured.** Runs at a composition that never moved produced different scores; every case
+  has both passed and failed; most recorded failures turned out to be the grader rather than the
+  model. `docs/experiments/README.md` carries the arc in full, one line per measurement, and is the
+  only place the counts and the open-defect status are stated — they have moved before and a copy
+  here would be the thing that lags. §21's fifth criterion is where this bears on the product.
+
+  Two limits are what this section owns, and neither is a number. **Every direction anyone has
+  searched has returned a defect** — one rule accounted for six, the next turned up the moment
+  anyone looked the other way, and the one after that came from a third kind of search — so assume
+  the next direction does too, and treat "no defect is currently open" as a statement about where
+  we have looked. And **all of it describes one synthetic book at one composition**: what it cannot
+  describe is a real tenant's records, a limit no further reading of this corpus removes.
 - **`writes` is `Access::None` everywhere**, and the contribution path in §11 is built — grammar,
   proposal buffer, `/confirm` and the single append route. **What does not exist is any measurement
   that a room's notes accumulate into a usable book**, which is the claim §11's Target actually
@@ -1543,7 +1542,7 @@ the nearer one matters because signup, the console and guided authoring sit in t
 below, and a reader who takes §3's horizon as this list's destination will expect them here.
 
 1. **Run the serving loop for one client and no more.** The supervision is
-   `deploy/rustworks-relay.service` over `dev/relay-loop.sh`, and `deploy/README.md` owns the
+   `deploy/ironworks-relay@.service` over `dev/relay-loop.sh`, and `deploy/README.md` owns the
    procedure. The constraint that makes this a step rather than a detail: **the cursor is shared
    across every admitted tenant** (§13, step 5), so one client relay is safe and two are not.
    Synthetic relays used to measure step 5 are not prohibited.
@@ -1565,9 +1564,12 @@ below, and a reader who takes §3's horizon as this list's destination will expe
    because a buyer handing over their relationship record selects for vendors who state limits
    unprompted. The page is therefore reachable now, and what it must not do is mint a pass rate,
    which is the one thing `docs/experiments/README.md` says no number here is.
-3. **Resolve the operator-only binding deferral** (`docs/ACCOUNT-COORDINATION.md`). It ends before
-   either of two production events, and admitting a second client tenant is one of them. It does not
-   gate step 4's synthetic deployment pair.
+3. ~~**Resolve the operator-only binding deferral**~~ (`docs/ACCOUNT-COORDINATION.md`). **Done**,
+   and by a route this step did not anticipate. It was to end before one of two production events;
+   it ended instead because ADR 0010 settled that the service varies per client, which retires the
+   premise that a shipped composition is always the operator's own. It landed as `org` on a
+   registry entry: the records credential must resolve to that organization or `boot_tenant`
+   refuses service. **Enforced, not measured:** nothing has provoked the refusal on a live path.
 4. **Provision a synthetic pair and measure Docker isolation (§13).** *Sizeable now that the host is
    reachable (operator, 2026-09-02) — this was the one item that could only be sized as unknown.*
    The repository now provisions separate rootless daemons and rejects default/mismatched
@@ -1575,32 +1577,34 @@ below, and a reader who takes §3's horizon as this list's destination will expe
    `dev/prove-deployment-isolation.sh` must still show that each control plane lacks authority over
    the other's Docker resources and that the same object name can exist independently in both
    daemons; `dev/prove-workspace.sh` must pass through each client to prove the rootless daemon still
-   supports IronClaw's real worker/proxy path — **but that second proof is itself BLOCKED until some
-   service declares `runtime_tools: "sandbox"`, which none does** (§13), so it is a prerequisite of
-   this step rather than a task inside it. These are independent requirements; unique naming
+   supports IronClaw's real worker/proxy path. A feature-gated qualification binary now carries a
+   synthetic sandbox service and bound guidance for that proof; the production binary and service
+   catalogue reject it. These are independent requirements; unique naming
    does not narrow daemon authority, and daemon separation does not excuse duplicate names within
    one daemon. Creating the synthetic pair is part of this step; admitting the second client is what
    must not happen before the live proofs pass.
-5. **Per-tenant journal and loop (§13).** This is the availability gate on the second admitted
-   client, after the deployment-isolation gate rather than beside it.
-   Until §13's Target holds — *no tenant's failure is observable by another tenant* — a second
-   tenant makes one tenant's stuck turn every tenant's outage, for the reason §13 states.
-   **Admitting a second client tenant must not land before this.**
+5. **Qualify the per-tenant journal and loop (§13).** The templated relay and Telegram units now
+   give each serving cell a strict one-entry registry, channel endpoint, journal and proposal
+   store. This remains the availability gate on the second admitted client: synthetic tests must
+   still produce PASS showing that one cell's stopped adapter, blocked turn, rate limit and open
+   cursor do not change the healthy cell's polling or delivery. **Admitting a second client tenant
+   must not land before that PASS.**
 6. ~~**Settle the `DEFAULT` slot (§14, §7).**~~ **Done, 2026-09-02, by deletion.** Kept rather than
    deleted because it is the one item here that only ever existed because a second tenant does —
    and what re-opens it is a second *service*, not a second tenant.
-7. **Execute provisioning (§9)**, under the platform-custody decision recorded in §19.1. *Not
-   required for an operator-provisioned second tenant* — a hand-written registry entry is what that
-   phrase means, and it is what tenant 1 runs on. This is the first step of the self-serve
-   milestone rather than the last of this one.
-8. **Redesign registry refusal for scale (§9, Open)** — the largest unbuilt design, and it can wait
-   until tenant counts make a whole-set outage unacceptable rather than merely inelegant.
+7. **Execute operator provisioning (§9)**, under the platform-custody decision recorded in §19.1.
+   The narrow adoption, confinement and publication operations exist; creation of external
+   authority, resumable orchestration and the real smoke/activation path do not.
+8. ~~**Redesign registry refusal for scale (§9, Open).**~~ **Mechanism closed by cell topology.**
+   Production uses the unchanged registry parser with exactly one entry per cell, so one malformed
+   tenant refuses only that staged cell without weakening whole-registry fail-closed behaviour.
 
 Everything else — the console, Slack, guided authoring — is buildable in
 parallel, and the contribution path is already built. None of it is *gated* by the steps above; what
 the steps gate is admitting a client onto it.
 
-**Export belongs in that parallel set, and it is not optional.** No tenant has asked for it
+**Export belongs in that parallel set, and it is not optional.** Its seam-side command and strict
+response validation now exist, but the external Account Service contract is not yet qualified. No tenant has asked for it
 (operator, 2026-09-02) — it is an obligation this project took on rather than a requirement it was
 given, which is exactly why it sits here and not in a numbered step. It does not block a second
 tenant; §19.1's platform-custody decision is what created it.

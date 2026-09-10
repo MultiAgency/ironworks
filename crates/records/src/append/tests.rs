@@ -11,12 +11,21 @@ fn who() -> ContributorId {
     ContributorId::parse("alice").expect("contributor")
 }
 
+fn when() -> ironworks_domain::record::Date {
+    ironworks_domain::record::Date::parse("2026-09-01").expect("a canonical date")
+}
+
 /// One append, in the organization the caller expects.
-fn request<'a>(expected: &'a OrgId, account: &'a AccountId, who: &'a ContributorId) -> Append<'a> {
+fn request<'a>(
+    expected: &'a OrgId,
+    account: &'a AccountId,
+    who: &'a ContributorId,
+    occurred_at: &'a ironworks_domain::record::Date,
+) -> Append<'a> {
     Append {
         activity_id: "share-abc123",
         account,
-        occurred_at: "2026-09-01",
+        occurred_at,
         body: "Customer requested a September renewal review.",
         contributor: who,
         expected_org: expected,
@@ -29,7 +38,7 @@ fn read(status: u16, body: &str) -> Read {
     let expected = org("multiagency-org");
     let account = account();
     let who = who();
-    AppendClient::<EnvCredentials>::read(status, body, &request(&expected, &account, &who))
+    AppendClient::<EnvCredentials>::read(status, body, &request(&expected, &account, &who, &when()))
 }
 
 #[test]
@@ -171,10 +180,14 @@ fn only_an_append_credential_can_append() {
     let expected = org("multiagency-org");
     let account = account();
     let contributor = who();
-    for purpose in [CredentialPurpose::RecordScope, CredentialPurpose::RuntimeMember] {
+    for purpose in [
+        CredentialPurpose::RecordScope,
+        CredentialPurpose::RuntimeMember,
+        CredentialPurpose::OperatorConfiguration,
+    ] {
         let wrong = CredentialRef::new(purpose, "env:SOMETHING");
         let err = client
-            .append(&wrong, &request(&expected, &account, &contributor))
+            .append(&wrong, &request(&expected, &account, &contributor, &when()))
             .expect_err("a non-append credential must not append");
         assert!(matches!(err, AppendFailure::WrongPurpose { .. }), "{purpose:?}: {err}");
         // And it refuses before resolving anything, so a wrong-purpose handle is never even read.
@@ -191,7 +204,7 @@ fn a_missing_credential_is_named_by_its_location_and_never_its_value() {
     let absent =
         CredentialRef::new(CredentialPurpose::RecordAppend, "env:IRONWORKS_DEFINITELY_ABSENT");
     let err = client
-        .append(&absent, &request(&expected, &account, &contributor))
+        .append(&absent, &request(&expected, &account, &contributor, &when()))
         .expect_err("no credential, no append");
     assert!(matches!(&err, AppendFailure::NoCredential { handle } if handle.contains("env:")));
     assert!(!err.may_retry_identical());

@@ -4,7 +4,7 @@ This file is a glossary and nothing else. What the product is, is in `README.md`
 `DESIGN.md`; decisions live in `docs/adr/`.
 
 Several `_Avoid_` entries below name words that are live in the Python prior art
-(`~/agency/ironworks`) and are deliberately not carried here. Where that codebase says *client*
+(`~/agency/ironworks-py`) and are deliberately not carried here. Where that codebase says *client*
 and *bridge*, this one says *tenant* and *seam*.
 
 ## Shorthand
@@ -14,10 +14,10 @@ they are stated here rather than inferred.
 
 | Written | Means | Defined in |
 |---|---|---|
-| `§A-1` … `§L-10` | an **invariant** — a numbered item in a lettered section | `docs/INVARIANTS.md`. §A–J extracted from the reference, §K what this implementation earned, §L confinement at the pinned runtime |
-| `§1` … `§23` | a **section of the product document** | `docs/PRD.md` |
-| `B1` … `B12`, `B11b` | a **crash boundary** — a point a process can die at, and what must be true after | `DESIGN.md`, "Crash boundaries" |
-| `0001` … `0035` | an **experiment** — one dated measurement and its transcripts | `docs/experiments/README.md` |
+| `§A-1`, `§L-7` | an **invariant** — a numbered item in a lettered section | `docs/INVARIANTS.md`. §A–J extracted from the reference, §K what this implementation earned, §L confinement at the pinned runtime |
+| `§13`, `§19.1` | a **section of the product document** — some carry a sub-number | `docs/PRD.md` |
+| `B4`, `B11b` | a **crash boundary** — a point a process can die at, and what must be true after | `DESIGN.md`, "Crash boundaries" |
+| `0001`, `0046` | an **experiment** — one dated measurement and its transcripts | `docs/experiments/README.md` |
 
 **`§B-2` and `B2` are unrelated.** The first is an isolation invariant; the second is a crash
 boundary. Cite an experiment by filename where a number alone would be ambiguous — nothing
@@ -222,10 +222,12 @@ configuration defect and this is the only place it is visible.
 _Avoid_: status, state, label
 
 **Openness**:
-Whether an update still has *automatic* work outstanding: `Open` or `Settled`. Settled covers
-delivered, abandoned and parked-for-a-human alike — it means nothing more will happen without a
-person, not that anything succeeded. The cursor may not advance past an `Open` update, which is
-what makes the safe cursor safe.
+Whether an update still has *automatic* work outstanding: `Open`, `Settled`, or `Unestablished`.
+Settled covers delivered, abandoned and parked-for-a-human alike — it means nothing more will
+happen without a person, not that anything succeeded. Unestablished is the third answer and not a
+degenerate one: a read of the journal that *failed* has established nothing, so it is neither. The
+cursor may not advance past an update that is `Open` or `Unestablished` — the predicate is
+`holds_barrier`, not `!is_settled` — which is what makes the safe cursor safe.
 _Avoid_: done, complete, finished, resolved
 
 **Supply**:
@@ -306,7 +308,7 @@ _Avoid_: enforced, locked, guaranteed, immutable
 
 **Corpus**:
 Ambiguous on its own — always say which. **The reference corpus** is the Python prior art at
-`~/agency/ironworks`, which the invariants and the crash boundaries were extracted from. **The
+`~/agency/ironworks-py`, which the invariants and the crash boundaries were extracted from. **The
 scrap corpus** is the persona parts, skills and safety tail compiled into the binary. **A book** is
 neither; it is records.
 _Avoid_: bare "the corpus"

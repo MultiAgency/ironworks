@@ -27,6 +27,14 @@
 //! open and `min` does not care which tenant it belongs to. The same line gives graceful
 //! shutdown for free: a process that finishes the update in hand and stops leaves the rest of the
 //! batch open, so the cursor stays behind them and the next process is sent them again.
+//!
+//! # The update that could not be read
+//!
+//! [`Openness::Unestablished`] holds the barrier exactly as `Open` does, so "lowest open" is
+//! really *lowest update the offset may not pass*. It is the same `min` and the same line; the
+//! only change is that a row nobody could read counts as one of them. An unreadable row is not
+//! evidence that a turn finished, and the offset is the one thing that stops the channel
+//! redelivering — so passing it would trade an answer for a read error.
 
 use crate::UpdateId;
 use ironworks_domain::Openness;
@@ -40,9 +48,10 @@ use ironworks_domain::Openness;
 /// `updates` need not be sorted, and duplicate ids are harmless. Both are properties worth having
 /// because the caller is a database query whose ordering is not this function's business.
 pub fn safe_cursor(updates: &[(UpdateId, Openness)]) -> Option<UpdateId> {
-    let lowest_open = updates.iter().filter(|(_, o)| o.is_open()).map(|(id, _)| *id).min();
-    match lowest_open {
-        // The barrier. Not `min` of *this tenant's* open work — `min` of everyone's.
+    let lowest_held = updates.iter().filter(|(_, o)| o.holds_barrier()).map(|(id, _)| *id).min();
+    match lowest_held {
+        // The barrier. Not `min` of *this tenant's* open work — `min` of everyone's, and an
+        // update whose progress could not be read is one of them.
         Some(id) => Some(id),
         // Nothing outstanding: acknowledge through the highest update seen. `+1` is the channel's
         // convention — an offset names the next update wanted, not the last one handled.
@@ -53,7 +62,7 @@ pub fn safe_cursor(updates: &[(UpdateId, Openness)]) -> Option<UpdateId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ironworks_domain::Openness::{Open, Settled};
+    use ironworks_domain::Openness::{Open, Settled, Unestablished};
 
     fn u(n: u64) -> UpdateId {
         UpdateId::new(n)
@@ -108,6 +117,42 @@ mod tests {
     fn order_and_duplicates_do_not_change_the_answer() {
         let shuffled = [(u(11), Settled), (u(9), Settled), (u(10), Open), (u(10), Open)];
         assert_eq!(safe_cursor(&shuffled), Some(u(10)));
+    }
+
+    /// An update whose progress could not be read holds the barrier, and the control is the same
+    /// three rows answered.
+    ///
+    /// Without the second assertion a `safe_cursor` that refused to pass *anything* would pass
+    /// this test while being useless, so the control is what gives the first assertion content.
+    #[test]
+    fn an_update_that_could_not_be_read_holds_the_barrier() {
+        assert_eq!(
+            safe_cursor(&[(u(5), Settled), (u(6), Unestablished), (u(7), Settled)]),
+            Some(u(6)),
+            "the offset passed an update nothing could be read about"
+        );
+        // POSITIVE CONTROL: the same three rows, read. The barrier is not permanent — it belongs
+        // to the failed read, and it lifts when the read succeeds.
+        assert_eq!(safe_cursor(&[(u(5), Settled), (u(6), Settled), (u(7), Settled)]), Some(u(8)));
+    }
+
+    /// An unreadable row does not beat an earlier open one, and does not hide behind a later one.
+    /// It is one more member of the `min`, not a special case beside it.
+    #[test]
+    fn an_unreadable_row_is_ordered_with_the_open_ones_not_against_them() {
+        assert_eq!(safe_cursor(&[(u(3), Open), (u(4), Unestablished)]), Some(u(3)));
+        assert_eq!(safe_cursor(&[(u(3), Unestablished), (u(4), Open)]), Some(u(3)));
+    }
+
+    /// The over-correction control. `Unestablished` must not leak into the "nothing outstanding"
+    /// branch: a journal where every row failed to read has no acknowledgeable offset at all, and
+    /// answering `max + 1` there would acknowledge the entire batch on no evidence whatsoever.
+    #[test]
+    fn a_journal_that_answered_nothing_acknowledges_nothing() {
+        assert_eq!(safe_cursor(&[(u(1), Unestablished), (u(2), Unestablished)]), Some(u(1)));
+        // POSITIVE CONTROL: the same two rows, answered — `max + 1` is reachable, so the
+        // assertion above is about `Unestablished` and not about the branch being dead.
+        assert_eq!(safe_cursor(&[(u(1), Settled), (u(2), Settled)]), Some(u(3)));
     }
 
     /// The gap case: ids from a channel are not dense. An offset past a hole is still correct,

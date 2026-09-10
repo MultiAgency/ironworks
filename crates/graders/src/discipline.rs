@@ -13,7 +13,7 @@
 //! mechanically decidable — the citation may be a sentence away, the count may be counting
 //! something else. Reporting them as FAIL would assert a defect the grader cannot establish.
 
-use crate::text::{clauses, near, sentences, unquoted, word_position, words};
+use crate::text::{clauses, sentences, word_position, words};
 use crate::{Graded, Verdict};
 
 /// The record artifacts the absence rule is about.
@@ -198,7 +198,7 @@ fn conjunction_at(text: &str, conj: &str) -> Option<usize> {
 /// `there is no <anything>` is not. It also covers abstractions: *no ambiguity*, *no doubt*, *no
 /// conflict*. Unbounded, it graded **"the variation is documented and signed by both parties, so
 /// there is no ambiguity"** as an overclaim about the record, in a clause that had just cited the
-/// evidence (`docs/experiments/0020`). So that form is bounded to [`ARTIFACT_NOUNS`], exactly as
+/// evidence (`docs/experiments/0020`). So that form is bounded to `ARTIFACT_NOUNS`, exactly as
 /// the bare-noun branch below already was.
 ///
 /// Bounding it does not make the branch vacuous, and the test
@@ -850,11 +850,6 @@ pub fn lead_is_unresolved(answer: &str) -> bool {
     crate::text::contains_word(lead, "UNKNOWN")
         || crate::text::contains_word(lead, "unresolved")
         || denies_establishment(lead)
-}
-
-/// Re-exported so case graders can express proximity without importing `text` directly.
-pub fn mentions_near(answer: &str, name: &str, issues: &[&str]) -> bool {
-    near(&unquoted(answer), name, issues, 180)
 }
 
 #[cfg(test)]

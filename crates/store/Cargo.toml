@@ -1,0 +1,27 @@
+[package]
+name = "ironworks-store"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The SQLite open protocol, once.
+#
+# `journal`, `proposals` and `channel` each keep a durable local file and each opened it the same
+# way: owner-only, WAL, `synchronous = FULL`, create the schema, settle the version. That protocol
+# existed three times, and the copies had already drifted on the one question that matters — how a
+# damaged `schema_version` reads. Two of the three folded it into "no version recorded" and stamped
+# the current version onto a database whose shape was never established.
+#
+# It owns `rusqlite` because it is the SQLite protocol, and `ironworks-domain` for
+# `restrict_to_owner`. It holds no schema, no table names and no messages: those stay with the
+# crate that owns the file, because the refusals are written for the operator who has to act on
+# them and each file is a different thing to lose.
+[dependencies]
+ironworks-domain = { path = "../domain" }
+rusqlite = { version = "0.40.2", features = ["backup", "bundled"] }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

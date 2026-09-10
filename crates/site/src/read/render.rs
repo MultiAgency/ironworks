@@ -58,6 +58,56 @@ pub enum Instrumentation {
     Hidden,
 }
 
+/// One marked line of an answer, before it is markup.
+///
+/// Separating this from the emitter is what lets the list rule be stated once. It used to be
+/// decided while emitting, which meant reopening a `<ul>` that had already been closed — the
+/// emitter did `trim_end_matches("</ul>")` on the string it had just pushed and appended into it.
+/// That is a structural decision recovered from markup by string surgery, and it is only correct
+/// while nothing else can end in `</li></ul>`.
+enum Block {
+    Bullet(String),
+    Heading(String),
+    Para(String),
+}
+
+/// Marked lines to markup. **Consecutive bullets are one list**: a list per item doubles the
+/// spacing and reads as several lists of one, and anything that is not a bullet ends the run.
+fn emit(blocks: &[Block]) -> String {
+    let mut out = String::new();
+    let mut in_list = false;
+    for block in blocks {
+        match block {
+            Block::Bullet(text) => {
+                if !in_list {
+                    out.push_str("<ul>");
+                    in_list = true;
+                }
+                out.push_str(&format!("<li>{text}</li>"));
+                continue;
+            }
+            Block::Heading(text) => {
+                if in_list {
+                    out.push_str("</ul>");
+                    in_list = false;
+                }
+                out.push_str(&format!("<div class=\"h\">{text}</div>"));
+            }
+            Block::Para(text) => {
+                if in_list {
+                    out.push_str("</ul>");
+                    in_list = false;
+                }
+                out.push_str(&format!("<p>{text}</p>"));
+            }
+        }
+    }
+    if in_list {
+        out.push_str("</ul>");
+    }
+    out
+}
+
 pub fn render_case(
     row: &Value,
     book: &Book,
@@ -72,7 +122,7 @@ pub fn render_case(
     let mut counts = Counts::default();
     let mut seen: std::collections::BTreeSet<(usize, usize)> = std::collections::BTreeSet::new();
     let mut evidence: Vec<(usize, usize, bool)> = Vec::new();
-    let mut html: Vec<String> = Vec::new();
+    let mut blocks: Vec<Block> = Vec::new();
 
     // A single-account question puts the whole answer in that account's scope — "Has Northline
     // Cooperative renewed?" is answered about Northline whether or not the prose says so again.
@@ -138,21 +188,13 @@ pub fn render_case(
                 ));
             }
             let text = marked.join(" ");
-            if line.bullet {
-                // Consecutive bullets are one list. A list per item doubles the spacing and reads
-                // as several lists of one.
-                if html.last().is_some_and(|h| h.ends_with("</li></ul>")) {
-                    let last = html.len() - 1;
-                    let trimmed = html[last].trim_end_matches("</ul>").to_owned();
-                    html[last] = format!("{trimmed}<li>{text}</li></ul>");
-                } else {
-                    html.push(format!("<ul><li>{text}</li></ul>"));
-                }
+            blocks.push(if line.bullet {
+                Block::Bullet(text)
             } else if line.heading {
-                html.push(format!("<div class=\"h\">{text}</div>"));
+                Block::Heading(text)
             } else {
-                html.push(format!("<p>{text}</p>"));
-            }
+                Block::Para(text)
+            });
         }
     }
 
@@ -219,7 +261,7 @@ pub fn render_case(
   </section>"#,
         label = esc(label),
         question = esc(question),
-        answer_html = html.join(""),
+        answer_html = emit(&blocks),
     );
     Rendered { html, counts }
 }
@@ -280,6 +322,43 @@ pub fn regrade_for<'a>(
 mod tests {
     use super::*;
 
+    /// The rule the string surgery used to state by accident, stated on purpose.
+    ///
+    /// The old emitter reopened the list it had just closed, by trimming `</ul>` off the string it
+    /// had already pushed. That is correct only while nothing else can end in `</li></ul>`, and it
+    /// left the run's boundaries implicit — there was nothing to assert about them.
+    #[test]
+    fn consecutive_bullets_are_one_list_and_anything_else_ends_the_run() {
+        let b = |t: &str| Block::Bullet(t.to_owned());
+
+        // The case the surgery existed for: one list, not three of one.
+        assert_eq!(
+            emit(&[b("a"), b("b"), b("c")]),
+            "<ul><li>a</li><li>b</li><li>c</li></ul>",
+            "consecutive bullets must not each get their own list"
+        );
+
+        // And the case it could get wrong: a run that ends is closed before what ends it, and what
+        // follows starts a new list rather than joining the old one.
+        assert_eq!(
+            emit(&[b("a"), Block::Para("p".to_owned()), b("b")]),
+            "<ul><li>a</li></ul><p>p</p><ul><li>b</li></ul>",
+            "a paragraph between two bullets must break the list"
+        );
+        assert_eq!(
+            emit(&[b("a"), Block::Heading("h".to_owned()), b("b")]),
+            "<ul><li>a</li></ul><div class=\"h\">h</div><ul><li>b</li></ul>",
+            "a heading between two bullets must break the list"
+        );
+
+        // A run that reaches the end of the answer is still closed.
+        assert_eq!(emit(&[Block::Para("p".to_owned()), b("z")]), "<p>p</p><ul><li>z</li></ul>");
+
+        // The negative control: with no bullets at all, no list is opened.
+        assert_eq!(emit(&[Block::Para("p".to_owned())]), "<p>p</p>");
+        assert_eq!(emit(&[]), "");
+    }
+
     #[test]
     fn the_finding_is_counted_never_typed() {
         // The defect it replaced: a sentence saying "none" that stayed true of one transcript and
@@ -301,6 +380,61 @@ mod tests {
         let row = serde_json::json!({"case": "attention", "run": 3});
         assert_eq!(label_of(&row, true), "attention · run 3");
         assert_eq!(label_of(&row, false), "attention", "one run needs no number");
+    }
+
+    /// Nothing a tenant's book or a model's answer carries reaches the page as markup.
+    ///
+    /// # What the old test asserted, and what it did not
+    ///
+    /// `crates/page/src/lib.rs::a_record_body_cannot_reach_the_page_as_markup` checks that `esc`
+    /// escapes, and its comment says *"this is the whole reason the generators never interpolate
+    /// raw text."* That is a claim about the **generators**, and testing the escaper does not
+    /// check it: `esc` is opt-in at every interpolation, and a `format!` that forgot one would
+    /// leave that test green.
+    ///
+    /// So this renders a real case through the real renderer, with the payload in **every** field
+    /// a record and a transcript carry, and asserts none of it survives as markup. A missed `esc`
+    /// anywhere in `render_case` fails here — which a newtype could not promise either, since
+    /// `format!` accepts anything that implements `Display`.
+    #[test]
+    fn no_field_of_a_book_or_an_answer_reaches_the_page_as_markup() {
+        const PAYLOAD: &str = "<img src=x onerror=alert(1)>";
+
+        let book: Book = vec![crate::read::book::Record {
+            id: format!("AG-009{PAYLOAD}"),
+            name: format!("Alder Grove {PAYLOAD}"),
+            activities: vec![crate::read::book::Activity {
+                id: format!("act-1{PAYLOAD}"),
+                date: "2026-07-09".to_owned(),
+                kind: format!("note{PAYLOAD}"),
+                body: format!("the body {PAYLOAD}"),
+            }],
+            by_date: std::collections::BTreeMap::from([("2026-07-09".to_owned(), vec![0])]),
+        }];
+        let row = serde_json::json!({
+            "case": format!("case{PAYLOAD}"),
+            "question": format!("Has Alder Grove renewed? {PAYLOAD}"),
+            "answer": format!("Alder Grove renewed on 2026-07-09. {PAYLOAD}"),
+            "verdict": "PASS",
+        });
+
+        let rendered = render_case(&row, &book, None, None, "label", Instrumentation::Shown);
+        let html = rendered.html;
+
+        assert!(
+            !html.contains(PAYLOAD),
+            "the payload reached the page verbatim — some field is interpolated unescaped:\n{html}"
+        );
+        // `<img` is the assertion that matters: with `<` escaped the payload is text, and the
+        // `onerror=` characters in it are inert. Asserting on those characters instead would fail
+        // on correctly escaped output, which is a worse test than none.
+        assert!(!html.contains("<img"), "an <img> tag reached the page:\n{html}");
+
+        // The positive control §K-8 requires. Without it, a renderer that emitted nothing at all —
+        // or one that stripped every `<` including its own markup — would satisfy every assertion
+        // above while producing no page.
+        assert!(html.contains("&lt;img"), "the payload must appear, escaped:\n{html}");
+        assert!(html.contains("<div"), "the page's own markup must survive:\n{html}");
     }
 
     #[test]

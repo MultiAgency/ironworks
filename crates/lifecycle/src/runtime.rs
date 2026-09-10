@@ -147,66 +147,18 @@ impl fmt::Display for RuntimeSubject {
     }
 }
 
-/// When an attempt was made. The ledger's ordering key, so a malformed value cannot sort wrong.
+/// The instant this ledger orders by: `ironworks_domain::Utc`.
 ///
-/// Accepts exactly the shape `now_iso` emits — `YYYY-MM-DDTHH:MM:SS±HH:MM` — because lexicographic
-/// order is only chronological order while every value has that shape and a fixed offset. A row
-/// whose timestamp does not parse is [`crate::LifecycleError::Corrupt`], never the latest.
+/// # It used to be a second parser for one rule, and the weaker of the two
 ///
-/// # The offset is checked, and it is the half that makes the ordering claim true
+/// This validated length, punctuation, digits and the `+00:00` offset — everything the ordering
+/// needs — and never the calendar, so `2026-13-45T99:99:99+00:00` parsed and sorted between two
+/// real instants. `ironworks_domain::Utc` checks the same shape **and** the calendar, including
+/// leap years, and is what `crates/journal` already stored a confinement observation as.
 ///
-/// The instant is only half the value. `12:34:56+00:00` and `13:34:56+01:00` are one moment and
-/// sort as two; `12:34:56Z` is the same moment again and sorts after both, because `Z` is `0x5A`
-/// and `+` is `0x2B`. So "a fixed offset" was never a remark about the format — it is the
-/// precondition the `ORDER BY at DESC` in `confinement_attempts_latest` rests on, and a parser
-/// that checked the digits and waved the tail through accepted precisely the values that break
-/// it. It also accepted `2026-09-02T12:34:56junkjunk`, because nothing past byte 19 was read.
-///
-/// Hence the literal suffix. This refuses timestamps that are perfectly correct as timestamps,
-/// and that is the intended reading of [`RuntimeIdError::Timestamp`]: *not the shape this ledger
-/// orders by*. A correct instant that cannot be ordered against the rest of the ledger is not a
-/// key, and a type whose stated job is the key is the right place to say so.
-///
-/// That every value in this repository comes from `now_iso`, and is therefore always `+00:00`, is
-/// not the argument for skipping the check — this type exists to refuse a row read back out of
-/// SQLite, which is exactly where a value `now_iso` never wrote can arrive.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ObservedAt(String);
-
-/// The one offset the ledger orders by. `now_iso` emits UTC and nothing else does.
-const LEDGER_OFFSET: &str = "+00:00";
-
-impl ObservedAt {
-    pub fn parse(raw: &str) -> Result<Self, RuntimeIdError> {
-        let bad = || RuntimeIdError::Timestamp { raw: raw.to_owned() };
-        // `YYYY-MM-DDTHH:MM:SS` plus the offset, and nothing on either side of it.
-        if raw.len() != 19 + LEDGER_OFFSET.len() {
-            return Err(bad());
-        }
-        let b = raw.as_bytes();
-        let punctuation = [(4, b'-'), (7, b'-'), (10, b'T'), (13, b':'), (16, b':')];
-        if punctuation.iter().any(|(i, c)| b[*i] != *c) {
-            return Err(bad());
-        }
-        let digits = [(0, 4), (5, 7), (8, 10), (11, 13), (14, 16), (17, 19)];
-        if digits.iter().any(|(from, to)| !b[*from..*to].iter().all(u8::is_ascii_digit)) {
-            return Err(bad());
-        }
-        if &raw[19..] != LEDGER_OFFSET {
-            return Err(bad());
-        }
-        Ok(Self(raw.to_owned()))
-    }
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-impl fmt::Display for ObservedAt {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
+/// The name is kept because `ORDER BY at DESC` in `confinement_attempts_latest` is what rests on
+/// it, and that is what a reader here is looking for.
+pub use ironworks_domain::Utc as ObservedAt;
 
 /// Proof that a runtime-authenticated subject **is** the member lifecycle recorded.
 ///

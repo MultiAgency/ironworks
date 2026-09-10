@@ -27,8 +27,18 @@ const SOURCES: &[(&str, &str)] = &[
 /// The digest makes comparisons cheap; `sources` makes the digest independently inspectable even
 /// after the working tree moves or a file is deleted.
 pub fn current_provenance() -> Value {
+    provenance_of(SOURCES)
+}
+
+/// The manifest for a given set of sources.
+///
+/// Parameterised so the digest's one load-bearing property — that it *moves* when a source moves —
+/// can be measured against two inputs. It used to be inlined over `SOURCES`, and the test named
+/// for that property hashed the literal `b"different"` and asserted it differed from the manifest:
+/// true for any two unequal strings, and never once a function of the sources.
+fn provenance_of(sources: &[(&str, &str)]) -> Value {
     let mut hasher = Sha256::new();
-    let sources: Vec<Value> = SOURCES
+    let sources: Vec<Value> = sources
         .iter()
         .map(|(path, source)| {
             hasher.update(path.as_bytes());
@@ -185,16 +195,56 @@ mod tests {
         let p = current_provenance();
         assert_eq!(p["sha256"].as_str().unwrap().len(), 64);
         let sources = p["sources"].as_array().unwrap();
-        assert_eq!(sources.len(), SOURCES.len());
         assert!(sources.iter().all(|s| !s["source"].as_str().unwrap().is_empty()));
+        // `sources.len() == SOURCES.len()` was the whole check here, and it is true by
+        // construction: the array is built by mapping over that constant.
+        assert_eq!(sources.len(), SOURCES.len());
+    }
+
+    /// `SOURCES` must name every file the grader is built from.
+    ///
+    /// This is the property the manifest exists for, and nothing asserted it: a new grader module
+    /// would be linked into the binary, absent from the manifest, and the digest would go on
+    /// reporting the same identity for a grader that had changed. Read from the tree rather than
+    /// from the constant, because a constant cannot notice its own omission.
+    #[test]
+    fn every_grader_source_is_listed_in_the_manifest() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../graders/src");
+        let mut found: Vec<String> = Vec::new();
+        let mut stack = vec![root.clone()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("graders/src is readable") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    stack.push(path);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let rel = path.strip_prefix(&root).expect("under root");
+                    found.push(format!("crates/graders/src/{}", rel.display()));
+                }
+            }
+        }
+        found.sort();
+        let mut listed: Vec<String> = SOURCES.iter().map(|(p, _)| (*p).to_owned()).collect();
+        listed.sort();
+        assert_eq!(found, listed, "the grader manifest and crates/graders/src disagree");
     }
 
     #[test]
     fn changing_a_source_changes_the_manifest_digest() {
-        let first = current_provenance();
-        let mut hasher = Sha256::new();
-        hasher.update(b"different");
-        assert_ne!(first["sha256"].as_str().unwrap(), hex(&hasher.finalize()));
+        // Two source sets differing in exactly one byte of one body, and then in exactly one
+        // character of one path. The old test hashed the literal `b"different"` and asserted it
+        // differed from the real manifest — true for any two unequal strings, and never a
+        // statement about the sources at all.
+        let a: &[(&str, &str)] = &[("a.rs", "fn one() {}"), ("b.rs", "fn two() {}")];
+        let body: &[(&str, &str)] = &[("a.rs", "fn one() {}"), ("b.rs", "fn TWO() {}")];
+        let path: &[(&str, &str)] = &[("a.rs", "fn one() {}"), ("c.rs", "fn two() {}")];
+
+        let d = |s: &[(&str, &str)]| provenance_of(s)["sha256"].as_str().unwrap().to_owned();
+        assert_ne!(d(a), d(body), "a changed source body left the digest alone");
+        assert_ne!(d(a), d(path), "a changed source path left the digest alone");
+        // Positive control: the digest is a function of the sources, so the same input twice is
+        // the same digest. Without this the two assertions above would pass for a random value.
+        assert_eq!(d(a), d(a), "the digest is not stable for one input");
     }
 
     #[test]

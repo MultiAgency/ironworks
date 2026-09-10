@@ -15,6 +15,13 @@ publish = false
 # `sha2` and `serde_json` are already in the lockfile; this adds no new transitive dependency.
 # `ironworks-evidence` holds the book fingerprint, shared with the page generators rather than
 # reimplemented here: a fingerprint that disagrees with itself binds nothing.
+#
+# `ironworks-domain` and `ironworks-services` are here for the same reason, one layer down: the
+# transcript's `ingredients` used to be recovered from `ironworks compose`'s terminal output by
+# field position, and that output is written for a human and carries no format contract. Composing
+# in process with the functions the binary itself composes with is what
+# `crates/site/src/arc/data.rs::compose` moved to, and this is the writer whose figures that reader
+# publishes. Neither crate declares any IO.
 [[bin]]
 name = "ironworks-eval"
 path = "src/main.rs"
@@ -22,6 +29,8 @@ path = "src/main.rs"
 [dependencies]
 ironworks-graders = { path = "../graders" }
 ironworks-evidence = { path = "../evidence" }
+ironworks-domain = { path = "../domain" }
+ironworks-services = { path = "../services" }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 

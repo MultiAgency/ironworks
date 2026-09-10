@@ -31,7 +31,7 @@
 //! > business authority or model context.**
 //!
 //! It holds update ids, a channel address, a routing decision, and a timestamp. It learns one
-//! thing about a tenant's work — [`Openness`], two values — through [`TurnProgress`]. It cannot
+//! thing about a tenant's work — [`Openness`], three values — through [`TurnProgress`]. It cannot
 //! reach a record, an org, a persona, a question or an answer, and
 //! `dependencies_are_the_narrow_set` keeps it that way by asserting this crate's own dependency
 //! list.
@@ -51,7 +51,7 @@
 //! state machine agreeing with itself is not the question. The question is whether a client reads
 //! the same answer twice, and the only witness to that is the channel.
 
-use ironworks_domain::{ChannelRef, IdempotencyKey, Openness, TurnProgress};
+use ironworks_domain::{ChannelRef, IdempotencyKey, Openness, TurnProgress, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::path::Path;
 use std::sync::Mutex;
@@ -62,7 +62,7 @@ pub use cursor::safe_cursor;
 /// The schema this implementation writes. Refused if it does not match, in either direction.
 const SCHEMA_VERSION: i64 = 1;
 
-const SCHEMA: &str = "
+const SCHEMA_SQL: &str = "
 CREATE TABLE IF NOT EXISTS channel_meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -79,6 +79,14 @@ CREATE TABLE IF NOT EXISTS channel_updates (
 );
 CREATE INDEX IF NOT EXISTS channel_updates_disposition ON channel_updates(disposition);
 ";
+
+/// What `ironworks-store` needs to know about this file: its schema, where the version is
+/// recorded, and which version this implementation writes.
+const SCHEMA: ironworks_store::Schema = ironworks_store::Schema {
+    sql: SCHEMA_SQL,
+    meta_table: "channel_meta",
+    version: SCHEMA_VERSION,
+};
 
 /// The key under which the acknowledged offset lives. It is stored because it is **not**
 /// derivable: it records what the channel was actually told, which no amount of local state can
@@ -114,6 +122,12 @@ pub enum ChannelError {
          offset guessed from a shape we do not understand redelivers or drops live messages."
     )]
     Version { found: i64, expected: i64 },
+    #[error(
+        "the channel journal's recorded schema version is {raw:?}, which is not a number. Refusing to \
+         read it as 'no version recorded': that arm stamps this implementation's version onto a \
+         database whose shape was never established, and this file holds how far the channel has been acknowledged."
+    )]
+    UnreadableVersion { raw: String },
     #[error("update {id} is not journalled")]
     NoSuchUpdate { id: u64 },
     #[error(
@@ -138,8 +152,37 @@ pub enum ChannelError {
          acknowledging past it would let the channel stop redelivering work that was never done"
     )]
     AcknowledgementPastTheBarrier { safe: u64, attempted: u64 },
+    #[error(
+        "update {id} minted turn {key} and the tenant journal could not be read for it, so \
+         nothing is established about that turn. Refusing to acknowledge any offset: \
+         acknowledgement is what stops the channel redelivering, and it is not an act to perform \
+         against a journal that is not answering"
+    )]
+    AcknowledgementOnUnestablishedProgress { id: u64, key: String },
+    #[error(
+        "the acknowledged offset on disk is {raw:?}, which is not a number. Refusing to read it \
+         as 'never acknowledged': that would disarm the regression guard and, once compaction has \
+         removed the rows the barrier derives from, send the channel offset 0 and redeliver the \
+         entire history"
+    )]
+    UnreadableAcknowledgement { raw: String },
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
+}
+
+/// The stored acknowledged offset, or a refusal.
+///
+/// Both readers used `.and_then(|v| v.parse().ok())`, and `None` from that is indistinguishable
+/// from an absent row — so a damaged value read as "never acknowledged". That is wrong in two
+/// directions at once: it disarms [`ChannelError::AcknowledgementWouldRegress`] in `acknowledge`,
+/// and once compaction has removed the rows `safe_cursor` derives from it sends the channel
+/// offset `0`, which `poll_offset`'s own doc cites ADR 0006 to rule out — *"a derivation that fell
+/// back to zero here would redeliver the entire history"*.
+///
+/// Nothing in this process writes a non-numeric value. A damaged file is precisely the case a
+/// crate running `synchronous = FULL` exists to survive, so it is reported rather than absorbed.
+fn parse_acked(raw: String) -> Result<u64, ChannelError> {
+    raw.parse().map_err(|_| ChannelError::UnreadableAcknowledgement { raw })
 }
 
 /// A channel's own numbering of an inbound update. Opaque, monotone, and not ours to invent.
@@ -232,9 +275,20 @@ impl Disposition {
         }
     }
 
+    /// The turn this update minted, if it minted one. The only handle here into a tenant's work,
+    /// and the only disposition whose openness is somebody else's to answer.
+    fn turn_key(&self) -> Option<&IdempotencyKey> {
+        match self {
+            Self::Turn(key) => Some(key),
+            Self::Unclaimed | Self::NotAddressed | Self::Unroutable | Self::Command => None,
+        }
+    }
+
     /// Whether this update still holds the cursor, given what the tenant journal says.
     ///
-    /// The only place the two scopes meet, and it is one call returning two values.
+    /// The only place the two scopes meet, and it is one call returning a three-valued answer.
+    /// Only [`Turn`](Self::Turn) can be [`Openness::Unestablished`]: every other disposition is
+    /// decided by this crate's own row and needs nothing read to settle it.
     pub fn openness(&self, progress: &dyn TurnProgress) -> Openness {
         match self {
             Self::Unclaimed => Openness::Open,
@@ -276,54 +330,47 @@ impl std::fmt::Debug for ChannelJournal {
     }
 }
 
-/// A store that cannot be read is either one that is not there and could not be made, or one
-/// whose bytes are not a database. The second needs a different sentence: that file may hold
-/// state nothing else has, so the operator instruction is to preserve it rather than clear it
-/// and retry. Collapsing the two is how a recoverable store gets deleted by someone following
-/// the obvious remedy for "could not be opened".
-fn opened(path: &Path, source: rusqlite::Error) -> ChannelError {
-    if matches!(&source, rusqlite::Error::SqliteFailure(e, _)
-        if e.code == rusqlite::ErrorCode::NotADatabase)
-    {
-        return ChannelError::NotADatabase { path: path.display().to_string() };
+/// An open failure, as the sentence an operator has to act on.
+///
+/// A store that cannot be read is either one that is not there and could not be made, or one whose
+/// bytes are not a database. The second needs a different sentence: that file may hold state
+/// nothing else has, so the operator instruction is to preserve it rather than clear it and retry.
+///
+/// `ironworks-store` runs the protocol and returns a cause carrying no path and no prose, because
+/// the three crates sharing it keep three different files and the wording is the part that says
+/// which one this is. This translation is the only thing about opening a channel journal that is not shared.
+fn opened(path: &Path, why: ironworks_store::OpenFailure) -> ChannelError {
+    use ironworks_store::OpenFailure as F;
+    let path = path.display().to_string();
+    match why {
+        F::Open(source) => ChannelError::Open { path, source },
+        F::NotADatabase => ChannelError::NotADatabase { path },
+        F::Exposed(source) => ChannelError::Exposed { path, source },
+        F::UnreadableVersion { raw } => ChannelError::UnreadableVersion { raw },
+        F::Version { found } => ChannelError::Version { found, expected: SCHEMA_VERSION },
+        F::Sqlite(source) => ChannelError::Sqlite(source),
     }
-    ChannelError::Open { path: path.display().to_string(), source }
 }
 
 impl ChannelJournal {
+    /// The connection, whatever a previous panic left behind.
+    ///
+    /// `lock().expect("channel journal lock")` opened 7 methods, and a poisoned mutex made every one of them
+    /// abort — inside a store whose error enum exists to fail closed and whose whole subject is
+    /// how far the channel has been acknowledged. Poisoning means *some other* thread panicked while holding this; the
+    /// data behind it is a SQLite connection, which has its own transactional integrity and is not
+    /// left half-written by a panic in Rust code. Taking the guard is therefore the honest
+    /// recovery, and it is one documented decision rather than 7 undocumented ones.
+    fn locked(&self) -> std::sync::MutexGuard<'_, Connection> {
+        self.conn.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ChannelError> {
         let path = path.as_ref();
-        let conn = Connection::open(path)
-            .map_err(|source| ChannelError::Open { path: path.display().to_string(), source })?;
-        // Before the schema, so a file that is both readable and non-empty never exists.
-        ironworks_domain::restrict_to_owner(path)
-            .map_err(|source| ChannelError::Exposed { path: path.display().to_string(), source })?;
-        // The first statement is where a file that is not a database says so: `open` itself is
-        // lazy and succeeds against any path it can touch.
-        conn.pragma_update(None, "journal_mode", "WAL").map_err(|e| opened(path, e))?;
-        // The whole point of this file is to be true after a power cut, not merely after a clean
-        // exit. `FULL` is the setting that buys that, and its cost is paid once per update.
-        conn.pragma_update(None, "synchronous", "FULL")?;
-        conn.execute_batch(SCHEMA)?;
-        let found: Option<String> = conn
-            .query_row("SELECT value FROM channel_meta WHERE key='schema_version'", [], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        match found {
-            None => {
-                conn.execute(
-                    "INSERT INTO channel_meta(key,value) VALUES('schema_version',?1)",
-                    params![SCHEMA_VERSION.to_string()],
-                )?;
-            }
-            Some(v) => {
-                let found = v.parse::<i64>().unwrap_or(-1);
-                if found != SCHEMA_VERSION {
-                    return Err(ChannelError::Version { found, expected: SCHEMA_VERSION });
-                }
-            }
-        }
+        // No migration: this file has had one schema. `Ok(false)` is the refusal, not a silence —
+        // an unrecognised version is reported rather than opened.
+        let conn = ironworks_store::open_durable(path, SCHEMA, |_, _| Ok(false))
+            .map_err(|why| opened(path, why))?;
         Ok(Self { conn: Mutex::new(conn) })
     }
 
@@ -344,16 +391,16 @@ impl ChannelJournal {
     pub fn note_batch(
         &self,
         updates: &[(UpdateId, ChannelRef)],
-        now: &str,
+        now: &Utc,
     ) -> Result<usize, ChannelError> {
-        let mut conn = self.conn.lock().expect("channel journal lock");
+        let mut conn = self.locked();
         let tx = conn.transaction()?;
         let mut fresh = 0;
         for (id, channel) in updates {
             fresh += tx.execute(
                 "INSERT INTO channel_updates(id,channel,disposition,received_at)
                  VALUES(?1,?2,'unclaimed',?3) ON CONFLICT(id) DO NOTHING",
-                params![id.sql()?, channel.as_str(), now],
+                params![id.sql()?, channel.as_str(), now.as_str()],
             )?;
         }
         tx.commit()?;
@@ -365,9 +412,9 @@ impl ChannelJournal {
         &self,
         id: UpdateId,
         disposition: &Disposition,
-        now: &str,
+        now: &Utc,
     ) -> Result<(), ChannelError> {
-        let conn = self.conn.lock().expect("channel journal lock");
+        let conn = self.locked();
         let existing: Option<String> = conn
             .query_row(
                 "SELECT disposition FROM channel_updates WHERE id=?1",
@@ -389,13 +436,10 @@ impl ChannelJournal {
                 },
             });
         }
-        let key = match disposition {
-            Disposition::Turn(k) => Some(k.as_str()),
-            _ => None,
-        };
+        let key = disposition.turn_key().map(IdempotencyKey::as_str);
         // `settled_at` is a timestamp on the *disposition*, not on the turn. An update handed to
         // a tenant is not settled here; the tenant journal decides when it is.
-        let settled = if disposition.cost_a_turn() { None } else { Some(now) };
+        let settled = if disposition.cost_a_turn() { None } else { Some(now.as_str()) };
         conn.execute(
             "UPDATE channel_updates SET disposition=?2, turn_key=?3, settled_at=?4 WHERE id=?1",
             params![id.sql()?, disposition.tag(), key, settled],
@@ -404,7 +448,7 @@ impl ChannelJournal {
     }
 
     pub fn record(&self, id: UpdateId) -> Result<Option<UpdateRecord>, ChannelError> {
-        let conn = self.conn.lock().expect("channel journal lock");
+        let conn = self.locked();
         conn.query_row(
             "SELECT id,channel,disposition,turn_key,received_at,settled_at
              FROM channel_updates WHERE id=?1",
@@ -417,7 +461,7 @@ impl ChannelJournal {
 
     /// Every journalled update, oldest first.
     pub fn records(&self) -> Result<Vec<UpdateRecord>, ChannelError> {
-        let conn = self.conn.lock().expect("channel journal lock");
+        let conn = self.locked();
         let mut stmt = conn.prepare(
             "SELECT id,channel,disposition,turn_key,received_at,settled_at
              FROM channel_updates ORDER BY id",
@@ -442,15 +486,50 @@ impl ChannelJournal {
     /// Record that the channel was told this offset — which is the moment the updates below it
     /// stop being redeliverable, and therefore the moment it becomes safe to forget them.
     ///
-    /// Refuses to regress, and refuses to move past the barrier. The second check is the one that
-    /// matters: a caller that computed a cursor, then lost a race to a slower tenant journalling
-    /// work, would otherwise acknowledge past an update that is open by the time the write lands.
+    /// Refuses to regress, refuses to move past the barrier, and refuses entirely while any
+    /// update's progress could not be read. The second check is the one that catches a race: a
+    /// caller that computed a cursor, then lost it to a slower tenant journalling work, would
+    /// otherwise acknowledge past an update that is open by the time the write lands.
+    ///
+    /// # Why an unreadable row refuses the whole acknowledgement
+    ///
+    /// The barrier alone would already hold at that update, and stopping there would be enough
+    /// for *it*. This is stricter on purpose, and the reason is that acknowledgement is the one
+    /// irreversible act in this file. It tells the channel to stop redelivering, and it is the
+    /// bound [`Self::compact`] deletes below — so an offset written on evidence known to be
+    /// incomplete both forgets rows and forfeits the redelivery that would have recovered them.
+    /// Deferring it costs a poll. It is not the same kind of mistake in the other direction.
+    ///
+    /// It is also not the permanent refusal of
+    /// `docs/experiments/0033-the-loop-ran-and-a-chained-turn-could-not-recover.md`: that one
+    /// refused a turn whose rebuild could *never* match, so nothing would ever lift it. This lifts
+    /// the moment the journal answers, and until it does, no offset was going to be trustworthy.
     pub fn acknowledge(
         &self,
         offset: UpdateId,
         progress: &dyn TurnProgress,
     ) -> Result<(), ChannelError> {
-        if let Some(safe) = self.safe_cursor(progress)?
+        // One pass, so the refusal and the barrier are decided from the same reading of the same
+        // journal rather than from two that could disagree about one row.
+        let mut states = Vec::new();
+        for record in self.records()? {
+            let openness = match record.disposition.turn_key() {
+                // Only a turn delegates to the tenant journal, so only a turn can come back
+                // unestablished — and when it does, the key it could not be read under is here.
+                Some(key) => match progress.openness(key) {
+                    Openness::Unestablished => {
+                        return Err(ChannelError::AcknowledgementOnUnestablishedProgress {
+                            id: record.id.get(),
+                            key: key.as_str().to_owned(),
+                        });
+                    }
+                    answered => answered,
+                },
+                None => record.disposition.openness(progress),
+            };
+            states.push((record.id, openness));
+        }
+        if let Some(safe) = safe_cursor(&states)
             && offset > safe
         {
             return Err(ChannelError::AcknowledgementPastTheBarrier {
@@ -458,13 +537,14 @@ impl ChannelJournal {
                 attempted: offset.get(),
             });
         }
-        let conn = self.conn.lock().expect("channel journal lock");
+        let conn = self.locked();
         let existing: Option<u64> = conn
             .query_row("SELECT value FROM channel_meta WHERE key=?1", params![ACKED], |r| {
                 r.get::<_, String>(0)
             })
             .optional()?
-            .and_then(|v| v.parse().ok());
+            .map(parse_acked)
+            .transpose()?;
         if let Some(existing) = existing
             && offset.get() < existing
         {
@@ -483,11 +563,11 @@ impl ChannelJournal {
 
     /// The offset the channel has actually been told, if any.
     pub fn acknowledged(&self) -> Result<Option<UpdateId>, ChannelError> {
-        let conn = self.conn.lock().expect("channel journal lock");
+        let conn = self.locked();
         let v: Option<String> = conn
             .query_row("SELECT value FROM channel_meta WHERE key=?1", params![ACKED], |r| r.get(0))
             .optional()?;
-        Ok(v.and_then(|v| v.parse().ok()).map(UpdateId::new))
+        v.map(parse_acked).transpose().map(|o| o.map(UpdateId::new))
     }
 
     /// The offset to send the channel on the next poll.
@@ -523,7 +603,11 @@ impl ChannelJournal {
     /// was told is past it. There is no `ACKED` column, so there is no way for a row to claim
     /// acknowledgement the channel was never given.
     pub fn is_acknowledged(&self, id: UpdateId) -> Result<bool, ChannelError> {
-        Ok(self.acknowledged().is_ok_and(|a| a.is_some_and(|acked| id < acked)))
+        // Propagated, not absorbed. `is_ok_and` here reported "not acknowledged" for a cursor that
+        // could not be read at all — the same conflation of *no* and *don't know* that
+        // `parse_acked` exists to refuse, in a method that already returns `Result` and so had
+        // somewhere honest to put it.
+        Ok(self.acknowledged()?.is_some_and(|acked| id < acked))
     }
 
     /// Forget updates the channel will never send again.
@@ -543,15 +627,39 @@ impl ChannelJournal {
     ///    never-delivered turn was deleted with nobody having acted on it.
     pub fn compact(&self) -> Result<usize, ChannelError> {
         let Some(acked) = self.acknowledged()? else { return Ok(0) };
-        let conn = self.conn.lock().expect("channel journal lock");
+        let conn = self.locked();
+        // The tags come from `Disposition::tag`, so the spelling has one source. The *set* is
+        // still an enumeration, and deliberately: its failure direction is retaining a row that
+        // could have gone, which costs table growth. A negation — "anything but `turn`" — would
+        // fail the other way and forget a future billed disposition, which costs the evidence a
+        // client's "I got two answers" report is diagnosed from.
+        //
+        // It had already drifted. `command` was missing from the list while `cost_a_turn` says a
+        // command never cost a turn — the enumeration defect this method's own doc warns about,
+        // one paragraph below the warning. `compaction_forgets_exactly_what_was_never_billed`
+        // pins the set against the two predicates so the next omission fails a test.
+        let tags: Vec<&str> = COMPACTABLE.iter().map(Disposition::tag).collect();
+        let list = tags.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let mut args: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(acked.sql()?)];
+        args.extend(tags.iter().map(|t| Box::new(*t) as Box<dyn rusqlite::ToSql>));
         let removed = conn.execute(
-            "DELETE FROM channel_updates
-             WHERE id < ?1 AND disposition IN ('not_addressed','unroutable')",
-            params![acked.sql()?],
+            &format!("DELETE FROM channel_updates WHERE id < ?1 AND disposition IN ({list})"),
+            rusqlite::params_from_iter(args.iter().map(|a| a.as_ref())),
         )?;
         Ok(removed)
     }
 }
+
+/// The dispositions compaction may forget: settled on arrival, and never billed.
+///
+/// `Unclaimed` is absent because it is **open** — it holds the barrier, so no unclaimed row can be
+/// below the acknowledged offset in the first place. Naming it here anyway would be a second
+/// mechanism deciding that, and the wrong one to trust.
+///
+/// `Turn` is absent because it was billed. Its id and delivery evidence are how a client's "I got
+/// two answers" report is diagnosed days later, and nothing ages that away.
+const COMPACTABLE: [Disposition; 3] =
+    [Disposition::NotAddressed, Disposition::Unroutable, Disposition::Command];
 
 fn row_to_record(r: &rusqlite::Row<'_>) -> rusqlite::Result<UpdateRecord> {
     let bad = |what: &str| {

@@ -50,8 +50,10 @@ fn main() {
         return;
     }
 
-    let admin =
-        Admin::new(api, &CredentialRef::new(CredentialPurpose::RuntimeMember, "env:UNUSED"));
+    let admin = Admin::new(
+        api,
+        &CredentialRef::new(CredentialPurpose::OperatorConfiguration, "env:UNUSED"),
+    );
     let confinement = MemberConfinement::new(&admin, &EnvCredentials, cred);
     // Binding first, and there is no way past it: `observe` lives on the bound member, so this
     // scaffolding cannot report on a catalogue it never established the subject of. `MEMBER_ID` is

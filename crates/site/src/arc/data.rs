@@ -5,7 +5,7 @@
 //! it can move with no repository diff at all. This reads the ingredients out of the working tree
 //! and out of history, so the arc can say which part changed rather than only that something did.
 
-use ironworks_domain::composition::digest16;
+use ironworks_domain::composition::{digest16, strip_frontmatter};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::process::Command;
@@ -41,16 +41,6 @@ pub const SUITES: &[Suite] = &[
 
 pub fn suite(name: &str) -> Option<&'static Suite> {
     SUITES.iter().find(|s| s.name == name)
-}
-
-/// Mirrors `core::composition::strip_frontmatter`, **including what it refuses to strip**.
-///
-/// Conservative by construction: an unterminated block is returned untouched, because a malformed
-/// header is worth seeing in the prompt where it is obvious.
-pub fn strip_frontmatter(text: &str) -> &str {
-    let Some(rest) = text.strip_prefix("---\n") else { return text };
-    let Some(end) = rest.find("\n---\n") else { return text };
-    rest[end + "\n---\n".len()..].trim_start_matches('\n')
 }
 
 /// Reads a repo-relative file, from the working tree or from a git revision.
@@ -121,44 +111,48 @@ pub struct Composed {
     pub parts: Vec<(String, String)>,
 }
 
+/// What this tree composes for a suite: the alloy, its ingredients, and their digests.
+///
+/// **Computed in process, with the same functions the binary composes with.** It used to run
+/// `target/debug/ironworks compose` and recover these figures from its terminal output by
+/// position — `split_whitespace`, `parse().unwrap_or(0)`, and a `_ => {}` that swallowed anything
+/// unmatched. That output is written for a human and carries no format contract, so a reworded
+/// line published `0 bytes` and an empty parts list, silently and only on the page. Reading
+/// `target/debug` had a second mode: a binary older than the tree published figures for a
+/// composition that no longer existed, and the page required someone to have run `cargo build`
+/// first for its numbers to mean anything.
+///
+/// `root` is still taken, because the guidance path is repo-relative and the caller may run from
+/// anywhere; nothing else here reads the filesystem outside it.
 pub fn compose(root: &Path, suite: &Suite) -> Result<Composed, String> {
-    let binary = root.join("target/debug/ironworks");
-    if !binary.is_file() {
-        return Err(format!("no binary at {}; cargo build first", binary.display()));
-    }
-    let mut cmd = Command::new(&binary);
-    cmd.current_dir(root).args(["compose", "--slug", suite.slug, "--guidance", suite.guidance]);
-    if let Some(service) = suite.service {
-        cmd.args(["--service", service]);
-    }
-    let out = cmd.output().map_err(|e| e.to_string())?;
-    if !out.status.success() {
-        return Err(format!(
-            "ironworks compose failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let text = String::from_utf8_lossy(&out.stdout).into_owned();
-    let mut c = Composed::default();
-    for line in text.lines() {
-        let f: Vec<&str> = line.split_whitespace().collect();
-        match f.as_slice() {
-            ["service", name, ..] => c.service = (*name).to_owned(),
-            ["alloy", bytes, _, digest, ..] => {
-                c.alloy_bytes = bytes.parse().unwrap_or(0);
-                c.alloy = digest.trim_matches(['(', ')']).to_owned();
-            }
-            ["guidance", bytes, _, digest, ..] => {
-                c.guidance_bytes = bytes.parse().unwrap_or(0);
-                c.guidance = digest.trim_matches(['(', ')']).to_owned();
-            }
-            ["part" | "tail", name, digest, ..] => {
-                c.parts.push(((*name).to_owned(), (*digest).to_owned()));
-            }
-            _ => {}
-        }
-    }
-    (!c.alloy.is_empty()).then_some(c).ok_or_else(|| "compose reported no alloy digest".to_owned())
+    let service = suite
+        .service
+        .ok_or_else(|| format!("suite {} names no service, so it composes no alloy", suite.name))?;
+    let definition = ironworks_services::service::load(service).map_err(|e| e.to_string())?;
+    let guidance_path = root.join(suite.guidance);
+    let guidance_text = std::fs::read_to_string(&guidance_path)
+        .map_err(|e| format!("cannot read {}: {e}", guidance_path.display()))?;
+    // Parsed, not merely read, for the reason `ironworks compose` parses it: a fingerprint for
+    // guidance bound to another tenant or another service describes a composition that would
+    // never have served.
+    let guidance = ironworks_domain::Guidance::parse(&guidance_text, suite.slug, service)
+        .map_err(|e| e.to_string())?;
+
+    let composition = definition.composition();
+    let alloy = ironworks_domain::melt(composition, &guidance, &ironworks_services::Heap)
+        .map_err(|e| e.to_string())?;
+    let parts = composition.part_digests(&ironworks_services::Heap).map_err(|e| e.to_string())?;
+
+    Ok(Composed {
+        service: definition.service_id().to_string(),
+        alloy: alloy.digest(),
+        alloy_bytes: alloy.len() as u64,
+        guidance: guidance.digest(),
+        guidance_bytes: guidance.as_str().len() as u64,
+        // `PartRef` renders as the repo-relative path the page shows, and the order is the melt
+        // order — the same rows, in the same sequence, the parsed output carried.
+        parts: parts.into_iter().map(|(part, digest)| (part.to_string(), digest)).collect(),
+    })
 }
 
 /// One recorded run of a suite: a column of the matrix.
@@ -231,17 +225,11 @@ pub fn transcripts(experiments: &Path, suite: &Suite) -> Result<(Vec<Run>, Vec<P
 
         // Transcripts written before `compose` existed are a bare list; newer ones carry the
         // ingredients beside them. Both are read, because the old ones are the evidence.
-        let rows = match &doc {
-            serde_json::Value::Array(rows) => rows.clone(),
-            serde_json::Value::Object(map) => {
-                map.get("cases").and_then(|c| c.as_array()).cloned().unwrap_or_default()
-            }
-            _ => continue,
-        };
+        let Ok(rows) = ironworks_evidence::transcript::cases(&doc) else { continue };
         let cases: BTreeSet<String> = rows.iter().filter_map(case_of).collect();
 
         if cases.len() == 1 && rows.len() > 1 {
-            let mut ordered = rows.clone();
+            let mut ordered = rows.to_vec();
             ordered.sort_by_key(|r| r.get("run").and_then(serde_json::Value::as_u64).unwrap_or(0));
             probes.push(Probe {
                 label: name,
@@ -255,7 +243,7 @@ pub fn transcripts(experiments: &Path, suite: &Suite) -> Result<(Vec<Run>, Vec<P
         let mut by_run: BTreeMap<u64, Vec<serde_json::Value>> = BTreeMap::new();
         for row in rows {
             let n = row.get("run").and_then(serde_json::Value::as_u64).unwrap_or(1);
-            by_run.entry(n).or_default().push(row);
+            by_run.entry(n).or_default().push(row.clone());
         }
         let many = by_run.len() > 1;
         for (n, group) in by_run {
@@ -364,7 +352,7 @@ mod tests {
 
     #[test]
     fn the_real_suite_separates_probes_from_runs_by_shape() {
-        let root = ironworks_evidence::root();
+        let root = crate::test_root();
         let (runs, probes) =
             transcripts(&root.join("docs/experiments"), suite("account-coordination").unwrap())
                 .expect("the ledger validates");
@@ -383,7 +371,7 @@ mod tests {
 
     #[test]
     fn the_working_tree_composes_the_service_it_ships() {
-        let reader = Reader::Worktree(ironworks_evidence::root());
+        let reader = Reader::Worktree(crate::test_root());
         let got =
             ingredients(&reader, "relationship-intelligence").expect("the definition is here");
         assert!(got.missing.is_empty(), "missing parts: {:?}", got.missing);

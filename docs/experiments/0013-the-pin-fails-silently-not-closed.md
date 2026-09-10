@@ -52,7 +52,7 @@ read as authority. So this is recorded as a question.
 
 Read at `4cb47cfaf3`. `model` on `/v1/responses` is **advisory, not a selection**.
 
-`crates/product/ironclaw_openai_compat/src/model_validation.rs`:
+`ironclaw@4cb47cfaf3/crates/product/ironclaw_openai_compat/src/model_validation.rs`:
 
 > Reborn carries the requested `model` string through to the projection reader **as a
 > composition/policy hint** and echoes it back in the response.
@@ -61,7 +61,7 @@ Validation bounds only length and characters — its own tests accept `gpt-4`, `
 `anthropic/claude-opus-4` indifferently. The string becomes a
 `LoopModelRouteSnapshot::Advisory { model_id }`, in which the other three route components are the
 literal sentinel `"requested"`, and
-`crates/contracts/ironclaw_loop_contracts/src/host/run_context.rs` states the consequence:
+`ironclaw@4cb47cfaf3/crates/contracts/ironclaw_loop_contracts/src/host/run_context.rs` states the consequence:
 
 > Advisory routes exist so a caller can request a model without an operator-approved route
 > binding: the non-routed gateway **honors the model id when its provider supports per-request
@@ -85,7 +85,7 @@ a privacy claim rather than a version string, that gap is the whole claim.
 
 ## Steps 2 and 3 done: the pin is probably honoured, and it fails silently if it is not
 
-`crates/loop/ironclaw_loop_host/src/model_gateway.rs`, `request_model_override`:
+`ironclaw@4cb47cfaf3/crates/loop/ironclaw_loop_host/src/model_gateway.rs`, `request_model_override`:
 
 > Providers that honor per-request overrides (**e.g. NEAR AI**) serve the requested model;
 > providers that bake the model at construction ignore it and fall back to their active model —
@@ -116,7 +116,7 @@ pass selecting its own model**, distinct from the completion.
 
 ## The log line explains itself: it prints the wrong name
 
-`crates/domains/ironclaw_llm/src/retry.rs`:
+`ironclaw@4cb47cfaf3/crates/domains/ironclaw_llm/src/retry.rs`:
 
 ```rust
 tracing::warn!(

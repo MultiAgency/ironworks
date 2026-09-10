@@ -50,10 +50,9 @@ pub fn load(experiments: &Path, book: &Path, name: &str) -> Result<Transcript, S
     let (cases, recorded, ingredients) = match &doc {
         serde_json::Value::Array(rows) => (rows.clone(), None, None),
         serde_json::Value::Object(map) => (
-            map.get("cases")
-                .and_then(|c| c.as_array())
-                .cloned()
-                .ok_or_else(|| format!("{name} has no `cases`"))?,
+            ironworks_evidence::transcript::cases(&doc)
+                .map_err(|why| format!("{name} {why}"))?
+                .to_vec(),
             map.get("book").cloned(),
             map.get("ingredients").cloned(),
         ),
@@ -76,7 +75,10 @@ pub fn load(experiments: &Path, book: &Path, name: &str) -> Result<Transcript, S
         ));
     };
 
+    // Unreadable and absent are different answers, and only one of them says the suite is
+    // unbound. See `ironworks_evidence::fingerprint::book`.
     let ours = ironworks_evidence::fingerprint::book(book)
+        .map_err(|e| format!("cannot read the book at {}: {e}", book.display()))?
         .ok_or_else(|| format!("no book at {} to bind {name} against", book.display()))?;
 
     // Compare the fingerprint alone. A transcript also records the book's `path`, and a recorded
@@ -109,7 +111,7 @@ mod tests {
     #[test]
     fn a_transcript_bound_to_the_book_loads() {
         let (exp, book) = scratch("bound");
-        let fp = ironworks_evidence::fingerprint::book(&book).unwrap().fingerprint;
+        let fp = ironworks_evidence::fingerprint::book(&book).unwrap().unwrap().fingerprint;
         std::fs::write(
             exp.join("0099-x.json"),
             format!(

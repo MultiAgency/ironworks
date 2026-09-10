@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# COST: real model turns against the probe. Needs a sandbox-profile probe, a model
+# key, and a service declaring `runtime_tools: "sandbox"` — no shipped service does.
 # Prove that IronWorks reaches IronClaw's persistent sandbox workspace.
 #
 # This deliberately uses three fresh IronWorks journals. There is no previous_response_id and no
@@ -8,9 +10,8 @@
 #
 # Preconditions, each checked before a turn is spent rather than left for the reader to infer from
 # a failure:
-#   - the service names a definition declaring `runtime_tools: "sandbox"`. **No shipped service
-#     does**, so this proof currently needs one written for it; `relationship-intelligence` is
-#     read-only records and declares `none`.
+#   - the proof-only binary supplies a synthetic definition declaring `runtime_tools: "sandbox"`.
+#     It is absent from the production binary and the service catalogue.
 #   - IronClaw is running with hosted-single-tenant-volume-sandboxed, so the member's catalogue
 #     holds a shell capability. `dev/probe-up.sh` brings up a plain stack and does not.
 #   - builtin.shell is allowed for this client; authority-changing and general network tools are not
@@ -19,35 +20,39 @@
 #
 # The preflights can only rule this proof OUT. Passing them certifies nothing about the sandbox —
 # that is what the three turns below are for.
-set -uo pipefail
-
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ROOT="$(cd "$HERE/.." && pwd)"
-cd "$ROOT" || exit 3
+# shellcheck source=dev/lib.sh
+source "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/ironworks-workspace.XXXXXX")"
-trap 'rm -rf "$WORK"' EXIT
+# shellcheck disable=SC2329  # invoked indirectly, through `on_exit`.
+cleanup() { rm -rf "$WORK"; }
+on_exit cleanup
 # The two defaults must agree: `Guidance::parse` refuses guidance bound to another slug, so a
 # default slug the default guidance file does not name blocks every turn below before the sandbox
 # is reached — a proof failing on its own fixture rather than on the property. `eval` is the slug
 # `fixtures/eval.guidance.md` declares. Override both together or neither.
-GUIDANCE="${IRONWORKS_WORKSPACE_GUIDANCE:-fixtures/eval.guidance.md}"
-SLUG="${IRONWORKS_WORKSPACE_SLUG:-eval}"
-SERVICE="relationship-intelligence"
+GUIDANCE="${IRONWORKS_WORKSPACE_GUIDANCE:-synthetic://guidance}"
+SLUG="${IRONWORKS_WORKSPACE_SLUG:-synthetic-a}"
+# The default is implemented only by the feature-gated qualification binary. An override can name
+# a normal service, but the same sandbox-capability preflight still applies.
+SERVICE="${IRONWORKS_WORKSPACE_SERVICE:-synthetic-sandbox-proof}"
 ARTIFACT="/workspace/ironworks-persistence-proof"
 
-verdict() { printf '%-9s %-28s %s\n' "$2" "$1" "${3:-}"; }
-blocked() { verdict "$1" BLOCKED "$2"; exit 3; }
-failed() { verdict "$1" FAIL "$2"; exit 2; }
+# Fail-fast wrappers over `dev/lib.sh`'s `verdict`. Named apart from the counters it keeps:
+# `blocked()` beside `$blocked` reads as one thing and is two.
+# This script stops at the first failure — every check below depends on the one above it, so
+# there is nothing left to measure. `dev/prove-continuation.sh` tallies instead and carries
+# on, which is why that one is not spelled the same.
+refuse_and_stop() { verdict "$1" FAIL "$2"; summary; }
 
-for name in IRONWORKS_BASE IRONWORKS_TOKEN IRONWORKS_RECORDS IRONWORKS_RECORDS_TOKEN; do
-  [ -n "${!name:-}" ] || blocked "environment" "$name is unset"
-done
-[ -f "$GUIDANCE" ] || blocked "guidance" "$GUIDANCE does not exist"
-curl -fsS --max-time 3 "$IRONWORKS_BASE/api/health" >/dev/null 2>&1 \
-  || blocked "runtime.reachable" "$IRONWORKS_BASE did not answer /api/health"
-cargo build -q -p ironworks-cli 2>/dev/null || blocked "build" "cargo build failed"
-BIN=./target/debug/ironworks
+need_env IRONWORKS_BASE IRONWORKS_TOKEN IRONWORKS_RECORDS IRONWORKS_RECORDS_TOKEN
+if [ "$GUIDANCE" != "synthetic://guidance" ]; then
+  [ -f "$GUIDANCE" ] || give_up "guidance" "$GUIDANCE does not exist"
+fi
+need_runtime
+cargo build -q -p ironworks-cli --bin ironworks-deployment-proof \
+  --features synthetic-qualification 2>/dev/null || give_up "build" "qualification build failed"
+BIN=./target/debug/ironworks-deployment-proof
 
 # ── preconditions, checked before any turn is spent ──────────────────────────────────────────
 #
@@ -62,12 +67,16 @@ BIN=./target/debug/ironworks
 #    turn to the definition's ceiling, so `runtime_tools: none` removes the capability before the
 #    runtime is ever asked — no catalogue state can restore it. Local, deterministic, free.
 DEFINITION="services/$SERVICE.json"
-[ -f "$DEFINITION" ] || blocked "service.definition" "$DEFINITION does not exist"
-RUNTIME_TOOLS="$(python3 -c '
+if [ "$SERVICE" = "synthetic-sandbox-proof" ]; then
+  RUNTIME_TOOLS=sandbox
+else
+  [ -f "$DEFINITION" ] || give_up "service.definition" "$DEFINITION does not exist"
+  RUNTIME_TOOLS="$(python3 -c '
 import json,sys
 try: print(json.load(open(sys.argv[1]))["capabilities"]["runtime_tools"])
 except Exception: pass' "$DEFINITION")"
-[ "$RUNTIME_TOOLS" = "sandbox" ] || blocked "service.runtime_tools" \
+fi
+[ "$RUNTIME_TOOLS" = "sandbox" ] || give_up "service.runtime_tools" \
   "$SERVICE declares runtime_tools=${RUNTIME_TOOLS:-unreadable}; a sandbox turn needs \"sandbox\". \
 No shipped service declares it, so this proof needs one that does."
 
@@ -84,14 +93,60 @@ except Exception: print("?"); raise SystemExit
 ids = [e["key"][5:] for e in (d.get("entries") or []) if e["key"].startswith("tool.")]
 if not ids: print("?"); raise SystemExit
 print(sum(1 for i in ids if "shell" in i or "exec" in i) or 0)')"
-[ "$SHELL_ROWS" = "?" ] || [ "$SHELL_ROWS" != "0" ] || blocked "runtime.sandbox_profile" \
+[ "$SHELL_ROWS" = "?" ] || [ "$SHELL_ROWS" != "0" ] || give_up "runtime.sandbox_profile" \
   "the member catalogue holds no shell capability — IronClaw is not running \
 hosted-single-tenant-volume-sandboxed. dev/probe-up.sh brings up a plain stack."
 
+# How many cycles one logical turn gets. Each cycle costs no extra turn: a recovering invocation
+# replays a recorded key rather than submitting a new one.
+TURN_CYCLES="${IRONWORKS_WORKSPACE_CYCLES:-4}"
+# The last refusal's own words, so a BLOCKED verdict names what stopped it instead of quoting an
+# exit code. It has to be a file rather than a variable: `turn` is called in a command
+# substitution, so anything it assigns dies with the subshell.
+last_error() { why "$(cat "$1.stderr" 2>/dev/null)"; }
+
+# One logical turn, driven across as many serving cycles as it needs.
+#
+# **A turn that outlives the runtime's synchronous wait is refused while it keeps running, and this
+# proof used to score that as a failed measurement.** `DEFAULT_RESPONSES_WAIT_TIMEOUT` is 30s at
+# `ironclaw@4cb47cfaf3/crates/product/ironclaw_openai_compat/src/responses_workflow.rs:55`, and the
+# builder that would change it has no caller outside that crate's own tests — so it cannot be
+# raised from outside the binary, and raising it inside would be a fork. `0036` measured the shipped
+# service's own flagship question sitting on that boundary, so a turn doing more work than that one
+# should be expected to cross it.
+#
+# **Do not read this as "a sandboxed turn cannot fit".** That is not measured and this comment used
+# to claim it. Every `workspace.create` refusal seen on 2026-09-07 overran for a reason `0057`
+# found underneath: the agent loop spent four model calls on tool names the runtime then rejected.
+# `0032` timed an ordinary tool round trip at 12.63s and 23.04s, both inside the wait.
+#
+# So the refusal is not an error to retry; it is the boundary `0044` measured. The turn keeps
+# running server-side, and a later cycle over the SAME journal recovers it as one logical turn
+# under one idempotency key, because `TurnDriver::drive` consults durable evidence before it admits
+# anything new. This re-invokes; it never resubmits. `--ask` is passed unchanged because
+# `ReplayIdentical` proves the rebuilt body against the journalled digest before replaying.
+#
+# **This does not weaken what the proof isolates.** The three turns still get three separate
+# journals; a cycle re-uses only the journal of the turn it is recovering, so the sole product path
+# joining the three remains the runtime's per-user workspace.
 turn() {
-  local journal="$1" ask="$2"
-  "$BIN" turn --slug "$SLUG" --guidance "$GUIDANCE" --service "$SERVICE" \
-    --journal "$journal" --ask "$ask" 2>/dev/null
+  # `rc` is seeded rather than declared bare: a caller that set the cycle count to zero would skip
+  # the loop entirely and `return "$rc"` on an unset variable, which under `set -u` is an error in
+  # the helper rather than a verdict about the turn.
+  local journal="$1" ask="$2" out="" rc=1 errs
+  for _ in $(seq 1 "$TURN_CYCLES"); do
+    out="$("$BIN" turn --slug "$SLUG" --guidance "$GUIDANCE" --service "$SERVICE" \
+      --journal "$journal" --ask "$ask" 2>"$journal.stderr")"
+    rc=$?
+    [ "$rc" -eq 0 ] && { printf '%s' "$out"; return 0; }
+    errs="$(cat "$journal.stderr" 2>/dev/null)"
+    # Only a refusal that leaves the turn recoverable earns another cycle. Anything else — a
+    # rejected model, a refused scope, an operator-required journal — is a result, and spending
+    # more cycles on it would turn a legible failure into a slow one.
+    unsettled "$errs" || break
+  done
+  printf '%s' "$out"
+  return "$rc"
 }
 extract_hex() { grep -Eo '[0-9a-f]{64}' | head -n1; }
 
@@ -99,31 +154,31 @@ extract_hex() { grep -Eo '[0-9a-f]{64}' | head -n1; }
 # and only the second is evidence about the sandbox. Splitting the exit code from the body is what
 # lets the two carry different verdicts — BLOCKED for "no measurement", FAIL for "measured, wrong".
 create="$(turn "$WORK/create.db" \
-  "Use builtin.shell. Run exactly this command inside the sandbox: test ! -e /var/run/docker.sock && umask 077 && python3 -c \"import secrets; open('$ARTIFACT','w').write(secrets.token_hex(32)+'\\n')\". Do not read the file. Reply only SAVED if the command succeeds.")"
+  "Use the tool named builtin__shell — two underscores, exactly as your tool definitions spell it. Run exactly this command inside the sandbox: test ! -e /var/run/docker.sock && umask 077 && python3 -c \"import secrets; open('$ARTIFACT','w').write(secrets.token_hex(32)+'\\n')\". Do not read the file. Reply only SAVED if the command succeeds.")"
 create_rc=$?
-[ "$create_rc" -eq 0 ] || blocked "workspace.create" \
-  "the sandboxed turn did not complete (exit $create_rc); no answer to judge"
-[ "$create" = "SAVED" ] || failed "workspace.create" "expected exactly SAVED, got: $create"
+[ "$create_rc" -eq 0 ] || give_up "workspace.create" \
+  "unrecovered after $TURN_CYCLES cycles: $(last_error "$WORK/create.db")"
+[ "$create" = "SAVED" ] || refuse_and_stop "workspace.create" "expected exactly SAVED, got: $create"
 verdict "workspace.create" PASS "worker wrote /workspace and had no Docker socket"
 
 read_one="$(turn "$WORK/read-one.db" \
-  "This is a fresh thread. Use builtin.shell to read $ARTIFACT and reply with only its contents.")"
+  "This is a fresh thread. Use the tool named builtin__shell — two underscores, as your tool definitions spell it — to read $ARTIFACT and reply with only its contents.")"
 read_one_rc=$?
-[ "$read_one_rc" -eq 0 ] || blocked "workspace.read.first" \
-  "the fresh read turn did not complete (exit $read_one_rc); no answer to judge"
+[ "$read_one_rc" -eq 0 ] || give_up "workspace.read.first" \
+  "unrecovered after $TURN_CYCLES cycles: $(last_error "$WORK/read-one.db")"
 value_one="$(printf '%s' "$read_one" | extract_hex)"
-[ -n "$value_one" ] || failed "workspace.read.first" "no 64-hex sandbox value was returned"
+[ -n "$value_one" ] || refuse_and_stop "workspace.read.first" "no 64-hex sandbox value was returned"
 verdict "workspace.read.first" PASS "$value_one"
 
 read_two="$(turn "$WORK/read-two.db" \
-  "This is another fresh thread. Use builtin.shell to read $ARTIFACT and reply with only its contents.")"
+  "This is another fresh thread. Use the tool named builtin__shell — two underscores, as your tool definitions spell it — to read $ARTIFACT and reply with only its contents.")"
 read_two_rc=$?
-[ "$read_two_rc" -eq 0 ] || blocked "workspace.read.second" \
-  "the second fresh read turn did not complete (exit $read_two_rc); no answer to judge"
+[ "$read_two_rc" -eq 0 ] || give_up "workspace.read.second" \
+  "unrecovered after $TURN_CYCLES cycles: $(last_error "$WORK/read-two.db")"
 value_two="$(printf '%s' "$read_two" | extract_hex)"
-[ -n "$value_two" ] || failed "workspace.read.second" "no 64-hex sandbox value was returned"
+[ -n "$value_two" ] || refuse_and_stop "workspace.read.second" "no 64-hex sandbox value was returned"
 [ "$value_one" = "$value_two" ] \
-  || failed "workspace.persistence" "fresh threads returned different values"
+  || refuse_and_stop "workspace.persistence" "fresh threads returned different values"
 verdict "workspace.persistence" PASS "three fresh Responses threads shared one client workspace"
 
-printf '\nPASS — IronWorks exercised IronClaw\x27s persistent sandbox workspace.\n'
+summary "IronWorks exercised IronClaw's persistent sandbox workspace."

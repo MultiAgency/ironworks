@@ -11,8 +11,9 @@ publish = false
 # neither has to know about the other — and in particular `records`, which is on the serving path,
 # does not acquire a dependency on operator-side lifecycle types.
 #
-# It is the only crate allowed to answer the question `Reconcile` asks. It creates nothing,
-# changes nothing, and adopts nothing: every method here is a read.
+# It is the only crate allowed to answer the question `Reconcile` asks. Reconciler methods remain
+# read-only. The separately named model-policy control owns one explicit operator write, quarantined
+# here with the same operator-only transport and mandatory read-back.
 [dependencies]
 ironworks-records = { path = "../records" }
 ironworks-domain = { path = "../domain" }

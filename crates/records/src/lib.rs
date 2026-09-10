@@ -42,6 +42,11 @@ pub use credential::{CredentialSource, EnvCredentials, Secret};
 // would put mutation on the type a turn is built from.
 mod append;
 pub use append::{Append, AppendClient, AppendFailure, Appended};
+mod administration;
+pub use administration::{
+    BookExport, Correction, DeleteReceipt, RecordAdministration, RecordAdministrationFailure,
+    Retraction,
+};
 
 /// Why a record read did not produce records.
 ///
@@ -79,6 +84,15 @@ pub struct CatalogEntry {
 pub struct Catalog {
     org: OrgId,
     entries: Vec<CatalogEntry>,
+    /// Rows the store returned that could not be read.
+    ///
+    /// Dropping an unusable row is right — one bad row must not blind the analyst to the other
+    /// ninety-nine — but dropping it *silently* is not. `Degradation::Partial { unreadable }`
+    /// exists so the model can be told "two are missing", and its own doc argues the model can act
+    /// on that and cannot act on "some". Without this the caller reported `Complete` over a book
+    /// that had quietly shrunk, so a store schema change would take records away from every tenant
+    /// with nothing anywhere reporting it.
+    dropped: usize,
 }
 
 impl Catalog {
@@ -93,6 +107,10 @@ impl Catalog {
     }
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+    /// How many rows the store returned that this could not read. See [`Catalog::dropped`]'s field.
+    pub fn dropped(&self) -> usize {
+        self.dropped
     }
 }
 
@@ -111,22 +129,7 @@ impl<C: CredentialSource> std::fmt::Debug for Book<C> {
 
 impl<C: CredentialSource> Book<C> {
     pub fn new(base: impl Into<String>, credentials: C) -> Self {
-        // Per-phase timeouts, for the same reason the runtime client uses them: a phase-agnostic
-        // timeout cannot say whether anything was attempted.
-        let config = ureq::Agent::config_builder()
-            .timeout_global(None)
-            .timeout_resolve(Some(Duration::from_secs(5)))
-            .timeout_connect(Some(Duration::from_secs(5)))
-            .timeout_send_request(Some(Duration::from_secs(10)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .timeout_recv_body(Some(Duration::from_secs(30)))
-            .http_status_as_error(false)
-            .build();
-        Self {
-            agent: ureq::Agent::new_with_config(config),
-            base: base.into().trim_end_matches('/').to_owned(),
-            credentials,
-        }
+        Self { agent: agent(), base: base.into().trim_end_matches('/').to_owned(), credentials }
     }
 
     pub fn endpoint(&self) -> &str {
@@ -169,19 +172,21 @@ impl<C: CredentialSource> Book<C> {
         if &answered != scope.org() {
             return Err(BookFailure::ScopeDrift { asked: scope.org().clone(), answered });
         }
-        let entries = wire
+        let returned = wire.accounts.len();
+        let entries: Vec<CatalogEntry> = wire
             .accounts
             .into_iter()
             .filter_map(|a| {
                 // An unusable row is dropped rather than trusted: one bad row must not blind the
-                // analyst to the other ninety-nine.
+                // analyst to the other ninety-nine. Counted, though — see `Catalog::dropped`.
                 let id = AccountId::parse(a.account_id).ok()?;
                 let name = a.name.filter(|n| !n.trim().is_empty())?;
                 let updated_at = a.updated_at.and_then(|t| Timestamp::parse(t).ok());
                 Some(CatalogEntry { id, name, updated_at })
             })
             .collect();
-        Ok(Catalog { org: answered, entries })
+        let dropped = returned - entries.len();
+        Ok(Catalog { org: answered, entries, dropped })
     }
 
     /// Fetch one account's full record.
@@ -232,6 +237,48 @@ impl<C: CredentialSource> Book<C> {
     }
 }
 
+// ── the HTTP budget ─────────────────────────────────────────────────────────────────────────
+//
+// Named rather than chained inline, because this exact ladder is written in four other crates and
+// `crates/ironclaw/src/client.rs::Ironclaw::new` deliberately runs a longer one. That intentional
+// difference was invisible against five silent copies of the same eight-call chain; against named
+// constants it is a diff on a number. The crates cannot share the values without an edge none of
+// them should have, so each states its own and says which system it is stating them about.
+
+/// DNS for the record store.
+const RESOLVE: Duration = Duration::from_secs(5);
+/// TCP connect to the record store.
+const CONNECT: Duration = Duration::from_secs(5);
+/// Writing the request to the record store.
+const SEND: Duration = Duration::from_secs(10);
+/// Waiting for the record store to begin answering.
+const RECV_RESPONSE: Duration = Duration::from_secs(30);
+/// Reading the record store's answer.
+const RECV_BODY: Duration = Duration::from_secs(30);
+
+/// The HTTP agent both of this crate's clients use.
+///
+/// **Per-phase timeouts**, for the same reason the runtime client uses them: a phase-agnostic
+/// timeout cannot say whether anything was attempted, and on a write that is the whole question.
+/// One builder rather than one per client, so the read and the append cannot drift into
+/// disagreeing about how long a store is allowed to take.
+///
+/// `http_status_as_error(false)` because a status is an answer to be read, not a transport
+/// failure — reading a 409 as one would turn a permanent conflict into a retryable outage.
+pub(crate) fn agent() -> ureq::Agent {
+    ureq::Agent::new_with_config(
+        ureq::Agent::config_builder()
+            .timeout_global(None)
+            .timeout_resolve(Some(RESOLVE))
+            .timeout_connect(Some(CONNECT))
+            .timeout_send_request(Some(SEND))
+            .timeout_recv_response(Some(RECV_RESPONSE))
+            .timeout_recv_body(Some(RECV_BODY))
+            .http_status_as_error(false)
+            .build(),
+    )
+}
+
 /// The store is the authority on which org a credential authorises.
 impl<C: CredentialSource> ScopeResolver for Book<C> {
     fn resolve(&self, credential: &CredentialRef) -> Result<ScopeEvidence, ScopeFailure> {
@@ -256,7 +303,12 @@ impl<C: CredentialSource> ScopeResolver for Book<C> {
     }
 }
 
-fn encode(s: &str) -> String {
+/// Percent-encode a path segment: RFC 3986 unreserved characters pass, everything else escapes.
+///
+/// `pub` and shared rather than copied. `crates/reconcile/src/ironclaw.rs` had a byte-identical
+/// copy, and `reconcile` already depends on this crate — so the copy bought nothing and gave an
+/// account id two encodings that could drift into disagreeing about which bytes are safe in a URL.
+pub fn encode(s: &str) -> String {
     s.bytes()
         .map(|b| match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {

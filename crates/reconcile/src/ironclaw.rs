@@ -37,16 +37,30 @@ use ironworks_lifecycle::{
     OpaqueId, Plan, PolicyBinding, Presence, Reconcile, RuntimeSubject, RuntimeTenantId,
     RuntimeUserId, Step, SubjectMismatch, assess,
 };
-use ironworks_records::{CredentialSource, Secret};
+use ironworks_records::{CredentialSource, Secret, encode};
 use std::collections::BTreeSet;
-use std::time::Duration;
 
 /// One read of the member's tool settings: each row's effective state, the subset the runtime
-/// reports as `locked`, and the global approval flag. Named because all three come from the same
-/// response and must not be fetched separately — a plan and the record of what it was planned
-/// against would otherwise be able to disagree.
-type CatalogueReading =
-    (std::collections::BTreeMap<String, String>, std::collections::BTreeSet<String>, bool);
+/// reports as `locked`, and the global approval flag.
+///
+/// All three come from the same response and must not be fetched separately — a plan and the
+/// record of what it was planned against would otherwise be able to disagree.
+///
+/// # A struct, because a tuple alias could not keep that promise
+///
+/// This was `type CatalogueReading = (BTreeMap<String, String>, BTreeSet<String>, bool)`, and an
+/// alias gives no field names: one caller destructured it `(states, locked, auto_approve)` and
+/// another `(tools, locked, auto_approve)`. Two of the three are string collections, so
+/// transposing them compiles — which is the failure the doc paragraph above was written to prevent
+/// and the type was not enforcing.
+struct CatalogueReading {
+    /// Each tool row's effective state, by name.
+    states: std::collections::BTreeMap<String, String>,
+    /// The subset the runtime reports as `locked`, read rather than assumed.
+    locked: std::collections::BTreeSet<String>,
+    /// The global approval flag, as the catalogue reported it.
+    auto_approve: bool,
+}
 
 /// Upstream's own cap. Asking for more than this is not an error, it is silently clamped — so a
 /// caller that assumed its page size was honoured would under-enumerate without being told.
@@ -68,20 +82,8 @@ impl Admin {
     /// `credential` names **where** the operator token lives; it is resolved once, here, and the
     /// value never leaves this struct.
     pub fn new(base: impl Into<String>, credential: &CredentialRef) -> Self {
-        // `http_status_as_error(false)`: a 404 is the answer to "does this member exist", not a
-        // transport failure. Reading it as one would turn an authoritative absence into an
-        // unverifiable — which fails closed, but hides the one negative answer this can give.
-        let config = ureq::Agent::config_builder()
-            .timeout_global(None)
-            .timeout_resolve(Some(Duration::from_secs(5)))
-            .timeout_connect(Some(Duration::from_secs(5)))
-            .timeout_send_request(Some(Duration::from_secs(10)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .timeout_recv_body(Some(Duration::from_secs(30)))
-            .http_status_as_error(false)
-            .build();
         Self {
-            agent: ureq::Agent::new_with_config(config),
+            agent: crate::operator_agent(),
             base: base.into().trim_end_matches('/').to_owned(),
             token: OperatorToken::from_env(credential),
         }
@@ -188,12 +190,7 @@ impl Admin {
                 None => format!("/api/webchat/v2/admin/users?limit={MAX_PAGE}"),
             };
             let (status, body) = self.get(&path)?;
-            if !(200..300).contains(&status) {
-                return Err(match status {
-                    401 | 403 => BlockedReason::CredentialRejected,
-                    _ => BlockedReason::Malformed { detail: format!("HTTP {status}") },
-                });
-            }
+            require_success(status)?;
             let page: serde_json::Value = serde_json::from_str(&body)
                 .map_err(|e| BlockedReason::Malformed { detail: e.to_string() })?;
             // A MISSING `users` field and an EMPTY one are different answers. The reference
@@ -340,15 +337,20 @@ pub fn unaccounted_members(admin: &Admin, accounted: &BTreeSet<OpaqueId>) -> Fle
     }
 }
 
-fn encode(s: &str) -> String {
-    s.bytes()
-        .map(|b| match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                (b as char).to_string()
-            }
-            _ => format!("%{b:02X}"),
-        })
-        .collect()
+/// A non-2xx status, as the reason it blocks a measurement.
+///
+/// Written out three times in this file with the same two arms. **A refused credential is not a
+/// malformed answer**: one says we were not allowed to look, the other says we looked and could
+/// not read what came back, and `BlockedReason` keeps them apart precisely so a run can say which.
+/// Three copies is three places for that distinction to drift.
+fn require_success(status: u16) -> Result<(), BlockedReason> {
+    if (200..300).contains(&status) {
+        return Ok(());
+    }
+    Err(match status {
+        401 | 403 => BlockedReason::CredentialRejected,
+        _ => BlockedReason::Malformed { detail: format!("HTTP {status}") },
+    })
 }
 
 // ── confinement ─────────────────────────────────────────────────────────────────────────────
@@ -485,11 +487,6 @@ impl Reading {
             Self::Measured { attempt, .. } | Self::Blocked { attempt } => attempt,
         }
     }
-    pub fn into_attempt(self) -> ConfinementAttempt {
-        match self {
-            Self::Measured { attempt, .. } | Self::Blocked { attempt } => attempt,
-        }
-    }
 }
 
 impl<'a, C: CredentialSource> MemberConfinement<'a, C> {
@@ -504,13 +501,19 @@ impl<'a, C: CredentialSource> MemberConfinement<'a, C> {
     /// (`ironclaw@4cb47cfaf3/crates/product/ironclaw_webui/src/webui_v2/handlers.rs:255-279`,
     /// `:3785-3789`), and the middleware builds it from the authenticated bearer with the tenant
     /// stamped from host-installation config — the browser body can influence neither
-    /// (`.../webui_serve.rs:851-862`). So this is not an approximation of "whose catalogue is about
-    /// to be read"; it is that question, asked of the component that answers it.
+    /// (`webui_serve.rs:851-862`). So this is not an approximation of "whose catalogue is about to
+    /// be read"; it is that question, asked of the component that answers it.
     ///
     /// The `user_id` is the same `UserId` an admin-created member is minted for
-    /// (`.../ironclaw_cli/src/commands/serve.rs:74-88` mints for `(tenant, user_id)`;
-    /// `.../session.rs:124-153` returns that id back), so it is comparable with what lifecycle
-    /// recorded at `member_minted`.
+    /// (`ironclaw@4cb47cfaf3/crates/app/ironclaw_cli/src/commands/serve.rs:74-88` mints for
+    /// `(tenant, user_id)`; `session.rs:124-153` returns that id back), so it is comparable with
+    /// what lifecycle recorded at `member_minted`.
+    ///
+    /// **Every anchor above is into `ironclaw@4cb47cfaf3`**, the revision `IRONCLAW_PIN` names.
+    /// Saying so once is the point: a line number is durable only against a tree that cannot move
+    /// under it, and one written `.../file.rs:851` names no revision and so promises nothing. The
+    /// two short names are written as this repository found them — the pinned source is not
+    /// checked out here, and inventing a directory for them would be worse than eliding one.
     pub fn authenticated_subject(&self) -> Result<RuntimeSubject, BlockedReason> {
         let Some(secret) = self.credentials.resolve(&self.member_credential) else {
             return Err(BlockedReason::NoCredential {
@@ -518,12 +521,7 @@ impl<'a, C: CredentialSource> MemberConfinement<'a, C> {
             });
         };
         let (status, body) = self.admin.get_as_member("/api/webchat/v2/session", &secret)?;
-        if !(200..300).contains(&status) {
-            return Err(match status {
-                401 | 403 => BlockedReason::CredentialRejected,
-                _ => BlockedReason::Malformed { detail: format!("HTTP {status}") },
-            });
-        }
+        require_success(status)?;
         let parsed: serde_json::Value = serde_json::from_str(&body)
             .map_err(|e| BlockedReason::Malformed { detail: e.to_string() })?;
         let field = |name: &str| -> Result<String, BlockedReason> {
@@ -578,7 +576,7 @@ impl<'b, 'a, C: CredentialSource> BoundMember<'b, 'a, C> {
         at: &ObservedAt,
     ) -> Reading {
         match self.catalogue() {
-            Ok((states, locked, auto_approve)) => {
+            Ok(CatalogueReading { states, locked, auto_approve }) => {
                 let measurement = Measurement::from_assessment(
                     policy,
                     &self.bound,
@@ -587,13 +585,25 @@ impl<'b, 'a, C: CredentialSource> BoundMember<'b, 'a, C> {
                     auto_approve,
                     at,
                 );
-                let attempt = ConfinementAttempt::measured(
-                    self.bound.clone(),
-                    binding.clone(),
-                    at.clone(),
-                    measurement,
-                );
-                Reading::Measured { states, locked, auto_approve, attempt }
+                match measurement {
+                    Ok(measurement) => {
+                        let attempt = ConfinementAttempt::measured(
+                            self.bound.clone(),
+                            binding.clone(),
+                            at.clone(),
+                            measurement,
+                        );
+                        Reading::Measured { states, locked, auto_approve, attempt }
+                    }
+                    Err(why) => Reading::Blocked {
+                        attempt: ConfinementAttempt::catalogue_blocked(
+                            self.bound.clone(),
+                            binding.clone(),
+                            at.clone(),
+                            Blocked::from(&why),
+                        ),
+                    },
+                }
             }
             Err(why) => Reading::Blocked {
                 attempt: ConfinementAttempt::catalogue_blocked(
@@ -612,7 +622,7 @@ impl<'b, 'a, C: CredentialSource> BoundMember<'b, 'a, C> {
     /// shapes of the same measurement, and both must come from a bound member.
     pub fn observe(&self, policy: &ConfinementPolicy, at: &ObservedAt) -> Confinement {
         match self.catalogue() {
-            Ok((tools, locked, auto_approve)) => {
+            Ok(CatalogueReading { states: tools, locked, auto_approve }) => {
                 assess(policy, self.bound.expected(), &tools, &locked, auto_approve, at.as_str())
             }
             Err(why) => Confinement::Unverifiable(why),
@@ -733,12 +743,7 @@ impl<'b, 'a, C: CredentialSource> BoundMember<'b, 'a, C> {
         };
         let (status, body) =
             confinement.admin.get_as_member("/api/webchat/v2/settings/tools", &secret)?;
-        if !(200..300).contains(&status) {
-            return Err(match status {
-                401 | 403 => BlockedReason::CredentialRejected,
-                _ => BlockedReason::Malformed { detail: format!("HTTP {status}") },
-            });
-        }
+        require_success(status)?;
         let parsed: serde_json::Value = match serde_json::from_str(&body) {
             Ok(v) => v,
             Err(e) => {
@@ -788,6 +793,6 @@ impl<'b, 'a, C: CredentialSource> BoundMember<'b, 'a, C> {
                 detail: "the catalogue listed no tools at all".into(),
             });
         }
-        Ok((tools, locked, auto_approve))
+        Ok(CatalogueReading { states: tools, locked, auto_approve })
     }
 }

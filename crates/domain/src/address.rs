@@ -56,8 +56,8 @@ impl Addressing {
                 let found = find_mention(text, &at)?;
                 // Only the gap the removal made is closed. Collapsing whitespace generally would
                 // edit the question — a pasted table or an indented quote is content.
-                let before = text[..found].trim_end();
-                let after = text[found + at.len()..].trim_start();
+                let before = text[..found.start].trim_end();
+                let after = text[found.end..].trim_start();
                 let request = match (before.is_empty(), after.is_empty()) {
                     (true, _) => after.to_owned(),
                     (_, true) => before.to_owned(),
@@ -69,26 +69,45 @@ impl Addressing {
     }
 }
 
-/// Case-insensitive search for `@handle` that is not part of a longer name.
+/// Case-insensitive search for `@handle` that is not part of a longer name, as a range of `text`.
 ///
 /// The boundary check is what stops `@bot` matching inside `@botanist`: Telegram would deliver
 /// that message to a different bot entirely, and answering it would be answering someone else's
 /// conversation.
-fn find_mention(text: &str, at: &str) -> Option<usize> {
-    let hay = text.to_lowercase();
-    let needle = at.to_lowercase();
-    let mut from = 0;
-    while let Some(rel) = hay[from..].find(&needle) {
-        let start = from + rel;
-        let end = start + needle.len();
+///
+/// # Why this searches the original rather than a lowercased copy
+///
+/// It used to `find` in `text.to_lowercase()` and hand the offset back to a caller slicing `text`.
+/// `to_lowercase` is not length-preserving — `ẞ` is three bytes and lowercases to two, `İ` is two
+/// and lowercases to three — so any such character before the mention moved the cut. One byte
+/// early lands inside a character and panics; one byte late leaves part of the summons in the
+/// question the model is shown. Measured, on group text, which is text a stranger chooses.
+///
+/// Returning the **range** closes the second half of the same defect: the caller used to resume at
+/// `found + at.len()`, the un-lowercased handle's length, against an offset found with the
+/// lowercased one. The matched region is the only thing that knows how long it was.
+fn find_mention(text: &str, at: &str) -> Option<std::ops::Range<usize>> {
+    text.char_indices().find_map(|(start, _)| {
+        let end = match_at(text, start, at)?;
+        // Not a mention of us if a name continues past it.
         let next_is_name =
-            hay[end..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_');
-        if !next_is_name {
-            return Some(start);
+            text[end..].chars().next().is_some_and(|c| c.is_alphanumeric() || c == '_');
+        (!next_is_name).then_some(start..end)
+    })
+}
+
+/// Where `at` ends in `text` if it matches at `start`, comparing case-insensitively.
+///
+/// Character by character rather than by slice, because a case-insensitive match is not a claim
+/// that the two spans are the same length.
+fn match_at(text: &str, start: usize, at: &str) -> Option<usize> {
+    let mut rest = text[start..].chars();
+    for want in at.chars() {
+        if !rest.next()?.to_lowercase().eq(want.to_lowercase()) {
+            return None;
         }
-        from = end;
     }
-    None
+    Some(text.len() - rest.as_str().len())
 }
 
 #[cfg(test)]
@@ -165,6 +184,30 @@ mod tests {
         let text = "@Multiferroic_bot which accounts need attention?";
         let request = group().addressed(text).expect("addressed");
         assert!(!request.to_lowercase().contains("@multiferroic_bot"), "{request}");
+    }
+
+    /// Text before the mention that does not lowercase to its own length must not move the cut.
+    ///
+    /// `str::to_lowercase` is not length-preserving, and the search runs over a lowercased copy
+    /// while the slices are taken from the original. `ẞ` (3 bytes) lowercases to `ß` (2), so the
+    /// offset lands one byte early — inside a character, which panics; `İ` (2 bytes) lowercases
+    /// to `i̇` (3) and lands one byte late, leaving the `@` in the question. Both are group text,
+    /// which is to say text a stranger chooses.
+    #[test]
+    fn a_mention_is_found_at_the_same_place_whatever_precedes_it() {
+        let cases: &[(&str, Option<&str>, &str)] = &[
+            ("ẞ @Multiferroic_bot hi", Some("ẞ hi"), "lowercasing shortens what precedes"),
+            ("İ @Multiferroic_bot hi", Some("İ hi"), "lowercasing lengthens what precedes"),
+            ("ẞ@Multiferroic_bot", Some("ẞ"), "no separator, and the cut is mid-character"),
+            ("日本語 @Multiferroic_bot hi", Some("日本語 hi"), "multi-byte that is already lower"),
+        ];
+        for (text, want, why) in cases {
+            assert_eq!(group().addressed(text).as_deref(), *want, "{why}");
+        }
+
+        // Positive control: the same handle in the same position with ASCII before it. Without
+        // this the assertions above would also pass for a `find_mention` that never matched.
+        assert_eq!(group().addressed("s @Multiferroic_bot hi").as_deref(), Some("s hi"));
     }
 
     #[test]

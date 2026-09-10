@@ -1,0 +1,26 @@
+[package]
+name = "ironworks-devhttp"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# The HTTP a proof fixture needs, once.
+#
+# `devstore` and `devchannel` each hand-rolled the same request reader and the same response
+# writer, and the copies had drifted: `devstore` carried a documented fix for case-folding a
+# credential that `devchannel` never received, and the two response writers disagreed on the status
+# line three ways. Neither had the bounds `crates/telegram/src/main.rs` grew, so hardening measured
+# against the adapter was not measured against the fixtures the live proofs actually run.
+#
+# **Dependencies: none.** A fixture that grew a framework would make the live gate less trustworthy
+# rather than more, which is the reason both fixtures state for staying minimal. This is std only.
+#
+# `ironworks-telegram` deliberately does NOT use this: its manifest records that it depends on no
+# IronWorks crate, "which is what keeps the serving path unable to acquire a second, looser route
+# to a channel". That is a real constraint and it outranks removing a third copy.
+[dependencies]
+
+[lints]
+workspace = true

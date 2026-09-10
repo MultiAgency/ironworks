@@ -64,6 +64,7 @@ the room would cost a turn:
 {"tenants":[{
   "slug": "<multiagency-slug>",
   "channel": "<operator-room-id>",
+  "org": "<multiagency-org-id>",
   "service": "relationship-intelligence",
   "guidance": "<private-guidance-path>",
   "address": "@<bot-username>",
@@ -71,6 +72,15 @@ the room would cost a turn:
   "runtime_credential": "env:IRONWORKS_TOKEN"
 }]}
 ```
+
+`org` is what closes the operator-only binding this document deferred, and it is required: a
+registry written before it existed is refused as a whole (§B-4) rather than served unchecked, so
+adding it is a step in any upgrade rather than an option. It is **not** an authority —
+`ironworks_domain::registry::ExpectedOrg` cannot become an `OrgId`, because a caller-supplied
+scope key is the defect §B-1 exists to prevent. It is the org the operator recorded this tenant
+as, and `crates/cli/src/lib.rs::boot_tenant` refuses to serve when the record store resolves the
+credential to a different one. `registry publish-one` writes the value it just measured from the
+store, so a published registry records what publication proved.
 
 The guidance marker must bind both slug and service:
 
@@ -80,24 +90,34 @@ The guidance marker must bind both slug and service:
 
 No private guidance, records, credentials or journal belongs in this repository.
 
-### Deliberate POC deferral: operator-only binding
+### The operator-only binding, no longer deferred
 
-The composition names MultiAgency, but the current code does not yet compare the verified record
-scope with a separately configured operator org. For this one-operator POC, deployment ownership,
-the explicit service selection and the guidance marker are the boundary; `coordinate` adds no
-serving capability that `turn --service relationship-intelligence` did not already have.
+**Closed.** This section recorded a deliberate POC deferral: the composition named MultiAgency, but
+nothing compared the verified record scope against a separately configured operator org, and for a
+one-operator POC deployment ownership, the explicit service selection and the guidance marker were
+the boundary. It was to end before either of two events — a second tenant exists, or
+`relationship-intelligence` is relayed into a channel the operator does not solely occupy.
 
-This deferral ends before either of two events: a second tenant exists, or
-`relationship-intelligence` is relayed into a channel the operator does not solely occupy. At that
-point the service definition must declare an operator-only binding and instance construction must
-fail closed unless the server-resolved org matches an operator org supplied by configuration—no
-fallback literal and no tenant registry required.
+It ended for a third reason instead: [ADR 0010](adr/0010-the-seam-serves-bespoke-per-client-service-shapes.md)
+settled that the service varies per client, which retires the premise that a shipped composition is
+always the operator's own.
+
+What the deferral asked for is built: **which organization's records an instance may read** is
+`org` on the registry entry, compared in `crates/cli/src/lib.rs::boot_tenant` against what the
+record store resolved the credential to, refusing to serve on a disagreement. The organization
+named in the composition remains reviewed prose, not a second metadata field that could agree with
+the prose while still disagreeing with the runtime authority.
+
+The original sentence said "no tenant registry required," which was right for one operator and
+wrong the moment a second tenant exists: an expected org is per-tenant, so the registry is where it
+belongs (operator, 2026-09-05). What survives of that clause is the part that mattered — **no
+fallback literal.** The value is configuration and the authority is still the store's answer.
 
 ### Nothing in an answer says whether its records were real
 
 Worth knowing before showing this to anyone. The seam prints the scope it verified and the store
 that verified it — `ironworks: scope <org> verified by <endpoint> (evidence: record store)`
-(`crates/cli/src/main.rs::boot_tenant`) — so the fact is on stderr, once, before the answer. It is
+(`crates/cli/src/lib.rs::boot_tenant`) — so the fact is on stderr, once, before the answer. It is
 not in the answer, and the two endpoints a demo switches between are both on `127.0.0.1`, which is
 not a distinction an audience reads.
 
@@ -163,7 +183,12 @@ samples per case is not a distribution, so **neither figure may be cited as a pa
 run appeared to establish — that every failure came from one grader rule, absence framing — was a
 reading of fourteen answers that **did not generalise**, and `0026` replaced it by reading every
 recorded failure: **seven of fifty-nine are the model**, the rest the instrument. The injection
-refusal held (30 of 30 across the corpus). See `docs/experiments/README.md`.
+refusal held across every recorded injection answer — the thirty in
+`0016-injection-frozen-graders.json`, `0017-injection-absence-as-form.json` and
+`0019-injection-ten-account-book.json`, which is what `docs/experiments/README.md`'s
+`0018`/`0019` row means by *"the refusal never moved"*. **The graders disagreed about those same
+answers** (`0026` moves `injection` from 5/10 to 8/10 on regrade), which is the point: what held
+was the refusal, not the score.
 
 **`0021` corrected that grader and the suite produced a third distinct result** — 3/7, against
 `0020`'s 4/7 and its uncaptured 6/7, at a composition that never moved. **Every case has both
@@ -173,8 +198,8 @@ passed and failed.**
 were corrected across `0024`–`0027`, each with an accepted and a rejected control. Every one of
 those corrections moved a verdict upward, which read as bias until `0034` searched the other
 direction — the fifty-six answers that *passed* — and found a leniency defect. The asymmetry was an
-artefact of only ever searching one way. `docs/experiments/README.md` carries the arc; two defects
-remain open there.
+artefact of only ever searching one way. `docs/experiments/README.md` carries the arc and is where
+the current count of open defects lives — a second copy here is a second thing to keep in step.
 
 Two durable things came out of it: `crates/eval/tests/stored_answers.rs` pins every recorded answer
 so no grader edit can move a verdict without declaring it, and every new transcript embeds the

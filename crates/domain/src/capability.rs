@@ -2,11 +2,10 @@
 
 /// How much authority a capability grants.
 ///
-/// **There is deliberately no `Write` variant.** Effect execution is not implemented, and an
-/// unimplemented capability that already has a name in the type system is one somebody will
-/// eventually pass. When propose-and-confirm arrives it arrives with an approval path and its
-/// own invariants — see the `approvals` entry in `docs/INVARIANTS.md`, which is a named absence
-/// rather than an oversight.
+/// **There is deliberately no `Write` variant.** Model-directed effect execution is not
+/// implemented, and an unimplemented capability that already has a name in the type system is one
+/// somebody will eventually pass. Propose-and-confirm is deliberately different: a person's
+/// deterministic approval path performs the append, while the model still has no write authority.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Access {
     None,
@@ -60,6 +59,30 @@ pub struct CapabilityProfile {
     pub egress: Access,
     pub outreach: Access,
     pub runtime_tools: ToolAccess,
+}
+
+/// Authority exercised only by an explicit human/operator command.
+///
+/// This is intentionally not an axis on [`CapabilityProfile`]: that profile enters model-turn
+/// construction, while these permissions must remain unreachable from a model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HumanAuthorityProfile {
+    pub promote: bool,
+    pub correct: bool,
+    pub retract: bool,
+    pub export: bool,
+    pub delete: bool,
+}
+
+impl HumanAuthorityProfile {
+    pub const NONE: Self =
+        Self { promote: false, correct: false, retract: false, export: false, delete: false };
+
+    pub const ACCOUNT_CUSTODIAN: Self =
+        Self { promote: true, correct: true, retract: true, export: true, delete: false };
+
+    pub const DEPROVISIONER: Self =
+        Self { promote: false, correct: false, retract: false, export: true, delete: true };
 }
 
 impl CapabilityProfile {

@@ -34,10 +34,10 @@ pub fn fingerprint(
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     for record in records {
-        hasher.update(crate::envelope::render_account_for_digest(record, fact_fields).as_bytes());
+        hasher.update(crate::envelope::render_account(record, fact_fields).as_bytes());
         hasher.update([0u8]);
     }
-    hasher.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect()
+    crate::composition::digest16_of(hasher)
 }
 
 /// What a thread was last shown.

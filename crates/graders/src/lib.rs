@@ -9,7 +9,7 @@
 //!
 //! # Why this is Rust and not the Python it replaces
 //!
-//! The Python graders were imported from `~/agency/ironworks` so that answer quality could be
+//! The Python graders were imported from `~/agency/ironworks-py` so that answer quality could be
 //! measured against the reference's own bar. That was the right call while **parity** was the
 //! goal. It no longer is, and with it goes the reason to run a second language in the measuring
 //! path — and the reason to express every rule as a regex.

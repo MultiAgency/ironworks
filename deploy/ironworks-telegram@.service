@@ -1,0 +1,35 @@
+[Unit]
+# The channel adapter: the seam's /poll and /send on one side, the Telegram Bot API on the other.
+Description=Rust IronWorks Telegram channel adapter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/ironworks
+# The token reaches exactly one process and never a command line: an argument is visible in `ps`
+# to every user on the box, and this file is 0600.
+EnvironmentFile=/etc/ironworks/cell-%i.env
+EnvironmentFile=/etc/ironworks/telegram-%i.env
+# CHANNEL_ADAPTER_TOKEN, shared with the relay. ONE file read by both units rather than the same
+# secret pasted into two: a rotation that updates one copy and not the other stops the channel,
+# and two copies is exactly the arrangement in which that happens without anyone noticing.
+#
+# The adapter refuses to start without it (exit 64), deliberately. `/poll` is a destructive write —
+# the offset is the acknowledgement — so an unauthenticated adapter is a way for any local process,
+# the Python fleet and the per-client runtimes included, to discard the whole pending backlog
+# before a single update has been journalled.
+EnvironmentFile=/etc/ironworks/channel-adapter-%i.env
+ExecStartPre=+/opt/ironworks/deploy/check-serving-cell.sh %i
+ExecStart=/opt/ironworks/target/release/ironworks-telegram --port ${ADAPTER_PORT}
+Restart=always
+RestartSec=5
+User=ironworks-%i
+Group=ironworks-%i
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

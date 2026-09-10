@@ -18,7 +18,8 @@
 //!
 //! Whether the proposed bytes survive the channel's own rendering is the *transport's* knowledge,
 //! not the grammar's — `domain` names no transport. The caller asks the channel
-//! ([`ironworks_channel_http::echoes_exactly`]) and refuses before a proposal exists, so a
+//! (`ironworks_channel_http::echoes_exactly` — plain, because `domain` cannot name a
+//! transport, which is the sentence's own point) and refuses before a proposal exists, so a
 //! proposal never holds bytes the echo could not show. See [`Refusal::TextUnusable`].
 
 use crate::ids::{ContributorId, OrgId};

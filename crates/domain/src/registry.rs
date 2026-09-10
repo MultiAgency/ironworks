@@ -25,9 +25,46 @@
 
 use crate::address::Addressing;
 use crate::ids::{
-    ActorRef, ContributorId, CredentialPurpose, CredentialRef, GuidanceRef, ServiceId, Slug,
+    ActorRef, ContributorId, CredentialPurpose, CredentialRef, GuidanceRef, OrgId, ServiceId, Slug,
 };
 use crate::route::ChannelRef;
+
+/// The organization an operator recorded this tenant as being, so a drifted credential is caught
+/// rather than served.
+///
+/// # It is an expectation, and deliberately not an [`OrgId`]
+///
+/// `OrgId` is the trusted scope key: *"only ever obtained by resolving a credential server-side
+/// (B-1) … a value of this type appearing anywhere a caller supplied it is a defect."* This value
+/// **is** caller-supplied — an operator typed it into a registry — so it must never become one.
+///
+/// There is therefore no way to get an `OrgId` out of this type. It can be compared against a
+/// verified one and it can be shown in a refusal, and that is all. The authority is still the
+/// record store's answer; this only says which answer the operator was expecting, which is what
+/// turns a mis-pointed credential from a silent cross-org read into a refusal to serve.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpectedOrg(String);
+
+impl ExpectedOrg {
+    /// Parse through [`OrgId`]'s own rules and then discard the `OrgId`.
+    ///
+    /// Validating identically matters: an expectation the store could never return is a
+    /// misconfiguration that would otherwise refuse every turn with a mismatch rather than a
+    /// malformed-field error naming the row.
+    pub fn parse(raw: impl Into<String>) -> Result<Self, crate::ids::IdError> {
+        OrgId::parse(raw).map(|id| Self(id.as_str().to_owned()))
+    }
+
+    /// Whether a server-resolved org is the one this tenant was recorded as.
+    pub fn matches(&self, verified: &OrgId) -> bool {
+        self.0 == verified.as_str()
+    }
+
+    /// For a refusal message. Never for selecting, keying or scoping anything.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
 use serde::Deserialize;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
@@ -90,6 +127,7 @@ pub enum RegistryError {
 pub struct TenantEntry {
     slug: Slug,
     channel: ChannelRef,
+    org: ExpectedOrg,
     service: ServiceId,
     guidance: GuidanceRef,
     records: CredentialRef,
@@ -130,6 +168,13 @@ impl TenantEntry {
     }
     pub fn channel(&self) -> &ChannelRef {
         &self.channel
+    }
+    /// Which organization this tenant's records credential is expected to resolve to.
+    ///
+    /// Not an authority — see [`ExpectedOrg`]. The binary compares it against the org the record
+    /// store actually returned and refuses to serve on a disagreement.
+    pub fn org(&self) -> &ExpectedOrg {
+        &self.org
     }
     pub fn service(&self) -> &ServiceId {
         &self.service
@@ -215,12 +260,25 @@ pub struct TenantRegistry {
     entries: Vec<TenantEntry>,
 }
 
+// Committed operator configuration is closed-world. Silently discarding a key here would let a
+// misspelled authority or routing field look applied while the process served a different
+// registry. This strictness is deliberately local to the registry wire types; it does not change
+// how external API responses are decoded.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WireEntry {
     #[serde(default)]
     slug: String,
     #[serde(default)]
     channel: String,
+    /// The organization this tenant's records credential must resolve to.
+    ///
+    /// Required, with no default, and that is the point: absent would mean *serve whatever the
+    /// credential turns out to authorise*, which is the fail-open this field exists to close.
+    /// An existing registry is refused as a whole (§B-4) until an operator adds it, loudly,
+    /// rather than served unchecked.
+    #[serde(default)]
+    org: String,
     #[serde(default)]
     service: String,
     #[serde(default)]
@@ -241,6 +299,7 @@ struct WireEntry {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WireContributor {
     /// The private conversation this person reaches the tenant through. Absent means the
     /// tenant's own `channel`, which keeps a one-person registry exactly as it was written.
@@ -253,9 +312,133 @@ struct WireContributor {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WireRegistry {
     #[serde(default)]
     tenants: Vec<WireEntry>,
+}
+
+/// One tenant's contributor bindings, or the first thing wrong with them.
+///
+/// Extracted because it is a third of `TenantRegistry::parse` and it answers a different question
+/// from the rest of it: everything else there validates one tenant's own fields, and this decides
+/// which people that tenant may be spoken to by.
+///
+/// # Two rules, and the second is the one that was missing
+///
+/// A pair may not repeat: a conversation-and-sender naming two contributors would attribute by
+/// ordering.
+///
+/// And one actor may not name two contributors **anywhere** in this tenant, however many rooms
+/// they are bound in. The pair is what authorizes, but an actor id is one person's channel
+/// account, and one person carrying two names inside one organization is the same ambiguity the
+/// cross-tenant rule in [`no_collision_with`] already refuses — there, resolved by whichever
+/// conversation they happened to use. Attribution is the entire product of a promotion; it must
+/// not be a property of the room.
+///
+/// One actor bound in several rooms to the **same** contributor stays legal, and has to: that is a
+/// person reachable in more than one conversation, which is the shape contributors were added to
+/// express.
+fn bindings(index: usize, t: &WireEntry) -> Result<Vec<ContributorBinding>, RegistryError> {
+    let required = |value: &str, field: &'static str| -> Result<(), RegistryError> {
+        if value.trim().is_empty() {
+            return Err(RegistryError::MissingField { index, field });
+        }
+        Ok(())
+    };
+    let own_channel = ChannelRef::new(t.channel.trim());
+    let mut contributors: Vec<ContributorBinding> = Vec::with_capacity(t.contributors.len());
+    for c in &t.contributors {
+        required(&c.actor, "contributors[].actor")?;
+        required(&c.contributor, "contributors[].contributor")?;
+        // An omitted channel is the tenant's own, so a registry written when a tenant meant one
+        // person keeps working unchanged. An empty string is a mistake rather than a default:
+        // someone meant to write a conversation id.
+        let channel = match present(c.channel.as_deref(), index, "contributors[].channel")? {
+            None => own_channel.clone(),
+            Some(channel) => ChannelRef::new(channel),
+        };
+        let actor = ActorRef::parse(c.actor.clone())
+            .map_err(|source| RegistryError::InvalidField { index, source })?;
+        let contributor = ContributorId::parse(c.contributor.clone())
+            .map_err(|source| RegistryError::InvalidField { index, source })?;
+        if let Some(prior) = contributors
+            .iter()
+            .find(|b| b.actor == actor && (b.channel == channel || b.contributor != contributor))
+        {
+            return Err(RegistryError::DuplicateActor {
+                slug: t.slug.trim().to_owned(),
+                first: prior.contributor.as_str().to_owned(),
+                second: contributor.as_str().to_owned(),
+            });
+        }
+        contributors.push(ContributorBinding { channel, actor, contributor });
+    }
+    Ok(contributors)
+}
+
+/// An optional field that may be absent but not blank.
+///
+/// The `Some("") => Err(MissingField)` arm was written out three times in `TenantRegistry::parse`,
+/// once per optional field. Absent means "take the default"; empty means somebody meant to write
+/// something and did not, and reading the second as the first is how a blank line becomes a
+/// default nobody chose.
+fn present<'a>(
+    value: Option<&'a str>,
+    index: usize,
+    field: &'static str,
+) -> Result<Option<&'a str>, RegistryError> {
+    match value.map(str::trim) {
+        Some("") => Err(RegistryError::MissingField { index, field }),
+        other => Ok(other),
+    }
+}
+
+/// Refuse an entry that collides with one already accepted.
+///
+/// # The three rules that are about *pairs* of tenants
+///
+/// Everything else `TenantRegistry::parse` checks is about one entry read in isolation. These
+/// three are not: each compares a candidate against what is already accepted, which is what lets
+/// the refusal name **both** sides. They were a third of that function's body, inline, after the
+/// per-entry checks and before the push.
+///
+/// - **A channel claimed twice.** Across every conversation a tenant answers on, not just its own:
+///   a tenant has one room per bound person, and a room claimed by two tenants would be served with
+///   one of their credentials by an accident of ordering.
+/// - **A slug claimed twice.**
+/// - **An actor bound twice** — on the actor alone, deliberately, not the `(actor, channel)` pair.
+///   The pair is what authorizes, but one person reachable in two organizations is an ambiguity
+///   about who they are, and resolving it by whichever conversation they happened to use is exactly
+///   the accident this refuses everywhere else. An actor bound twice gives a promotion two
+///   organizations and no way to choose between them.
+fn no_collision_with(accepted: &[TenantEntry], entry: &TenantEntry) -> Result<(), RegistryError> {
+    let mine = entry.channels();
+    if let Some((prior, channel)) = accepted.iter().find_map(|e| {
+        let theirs = e.channels();
+        mine.iter().find(|c| theirs.contains(c)).map(|c| (e, c))
+    }) {
+        return Err(RegistryError::DuplicateChannel {
+            channel: channel.as_str().to_owned(),
+            first: prior.slug.as_str().to_owned(),
+            second: entry.slug.as_str().to_owned(),
+        });
+    }
+    if accepted.iter().any(|e| e.slug == entry.slug) {
+        return Err(RegistryError::DuplicateSlug { slug: entry.slug.as_str().to_owned() });
+    }
+    if let Some(prior) = accepted.iter().find(|e| {
+        entry
+            .contributors
+            .iter()
+            .any(|b| e.contributors.iter().any(|theirs| theirs.actor == b.actor))
+    }) {
+        return Err(RegistryError::ActorInTwoTenants {
+            first: prior.slug.as_str().to_owned(),
+            second: entry.slug.as_str().to_owned(),
+        });
+    }
+    Ok(())
 }
 
 impl TenantRegistry {
@@ -277,6 +460,7 @@ impl TenantRegistry {
             };
             required(&t.slug, "slug")?;
             required(&t.channel, "channel")?;
+            required(&t.org, "org")?;
             required(&t.service, "service")?;
             required(&t.guidance, "guidance")?;
             required(&t.records_credential, "records_credential")?;
@@ -284,60 +468,14 @@ impl TenantRegistry {
 
             // Bindings are built before the entry so a malformed one refuses the set here,
             // beside every other field, rather than at the first `/share` months later.
-            let own_channel = ChannelRef::new(t.channel.trim());
-            let mut contributors: Vec<ContributorBinding> =
-                Vec::with_capacity(t.contributors.len());
-            for c in &t.contributors {
-                required(&c.actor, "contributors[].actor")?;
-                required(&c.contributor, "contributors[].contributor")?;
-                // An omitted channel is the tenant's own, so a registry written when a tenant
-                // meant one person keeps working unchanged. An empty string is a mistake rather
-                // than a default: someone meant to write a conversation id.
-                let channel = match c.channel.as_deref().map(str::trim) {
-                    None => own_channel.clone(),
-                    Some("") => {
-                        return Err(RegistryError::MissingField {
-                            index,
-                            field: "contributors[].channel",
-                        });
-                    }
-                    Some(channel) => ChannelRef::new(channel),
-                };
-                let actor = ActorRef::parse(c.actor.clone())
-                    .map_err(|source| RegistryError::InvalidField { index, source })?;
-                let contributor = ContributorId::parse(c.contributor.clone())
-                    .map_err(|source| RegistryError::InvalidField { index, source })?;
-                // Two rules, and the second is the one that was missing.
-                //
-                // A pair may not repeat: a conversation-and-sender naming two contributors would
-                // attribute by ordering.
-                //
-                // And one actor may not name two contributors ANYWHERE in this tenant, however
-                // many rooms they are bound in. The pair is what authorizes, but an actor id is
-                // one person's channel account, and one person carrying two names inside one
-                // organization is the same ambiguity the cross-tenant rule already refuses —
-                // there, resolved by whichever conversation they happened to use. Attribution is
-                // the entire product of a promotion; it must not be a property of the room.
-                //
-                // One actor bound in several rooms to the SAME contributor stays legal, and has
-                // to: that is a person reachable in more than one conversation, which is the
-                // shape contributors were added to express.
-                if let Some(prior) = contributors.iter().find(|b| {
-                    b.actor == actor && (b.channel == channel || b.contributor != contributor)
-                }) {
-                    return Err(RegistryError::DuplicateActor {
-                        slug: t.slug.trim().to_owned(),
-                        first: prior.contributor.as_str().to_owned(),
-                        second: contributor.as_str().to_owned(),
-                    });
-                }
-                contributors.push(ContributorBinding { channel, actor, contributor });
-            }
+            let contributors = bindings(index, t)?;
 
             let entry = TenantEntry {
                 slug: Slug::parse(t.slug.clone())
                     .map_err(|source| RegistryError::InvalidField { index, source })?,
                 channel: ChannelRef::new(t.channel.trim()),
+                org: ExpectedOrg::parse(t.org.trim())
+                    .map_err(|source| RegistryError::InvalidField { index, source })?,
                 service: ServiceId::parse(t.service.clone())
                     .map_err(|source| RegistryError::InvalidField { index, source })?,
                 guidance: GuidanceRef::new(t.guidance.trim()),
@@ -351,29 +489,16 @@ impl TenantRegistry {
                 ),
                 // An empty string is a mistake rather than a direct chat: someone meant to write
                 // a handle. Refusing it beats answering every message in a group.
-                addressing: match t.address.as_deref().map(str::trim) {
+                addressing: match present(t.address.as_deref(), index, "address")? {
                     None => Addressing::Always,
-                    Some("") => {
-                        return Err(RegistryError::MissingField { index, field: "address" });
-                    }
                     Some(handle) => Addressing::Mention(handle.to_owned()),
                 },
                 contributors,
                 // Absent is the default and stays the default: an existing registry gains no
                 // append authority by being read by a newer binary. An empty string is a
                 // mistake rather than an absence — someone meant to write a handle.
-                append: match t.append_credential.as_deref().map(str::trim) {
-                    None => None,
-                    Some("") => {
-                        return Err(RegistryError::MissingField {
-                            index,
-                            field: "append_credential",
-                        });
-                    }
-                    Some(handle) => {
-                        Some(CredentialRef::new(CredentialPurpose::RecordAppend, handle))
-                    }
-                },
+                append: present(t.append_credential.as_deref(), index, "append_credential")?
+                    .map(|handle| CredentialRef::new(CredentialPurpose::RecordAppend, handle)),
             };
 
             // Collisions are checked against what is already accepted, so the error can name both
@@ -383,39 +508,7 @@ impl TenantRegistry {
             // one room per bound person, and a room claimed by two tenants would be served with
             // one of their credentials by an accident of ordering — the same defect the
             // single-channel check has always refused.
-            let mine = entry.channels();
-            if let Some((prior, channel)) = entries.iter().find_map(|e| {
-                let theirs = e.channels();
-                mine.iter().find(|c| theirs.contains(c)).map(|c| (e, c))
-            }) {
-                return Err(RegistryError::DuplicateChannel {
-                    channel: channel.as_str().to_owned(),
-                    first: prior.slug.as_str().to_owned(),
-                    second: entry.slug.as_str().to_owned(),
-                });
-            }
-            if entries.iter().any(|e| e.slug == entry.slug) {
-                return Err(RegistryError::DuplicateSlug { slug: entry.slug.as_str().to_owned() });
-            }
-            // Cross-tenant, and checked against what is already accepted for the same reason the
-            // channel collision is: the error can name both sides. An actor bound twice gives a
-            // promotion two organizations and no way to choose between them.
-            //
-            // On the ACTOR alone, deliberately — not the pair. The pair is what authorizes, but
-            // one person reachable in two organizations is an ambiguity about who they are, and
-            // resolving it by whichever conversation they happened to use is exactly the accident
-            // this refuses everywhere else.
-            if let Some(prior) = entries.iter().find(|e| {
-                entry
-                    .contributors
-                    .iter()
-                    .any(|b| e.contributors.iter().any(|theirs| theirs.actor == b.actor))
-            }) {
-                return Err(RegistryError::ActorInTwoTenants {
-                    first: prior.slug.as_str().to_owned(),
-                    second: entry.slug.as_str().to_owned(),
-                });
-            }
+            no_collision_with(&entries, &entry)?;
             entries.push(entry);
         }
         Ok(Self { entries })
@@ -460,7 +553,7 @@ mod tests {
     /// registry of one, the operator would be serving half of who they think they are.
     fn good(slug: &str, channel: &str) -> String {
         format!(
-            r#"{{"slug":"{slug}","channel":"{channel}","service":"account-analysis",
+            r#"{{"slug":"{slug}","channel":"{channel}","org":"{slug}","service":"account-analysis",
                 "guidance":"/etc/ironworks/{slug}.guidance.md",
                 "records_credential":"env:{slug}_RECORDS","runtime_credential":"env:{slug}_RUNTIME"}}"#
         )
@@ -486,6 +579,32 @@ mod tests {
             r.tenant(&Slug::parse("acme").unwrap()).map(|t| t.guidance().as_str()),
             Some("/etc/ironworks/acme.guidance.md")
         );
+    }
+
+    #[test]
+    fn an_unknown_top_level_field_refuses_the_whole_registry_without_echoing_its_value() {
+        let text = format!(
+            r#"{{"tenants":[{}],"tenantz":"super-secret-top-level-value"}}"#,
+            good("acme", "-1001")
+        );
+        let err = TenantRegistry::parse(&text).unwrap_err();
+        assert!(matches!(err, RegistryError::Malformed(_)), "{err}");
+        let diagnostic = err.to_string();
+        assert!(diagnostic.contains("tenantz"), "{diagnostic}");
+        assert!(!diagnostic.contains("super-secret-top-level-value"), "{diagnostic}");
+    }
+
+    #[test]
+    fn an_unknown_entry_field_refuses_a_valid_entry_beside_it_without_echoing_the_value() {
+        let unknown = good("globex", "-1002").replace(
+            r#""slug":"globex""#,
+            r#""slug":"globex","model_policy":"super-secret-entry-value""#,
+        );
+        let err = TenantRegistry::parse(&registry(&[good("acme", "-1001"), unknown])).unwrap_err();
+        assert!(matches!(err, RegistryError::Malformed(_)), "{err}");
+        let diagnostic = err.to_string();
+        assert!(diagnostic.contains("model_policy"), "{diagnostic}");
+        assert!(!diagnostic.contains("super-secret-entry-value"), "{diagnostic}");
     }
 
     #[test]
@@ -518,11 +637,23 @@ mod tests {
 
     #[test]
     fn every_required_field_refuses_the_whole_registry_when_absent() {
-        for field in
-            ["slug", "channel", "service", "guidance", "records_credential", "runtime_credential"]
-        {
-            let broken = good("globex", "-1002")
-                .replace(&format!(r#""{field}":"#), &format!(r#""{field}":"" ,"_{field}":"#));
+        for field in [
+            "slug",
+            "channel",
+            "org",
+            "service",
+            "guidance",
+            "records_credential",
+            "runtime_credential",
+        ] {
+            let mut broken: serde_json::Value =
+                serde_json::from_str(&good("globex", "-1002")).expect("the good entry is JSON");
+            broken
+                .as_object_mut()
+                .expect("the good entry is an object")
+                .remove(field)
+                .expect("the required field is present in the good entry");
+            let broken = serde_json::to_string(&broken).expect("the doctored entry is JSON");
             let err = TenantRegistry::parse(&registry(&[good("acme", "-1001"), broken]))
                 .unwrap_err_or_panic(field);
             assert!(
@@ -530,6 +661,35 @@ mod tests {
                 "empty {field} must refuse the set, got {err}"
             );
         }
+    }
+
+    /// The expected org is an expectation, and it must be able to disagree.
+    ///
+    /// Both directions, because a comparison that can only ever agree proves nothing: an
+    /// instrument that cannot report a difference and one that invents a match are the same
+    /// defect (§K-8). The binary is what refuses on the disagreement; what is asserted here is
+    /// that the value can express one at all.
+    #[test]
+    fn a_recorded_org_matches_only_the_org_it_names() {
+        let r = TenantRegistry::parse(&registry(&[good("acme", "-1001")])).unwrap();
+        let recorded = r.entries()[0].org();
+        assert_eq!(recorded.as_str(), "acme");
+        assert!(recorded.matches(&OrgId::parse("acme").unwrap()), "the org it names must match");
+        assert!(
+            !recorded.matches(&OrgId::parse("globex").unwrap()),
+            "a different org must not match — otherwise the check cannot refuse anything"
+        );
+    }
+
+    /// An expectation the record store could never return is a malformed field, not a mismatch.
+    ///
+    /// It parses through `OrgId`'s own rules for exactly this reason: caught once at load, naming
+    /// the row, rather than refusing every turn forever with a comparison that cannot succeed.
+    #[test]
+    fn an_org_that_is_not_a_well_formed_id_refuses_the_whole_registry() {
+        let broken = good("globex", "-1002").replace(r#""org":"globex""#, r#""org":"Globex Inc""#);
+        let err = TenantRegistry::parse(&registry(&[good("acme", "-1001"), broken])).unwrap_err();
+        assert!(matches!(err, RegistryError::InvalidField { index: 1, .. }), "{err}");
     }
 
     #[test]
@@ -711,6 +871,25 @@ mod tests {
         );
         // The negative control: an actor nobody wrote down is nobody, not the first entry.
         assert_eq!(t.contributor(&room, &ActorRef::parse("999999999").unwrap()), None);
+    }
+
+    #[test]
+    fn an_unknown_contributor_field_refuses_the_whole_registry_without_echoing_its_value() {
+        let valid = with_contributors("globex", "-1002", &[("713300284", "bob")]);
+        let accepted = TenantRegistry::parse(&registry(std::slice::from_ref(&valid)))
+            .expect("a non-empty contributor binding is valid without the unknown field");
+        assert_eq!(accepted.entries()[0].contributors().len(), 1, "positive control");
+
+        let unknown = valid.replace(
+            r#""actor":"713300284""#,
+            r#""actor":"713300284","display_name":"super-secret-contributor-value""#,
+        );
+        let err = TenantRegistry::parse(&registry(&[good("acme", "-1001"), unknown]))
+            .expect_err("one malformed contributor must refuse the whole registry");
+        assert!(matches!(err, RegistryError::Malformed(_)), "{err}");
+        let diagnostic = err.to_string();
+        assert!(diagnostic.contains("display_name"), "{diagnostic}");
+        assert!(!diagnostic.contains("super-secret-contributor-value"), "{diagnostic}");
     }
 
     #[test]
